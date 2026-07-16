@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROS 2 Humble 安装记录 · Orin Nano Super / JetPack 6.2.2</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#22314e; --accent2:#2c6db5; --accent-dk:#1d5a99;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#eef5fb; --ok-line:#2c6db5; --ok-fg:#1d4e7a;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#141618; --fg:#e8e8e3; --muted:#9a9a92; --line:#2c2f33;
+      --card:#1c1f22; --accent:#7aa2d6; --accent2:#5b9bd5; --accent-dk:#8fb8e6;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#132131; --ok-line:#2c6db5; --ok-fg:#8fc0f0; --code-bg:#23262a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent2);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:30px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent2)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent2);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  .box .en-i{font-style:normal;opacity:.75;font-size:.88em}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .st{font:600 13px var(--mono);fill:#fff}
+  .sl{font:12px -apple-system,sans-serif;fill:var(--muted)}
+  a{color:var(--accent-dk)}
+  code.ok-i{color:#2c6db5}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .kv{color:var(--muted);font-size:13.5px}
+  .pill{display:inline-block;font:600 12px var(--mono);padding:1px 8px;border-radius:20px;background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>ROS 2 Humble 安装记录
+    <span class="en">Installing ROS 2 Humble Desktop on Jetson Orin Nano Super (JetPack 6.2.2)</span>
+  </h1>
+  <p class="sub">目标：Orin Nano 8GB @ 192.168.3.188 ｜ Ubuntu 22.04 / L4T 36.5 ｜ ROS 2 <span class="pill">humble 0.10.0</span> ｜ 日期：2026-07-16</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li>Ubuntu 22.04 → 官方对应 <strong>ROS 2 Humble</strong>（Tier-1，支持到 2027），装 <code>ros-humble-desktop</code>（带 RViz2）。</li>
+    <li><strong>国内网络必须换源</strong>：Ubuntu <code>ports.ubuntu.com</code> 从国内连不上 → 换清华 TUNA 镜像；ROS 源同样走 TUNA。</li>
+    <li>装 ROS 前先做系统安全更新（新刷板子落后半年补丁），但 <strong><code>apt-mark hold</code> 锁死 nvidia-l4t 包</strong>，别让升级动了刷好的 bootloader/内核。</li>
+    <li>NVIDIA 源（<code>repo.download.nvidia.cn</code>）提供 CUDA 加速的 <code>libopencv-dev</code>，ROS 会自动用上。</li>
+    <li>验收标准不是"装没装"，而是 <strong>talker/listener 能真通信</strong> + <code>ros2 node/topic</code> 能内省。</li>
+  </ul>
+</div>
+
+<h2>1. 目标环境<span class="en">Target baseline</span></h2>
+<table>
+  <tr><th>项</th><th>值</th></tr>
+  <tr><td>板卡</td><td>Jetson Orin Nano 8GB（SKU 3767-0005）</td></tr>
+  <tr><td>系统</td><td>Ubuntu 22.04.5 / L4T 36.5（JetPack 6.2.2）/ 内核 5.15.185-tegra</td></tr>
+  <tr><td>ROS 2</td><td>Humble Hawksbill，<code>ros-humble-desktop</code> 0.10.0</td></tr>
+  <tr><td>DDS（RMW）</td><td><code>rmw_fastrtps_cpp</code>（默认，eProsima Fast DDS）</td></tr>
+  <tr><td>访问方式</td><td>SSH 免密（本机公钥已注入）<code>ssh jatson@192.168.3.188</code></td></tr>
+</table>
+
+<h2>2. 安装流程<span class="en">The pipeline</span></h2>
+<figure class="fig">
+<svg viewBox="0 0 900 300" role="img" aria-label="ROS 2 安装流程图">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#9a9a92"/>
+    </marker>
+    <style>
+      .a{fill:#2c6db5} .b{fill:#8a6d1f} .c{fill:#3d7a4a} .d{fill:#7a3d6b}
+      .ln{stroke:#9a9a92;stroke-width:1.8;fill:none;marker-end:url(#ar)}
+    </style>
+  </defs>
+  <rect x="20"  y="60" width="150" height="72" rx="8" class="b"/>
+  <text x="95" y="88" class="st" text-anchor="middle">① 修网络</text>
+  <text x="95" y="108" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">ports→TUNA 镜像</text>
+  <text x="95" y="122" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">+ ForceIPv4</text>
+
+  <rect x="200" y="60" width="150" height="72" rx="8" class="a"/>
+  <text x="275" y="88" class="st" text-anchor="middle">② 安全更新</text>
+  <text x="275" y="108" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">302 security pkgs</text>
+  <text x="275" y="122" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">hold nvidia-l4t</text>
+
+  <rect x="380" y="60" width="150" height="72" rx="8" class="c"/>
+  <text x="455" y="88" class="st" text-anchor="middle">③ 加 ROS 源</text>
+  <text x="455" y="108" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">GPG key + repo</text>
+  <text x="455" y="122" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">TUNA ros2</text>
+
+  <rect x="560" y="60" width="150" height="72" rx="8" class="c"/>
+  <text x="635" y="84" class="st" text-anchor="middle">④ apt install</text>
+  <text x="635" y="102" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">ros-humble-desktop</text>
+  <text x="635" y="118" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">colcon / rosdep</text>
+
+  <rect x="740" y="60" width="140" height="72" rx="8" class="d"/>
+  <text x="810" y="84" class="st" text-anchor="middle">⑤ 验证</text>
+  <text x="810" y="102" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">talker/listener</text>
+  <text x="810" y="118" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">node/topic</text>
+
+  <path d="M170,96 L198,96" class="ln"/>
+  <path d="M350,96 L378,96" class="ln"/>
+  <path d="M530,96 L558,96" class="ln"/>
+  <path d="M710,96 L738,96" class="ln"/>
+
+  <text x="450" y="180" class="sl" text-anchor="middle" style="font-size:12.5px">大安装步骤（②④）脱离 SSH 会话跑（setsid nohup + 日志），SSH 掉线也不打断 apt</text>
+  <text x="450" y="202" class="sl" text-anchor="middle" style="font-size:11.5px;opacity:.8">Long apt steps run detached — a dropped SSH never interrupts a package install</text>
+
+  <rect x="150" y="232" width="600" height="46" rx="8" fill="none" stroke="#9a9a92" stroke-dasharray="5 4"/>
+  <text x="450" y="253" class="sl" text-anchor="middle" style="font-size:12px">② 之后重启一次（glibc/systemd 更新生效）；内核 nvidia 提供、已 hold → 不变</text>
+  <text x="450" y="270" class="sl" text-anchor="middle" style="font-size:11px;opacity:.8">reboot after ② to activate updated libs; nvidia kernel held, untouched</text>
+</svg>
+<figcaption>图 1 · 五步安装管线，长任务脱离会话执行<br><span style="opacity:.8">Fig 1 · Five-stage pipeline; heavy steps detached from the SSH session</span></figcaption>
+</figure>
+
+<h2>3. 完整步骤<span class="en">Step by step</span></h2>
+
+<h3>① 修网络：换国内镜像 <span class="kv">（不做这步，apt 直接超时）</span></h3>
+<div class="box err">
+  <strong>❌ 坑 1：国内连不上 <code>ports.ubuntu.com</code> <span class="en-i">— Ubuntu ARM mirror unreachable from CN</span></strong>
+  Orin 用的是 arm64，Ubuntu ARM 包在 <code>ports.ubuntu.com</code>（非 x86 的 archive.ubuntu.com）。该域名国内 IPv4 超时、IPv6 直接 <code>Network unreachable</code>。板子能 ping 通 <code>8.8.8.8</code>（说明有外网），单单这个源连不上。
+</div>
+<pre><code># 只改 ports.ubuntu.com，保留 nvidia-l4t 源不动，留备份
+sudo cp -n /etc/apt/sources.list /etc/apt/sources.list.bak
+sudo sed -i 's|http://ports.ubuntu.com/ubuntu-ports|https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports|g' \
+     /etc/apt/sources.list
+
+# 强制 apt 走 IPv4（板子 IPv6 不通）
+echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
+
+sudo apt-get update      # TUNA ~5 MB/s，秒级完成</code></pre>
+<p class="kv">备选镜像（都实测可达 443）：<code>mirrors.ustc.edu.cn</code>、<code>mirrors.aliyun.com</code>、<code>repo.huaweicloud.com</code>。</p>
+
+<h3>② 系统安全更新（装 ROS 前的卫生）</h3>
+<div class="box warn">
+  <strong>⚠ 坑 2：升级前先 hold 住 nvidia-l4t 包 <span class="en-i">— protect the flashed bootloader/kernel</span></strong>
+  新刷的板子内核/bootloader 来自 NVIDIA 源。虽然本次 334 个可升级项里<strong>不含</strong> nvidia 包，仍先 <code>apt-mark hold</code> 上保险，防止依赖链意外拉动它们。
+</div>
+<pre><code># 锁死所有 nvidia-l4t / tegra / jetpack 包
+sudo apt-mark hold $(dpkg -l | awk '/nvidia-l4t|nvidia-tegra|nvidia-jetpack/{print $2}')
+
+# 应用更新（noninteractive + 保留旧配置，避免交互卡住 SSH）
+sudo DEBIAN_FRONTEND=noninteractive apt-get -y \
+     -o Dpkg::Options::=--force-confold upgrade
+
+sudo reboot              # glibc/systemd 更新，重启生效</code></pre>
+<p class="kv">本次结果：334 → 2 可升级（剩 2 个是 phased 灰度更新），302 个安全补丁应用，<code>ca-certificates</code> 更新（新导入 16 张根证书）。<code>network-manager.service not found</code> 报错<strong>无害</strong> —— 板子用 systemd-networkd，本就没装 NetworkManager。</p>
+
+<h3>③ 加 ROS 2 源</h3>
+<div class="box err">
+  <strong>❌ 坑 3：<code>echo ... | sudo -S tee file</code> 会写空文件 <span class="en-i">— stdin collision</span></strong>
+  用"密码从 stdin 喂 sudo"的写法时，<code>echo "内容" | sudo -S tee 文件</code> 里 <code>sudo -S</code> 把 stdin 当密码读走了，管道进来的<strong>内容全丢</strong>，源文件写成空的、apt 看不到 ROS 源。<br>
+  <strong style="display:inline;margin:0">正解：</strong>内容先写到用户可写的 <code>/tmp</code>，再 <code>sudo cp</code> 到位，避开 stdin 冲突。
+</div>
+<pre><code># GPG key（dearmor 成二进制 keyring）
+curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /tmp/ros.key
+sudo gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg /tmp/ros.key
+
+# 源文件：先写 /tmp 再 cp（走 TUNA 的 ros2 镜像）
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+https://mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu jammy main" > /tmp/ros2.list
+sudo cp /tmp/ros2.list /etc/apt/sources.list.d/ros2.list
+sudo apt-get update</code></pre>
+
+<h3>④ 安装 ROS 2 Humble desktop</h3>
+<pre><code>sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+     ros-humble-desktop \
+     ros-dev-tools \
+     python3-colcon-common-extensions \
+     python3-rosdep
+
+# rosdep 初始化
+sudo rosdep init
+rosdep update
+
+# 环境自动加载
+cat &gt;&gt; ~/.bashrc &lt;&lt;'EOF'
+
+# ROS 2 Humble
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
+EOF</code></pre>
+<div class="box ok">
+  <strong>✓ 加成：CUDA 加速的 OpenCV <span class="en-i">— comes from the NVIDIA repo, not Ubuntu</span></strong>
+  安装日志里 <code>libopencv-dev</code> 从 <code>repo.download.nvidia.cn/jetson r36.5</code> 拉取，而非 Ubuntu 源 —— ROS 视觉相关包会自动用上 Jetson 的硬件加速 OpenCV。占用 1.67 GB，装后根分区 12G / 227G（6%）。
+</div>
+
+<h3>⑤ 验证（真通信，不只是装上）</h3>
+<pre><code>source /opt/ros/humble/setup.bash
+
+# 终端 A：发布者
+ros2 run demo_nodes_cpp talker
+# 终端 B：订阅者 —— 应打印 "I heard: [Hello World: N]"
+ros2 run demo_nodes_py listener
+
+# 内省
+ros2 node list      # /talker  /listener
+ros2 topic list     # /chatter /rosout /parameter_events
+ros2 topic hz /chatter</code></pre>
+<div class="box ok">
+  <strong>✓ 本次验收结果</strong>
+  talker 发布 7 条、listener 收到 5 条（差值 = listener 晚 2 秒启动，正常）；<code>/chatter</code> 频率 ~1 Hz；<code>ROS_DISTRO=humble</code>、<code>rmw_fastrtps_cpp</code>、283 个包在 <code>/opt/ros/humble/share</code>。<strong>DDS pub/sub 全通。</strong>
+</div>
+<div class="box warn">
+  <strong>⚠ 坑 4：别用 <code>pkill listener</code> 清 ROS 节点 <span class="en-i">— it kills sshd</span></strong>
+  <code>sshd</code> 的监听进程在 <code>ps</code> 里显示为 <code>sshd: ... [listener]</code>，<code>pkill -f listener</code> / <code>pkill listener</code> 会误杀它，直接断掉你自己的 SSH（exit 255）。清 demo 节点请用精确名：<code>pkill -f demo_nodes_cpp</code>。另外 <code>ros2 run</code> 会 fork 子进程，<code>kill</code> 父进程可能漏掉节点子进程，也用 <code>pkill -f</code> 精确匹配节点可执行名。
+</div>
+
+<h2>4. 下一步<span class="en">Next</span></h2>
+<ul>
+  <li>建工作区：<code>mkdir -p ~/ros2_ws/src &amp;&amp; cd ~/ros2_ws &amp;&amp; colcon build</code></li>
+  <li>SO-101 机械臂 / 相机 / IMU 的驱动包，用 <code>rosdep install --from-paths src -y</code> 解依赖</li>
+  <li>多机通信（板子 ↔ 开发机）：同一 <code>ROS_DOMAIN_ID</code> + 同网段即可，Fast DDS 默认多播发现</li>
+</ul>
+
+<h2>5. 参考<span class="en">References</span></h2>
+<ul>
+  <li><a href="https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html">ROS 2 Humble · Ubuntu (deb) 官方安装</a></li>
+  <li><a href="https://mirrors.tuna.tsinghua.edu.cn/help/ubuntu-ports/">清华 TUNA · ubuntu-ports 镜像帮助</a></li>
+  <li><a href="https://mirrors.tuna.tsinghua.edu.cn/help/ros2/">清华 TUNA · ROS 2 镜像帮助</a></li>
+  <li>同目录：<code>orin-nano-super-install.html</code> —— 刷机（JetPack 6.2.2 / NVMe）记录</li>
+</ul>
+
+<footer>
+  ROS 2 Humble 安装记录 · 2026-07-16 · Orin Nano Super @ 192.168.3.188<br>
+  <span style="opacity:.8">前置：见刷机文档 <code>docs/orin-nano-super-install.html</code>。SSH 免密已配置（本机公钥注入板子 <code>~/.ssh/authorized_keys</code>）。</span>
+</footer>
+
+</div>
+</body>
+</html>
