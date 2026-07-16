@@ -1,0 +1,8 @@
+# L4T downloads (2.6GB) — re-fetch from developer.nvidia.com, see docs/
+download/
+
+# Extracted BSP working tree (tens of GB, root-owned rootfs)
+Linux_for_Tegra/
+
+# flash run log
+flash.log

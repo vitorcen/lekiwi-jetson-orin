@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jetson Orin Nano Super 刷机安装记录 · JetPack 6.2.2 / NVMe</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  .box .en-i{font-style:normal;opacity:.75;font-size:.88em}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .st{font:600 13px var(--mono);fill:#fff}
+  .sl{font:12px -apple-system,sans-serif;fill:var(--muted)}
+  a{color:var(--accent-dk)}
+  @media (prefers-color-scheme:dark){a{color:var(--accent)}}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .kv{color:var(--muted);font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Jetson Orin Nano Super 刷机安装记录
+    <span class="en">Flashing Jetson Orin Nano 8GB to JetPack 6.2.2 + NVMe rootfs</span>
+  </h1>
+  <p class="sub">目标板：Orin Nano 8GB devkit ｜ 系统盘：256GB M.2 NVMe ｜ 主机：Ubuntu 24.04 x86_64 ｜ 日期：2026-07-16</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li>刷 <strong>Jetson Linux 36.5</strong>（= JetPack 6.2.2，Ubuntu 22.04 / 内核 5.15），<strong>不是</strong>最新的 JetPack 7.2 —— 生态成熟度优先。</li>
+    <li>board target 用 <code>jetson-orin-nano-devkit-<strong>super</strong></code>，走 Super 的 DTB/BPMP。</li>
+    <li>一条 <code>l4t_initrd_flash.sh</code> 同时刷 QSPI bootloader + NVMe 完整系统。</li>
+    <li>主机必装 <code>nfs-kernel-server</code>，否则直接 exit 110 —— 官方依赖列表里没写。</li>
+    <li>67 TOPS 的 Super 模式靠开机后 <code>nvpmodel -m 2</code> 打开，<strong>不是</strong>靠 <code>-super-maxn</code> 配置。</li>
+  </ul>
+</div>
+
+<h2>1. 为什么是 JetPack 6.2.2 而不是 7.2<span class="en">Why 6.2.2, not the newest 7.2</span></h2>
+
+<table>
+  <tr><th>维度</th><th>JetPack 6.2.2（选用 ✓）</th><th>JetPack 7.2（最新）</th></tr>
+  <tr><td>Jetson Linux</td><td>36.5</td><td>39.2</td></tr>
+  <tr><td>Ubuntu / 内核</td><td>22.04 / 5.15</td><td>24.04 / 6.8</td></tr>
+  <tr><td>CUDA</td><td>12.x</td><td>13.2</td></tr>
+  <tr><td>生态<span class="kv"> / ecosystem</span></td><td>NGC 容器、DeepStream、ROS 2 Humble、jetson-containers 主力目标</td><td>第三方轮子/容器对 CUDA 13 + 24.04 适配仍在追赶，可能要自行编译</td></tr>
+</table>
+
+<p>本机板子开机 UEFI 显示 <strong>36.4.3</strong>，与 36.5 同代固件 —— 不存在 JetPack 5.x → 6.x 那道必须先升 QSPI 的坎，可直接刷。</p>
+
+<h2>2. 整体流程<span class="en">The flashing pipeline</span></h2>
+
+<figure class="fig">
+<svg viewBox="0 0 900 400" role="img" aria-label="刷机流程图">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#9a9a92"/>
+    </marker>
+    <style>
+      .bx{fill:#76b900} .bx2{fill:#4a7a99} .bx3{fill:#8a6d1f}
+      .ln{stroke:#9a9a92;stroke-width:1.8;fill:none;marker-end:url(#ar)}
+      .fr{fill:none;stroke:#9a9a92;stroke-width:1.3;stroke-dasharray:5 4;rx:8}
+    </style>
+  </defs>
+
+  <!-- host side -->
+  <rect x="14" y="14" width="470" height="292" class="fr" rx="8"/>
+  <text x="28" y="36" class="sl" style="font-weight:600">主机 HOST · Ubuntu 24.04 x86_64</text>
+
+  <rect x="36" y="52" width="180" height="44" rx="6" class="bx"/>
+  <text x="126" y="72" class="st" text-anchor="middle">下载 BSP + rootfs</text>
+  <text x="126" y="88" class="st" text-anchor="middle" style="font-size:11px;opacity:.85">2.6 GB</text>
+
+  <rect x="36" y="122" width="180" height="44" rx="6" class="bx"/>
+  <text x="126" y="142" class="st" text-anchor="middle">tar xf BSP</text>
+  <text x="126" y="158" class="st" text-anchor="middle" style="font-size:11px;opacity:.85">Linux_for_Tegra/</text>
+
+  <rect x="36" y="192" width="180" height="44" rx="6" class="bx"/>
+  <text x="126" y="212" class="st" text-anchor="middle">sudo tar xpf rootfs</text>
+  <text x="126" y="228" class="st" text-anchor="middle" style="font-size:11px;opacity:.85">保留 uid/权限</text>
+
+  <rect x="36" y="262" width="180" height="34" rx="6" class="bx"/>
+  <text x="126" y="284" class="st" text-anchor="middle">apply_binaries.sh</text>
+
+  <rect x="268" y="122" width="196" height="114" rx="6" class="bx2"/>
+  <text x="366" y="152" class="st" text-anchor="middle">l4t_initrd_flash.sh</text>
+  <text x="366" y="174" class="st" text-anchor="middle" style="font-size:11px;opacity:.9">board: ...-devkit-super</text>
+  <text x="366" y="192" class="st" text-anchor="middle" style="font-size:11px;opacity:.9">--external-device nvme0n1p1</text>
+  <text x="366" y="210" class="st" text-anchor="middle" style="font-size:11px;opacity:.9">rootdev: internal</text>
+  <text x="366" y="228" class="st" text-anchor="middle" style="font-size:11px;opacity:.9">--network usb0 (NFS)</text>
+
+  <path d="M126,96 L126,120" class="ln"/>
+  <path d="M126,166 L126,190" class="ln"/>
+  <path d="M126,236 L126,260" class="ln"/>
+  <path d="M216,144 L266,144" class="ln"/>
+  <path d="M216,279 L242,279 L242,200 L266,200" class="ln"/>
+
+  <!-- usb -->
+  <path d="M464,180 L560,180" class="ln" style="stroke:#76b900;stroke-width:2.4"/>
+  <text x="512" y="171" class="sl" text-anchor="middle" style="font-size:11px">USB-C</text>
+  <text x="512" y="199" class="sl" text-anchor="middle" style="font-size:11px">recovery 0955:7523</text>
+
+  <!-- board side -->
+  <rect x="566" y="14" width="320" height="292" class="fr" rx="8"/>
+  <text x="580" y="36" class="sl" style="font-weight:600">目标板 TARGET · Orin Nano 8GB</text>
+
+  <rect x="596" y="62" width="260" height="52" rx="6" class="bx3"/>
+  <text x="726" y="84" class="st" text-anchor="middle">QSPI (板载 flash)</text>
+  <text x="726" y="102" class="st" text-anchor="middle" style="font-size:11px;opacity:.9">bootloader / UEFI ← -p 参数</text>
+
+  <rect x="596" y="140" width="260" height="146" rx="6" class="bx"/>
+  <text x="726" y="164" class="st" text-anchor="middle">256GB M.2 NVMe</text>
+  <text x="726" y="188" class="st" text-anchor="middle" style="font-size:11.5px;opacity:.9">esp · A_kernel · A_kernel-dtb</text>
+  <text x="726" y="208" class="st" text-anchor="middle" style="font-size:11.5px;opacity:.9">B_kernel · recovery · UDA</text>
+  <text x="726" y="234" class="st" text-anchor="middle" style="font-size:11.5px;opacity:.9">APP = 完整 rootfs</text>
+  <text x="726" y="262" class="st" text-anchor="middle" style="font-size:11px;opacity:.75">flash_l4t_t234_nvme.xml</text>
+
+  <path d="M726,114 L726,138" class="ln" style="stroke:#9a9a92"/>
+  <text x="742" y="132" class="sl" style="font-size:10.5px">boot →</text>
+
+  <text x="450" y="336" class="sl" text-anchor="middle" style="font-size:12.5px">刷完自动重启 → 首次开机 oem-config 建账号 → nvpmodel -m 2 开启 Super (67 TOPS)</text>
+  <text x="450" y="358" class="sl" text-anchor="middle" style="font-size:11.5px;opacity:.8">After flash: reboot → oem-config → enable MAXN_SUPER</text>
+</svg>
+<figcaption>图 1 · 主机构建镜像并经 USB-C recovery 通道写入 QSPI 与 NVMe<br><span style="opacity:.8">Fig 1 · Host builds images, writes QSPI bootloader + full NVMe system over USB-C recovery</span></figcaption>
+</figure>
+
+<h2>3. 完整步骤<span class="en">Step by step</span></h2>
+
+<h3>3.0 前置检查</h3>
+<p>板子进 recovery 模式（按住 FC REC 键再上电），主机确认：</p>
+<pre><code>lsusb | grep -i nvidia
+# → Bus 001 Device 0xx: ID 0955:7523 NVIDIA Corp. APX   ← 必须看到这个</code></pre>
+
+<div class="box warn">
+  <strong>⚠ Type-C 线材是最常见的失败源 <span class="en-i">— cable quality matters</span></strong>
+  initrd flash 全程跑 USB + NFS，掉一次线就得从头再来。必须用能跑数据的线，不是充电线。
+</div>
+
+<h3>3.1 主机依赖</h3>
+<pre><code>sudo apt-get install -y qemu-user-static lbzip2 abootimg \
+     device-tree-compiler nfs-kernel-server</code></pre>
+
+<div class="box err">
+  <strong>❌ 坑 1：nfs-kernel-server 缺失直接 exit 110 <span class="en-i">— the undocumented dependency</span></strong>
+  <code>ERROR nfs-kernel-server not found!</code> —— 官方文档的依赖列表里没提它，但 <code>--network usb0</code> 模式要靠 NFS 把 rootfs 喂给板子上的 initrd。装上即可。
+</div>
+
+<h3>3.2 下载并展开</h3>
+<pre><code>L4T=https://developer.nvidia.com/downloads/embedded/L4T/r36_Release_v5.0/release
+curl -L -O $L4T/Jetson_Linux_R36.5.0_aarch64.tbz2                        #  750 MB
+curl -L -O $L4T/Tegra_Linux_Sample-Root-Filesystem_R36.5.0_aarch64.tbz2  # 1.8 GB
+
+tar xf Jetson_Linux_R36.5.0_aarch64.tbz2                    # 普通用户即可
+cd Linux_for_Tegra
+sudo tar -I lbzip2 -xpf ../Tegra_Linux_Sample-Root-Filesystem_R36.5.0_aarch64.tbz2 -C rootfs/
+sudo ./apply_binaries.sh</code></pre>
+<p class="kv">rootfs 必须用 <code>sudo</code> + <code>-p</code> 解压：要保留 root 属主与 setuid 位。普通用户解出来的 rootfs 刷进去是坏的。校验：<code>sudo stat -c '%U:%G %a' rootfs/usr/bin/sudo</code> 应为 <code>root:root 4755</code>。</p>
+
+<h3>3.3 刷机</h3>
+<pre><code>sudo ./tools/kernel_flash/l4t_initrd_flash.sh \
+  --external-device nvme0n1p1 \
+  -c tools/kernel_flash/flash_l4t_t234_nvme.xml \
+  -p "-c bootloader/generic/cfg/flash_t234_qspi.xml" \
+  --showlogs --network usb0 \
+  jetson-orin-nano-devkit-super internal</code></pre>
+
+<table>
+  <tr><th>参数</th><th>作用</th></tr>
+  <tr><td><code>-p "-c ...qspi.xml"</code></td><td>刷 QSPI：bootloader / UEFI</td></tr>
+  <tr><td><code>-c ...flash_l4t_t234_nvme.xml</code></td><td>NVMe 分区布局。该 XML 里只有一个 <code>&lt;device type="external"&gt;</code>，但包含完整启动链（esp / A_kernel / kernel-dtb / APP rootfs）</td></tr>
+  <tr><td><code>internal</code>（rootdev）</td><td>让 NVMe 用自己的 PARTUUID 作 rootfs。Orin Nano devkit 无 eMMC，XML 里也没有 internal 存储设备定义，所以"internal"那半不会真写</td></tr>
+  <tr><td><code>--network usb0</code></td><td>经 USB 网络 + NFS 传输 rootfs</td></tr>
+</table>
+
+<h2>4. 踩过的坑<span class="en">Gotchas hit in practice</span></h2>
+
+<div class="box err">
+  <strong>❌ 坑 2：<code>-super-maxn</code> 不适用于 8GB Nano <span class="en-i">— wrong config for this SKU</span></strong>
+  <code>jetson-orin-nano-devkit-super-maxn*.conf</code> 只覆盖模块 SKU <code>0000/0002/0001</code>（即 Orin NX 系列），Nano 8GB 是 <code>3767-0003 / 0005</code>，跑进去直接 <code>exit 1</code>。而且它改的只是 BPMP 超频 DTB，并非官方 Super 模式。<br>
+  <strong style="display:inline;margin:0">正解：</strong>board 用 <code>jetson-orin-nano-devkit-super</code>，67 TOPS 靠系统内 <code>nvpmodel</code> 开。
+</div>
+
+<table>
+  <tr><th>模块 SKU</th><th>型号</th></tr>
+  <tr><td>3767-0000</td><td>Orin NX 16GB</td></tr>
+  <tr><td>3767-0001</td><td>Orin NX 8GB</td></tr>
+  <tr><td>3767-0004</td><td>Orin Nano 4GB</td></tr>
+  <tr><td>3767-0003 / 0005</td><td><strong>Orin Nano 8GB ← 本机</strong></td></tr>
+</table>
+
+<div class="box warn">
+  <strong>⚠ 坑 3：<code>Please install the Secureboot package ... for fused board</code></strong>
+  这条只是提示，不阻断流程 —— 非 secureboot 熔丝板可忽略，脚本会继续往下跑。
+</div>
+
+<div class="box warn">
+  <strong>⚠ 坑 4：shell 退出码陷阱 <span class="en-i">— exit code swallowed by echo</span></strong>
+  <code>cmd; echo "done: $?"</code> 这种写法，脚本整体退出码是最后那个 <code>echo</code> 的 <strong>0</strong>，会把失败伪装成成功。要判断刷机结果必须读日志，或显式 <code>rc=$?; ...; exit $rc</code>。
+</div>
+
+<div class="box err">
+  <strong>❌ 坑 5：刷机期间主机卡死重启 <span class="en-i">— host froze mid-flash</span></strong>
+  实测发生过一次：主机在刷机中途死机重启，进程连同 <code>/tmp</code> 下的日志一起消失。<br>
+  <strong style="display:inline;margin:0">对策：</strong>用 <code>setsid nohup</code> 让刷机脱离终端会话，日志写到 <strong>非 /tmp</strong> 的持久路径：
+  <pre style="margin-top:10px"><code>setsid nohup sudo -A ./tools/kernel_flash/l4t_initrd_flash.sh ... \
+  &gt; ~/flash.log 2&gt;&1 &lt; /dev/null &amp;</code></pre>
+  判断是否真的刷完：<code>tools/kernel_flash/initrdlog/</code> 目录存在才说明进入了实际刷写阶段；<code>images/</code> 为空 + 无 <code>initrdlog/</code> = 根本没碰到 NVMe，可安全重刷。
+</div>
+
+<h2>5. 刷完之后<span class="en">After the flash</span></h2>
+<p>刷机结束板子自动重启，接显示器 + 键鼠完成 oem-config（建账号、语言、时区）。进系统后开启 Super 模式：</p>
+<pre><code># 查看当前功耗模式
+sudo nvpmodel -q
+
+# 切到 MAXN_SUPER（67 TOPS），会提示重启
+sudo nvpmodel -m 2
+sudo reboot
+
+# 验证
+sudo nvpmodel -q          # → NV Power Mode: MAXN_SUPER
+cat /etc/nv_tegra_release # → R36 REVISION: 5.0
+sudo jtop                 # 需要先 pip install jetson-stats</code></pre>
+
+<div class="box ok">
+  <strong>✓ 成功判据 <span class="en-i">— how to know it worked</span></strong>
+  ① 板子从 NVMe 启动，不再需要 SD 卡；② <code>lsblk</code> 显示 <code>nvme0n1p1</code> 挂在 <code>/</code>；③ <code>nvpmodel -q</code> 能切到 MAXN_SUPER；④ <code>nv_tegra_release</code> 显示 R36 REVISION 5.0。
+</div>
+
+<h2>6. 参考<span class="en">References</span></h2>
+<ul>
+  <li><a href="https://developer.nvidia.com/embedded/jetson-linux">NVIDIA · Jetson Linux 下载页</a></li>
+  <li><a href="https://docs.nvidia.com/jetson/archives/r36.4.3/DeveloperGuide/SD/FlashingSupport.html">Jetson Linux Developer Guide · Flashing Support</a></li>
+  <li><a href="https://jetsonhacks.com/2026/02/06/jetpack-6-2-2-for-jetson-orin/">JetsonHacks · JetPack 6.2.2 for Jetson Orin</a></li>
+  <li>本地：<code>Linux_for_Tegra/tools/kernel_flash/README_initrd_flash.txt</code> —— rootdev 语义表格与 SKU 对照表的权威出处</li>
+</ul>
+
+<footer>
+  Orin Nano Super 刷机记录 · 2026-07-16 · Jetson Linux 36.5 / JetPack 6.2.2<br>
+  <span style="opacity:.8">大文件（BSP / rootfs tbz2）在 <code>download/</code>，已 gitignore；<code>Linux_for_Tegra/</code> 为解压工作区，同样不入库。</span>
+</footer>
+
+</div>
+</body>
+</html>
