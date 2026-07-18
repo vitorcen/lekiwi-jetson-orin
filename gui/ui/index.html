@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>LeKiwi 控制台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <h1>🥝 LeKiwi 控制台<span class="hsub">Orin · lerobot ZMQ</span></h1>
+  <span class="sep"></span>
+  <span id="connPill" class="pill bad">未连接</span>
+</header>
+
+<!-- ===================== 醒目 Tab 栏 ===================== -->
+<nav id="tabs">
+  <button class="tab on" data-page="zmq">
+    <span class="tico">🔌</span>
+    <span class="tlab">ZeroMQ 遥控<em>键盘开车</em></span>
+  </button>
+  <button class="tab" data-page="ros">
+    <span class="tico">🤖</span>
+    <span class="tlab">ROS 2<em>待建</em></span>
+  </button>
+</nav>
+
+<main>
+<!-- ======================= ZeroMQ ======================= -->
+<div id="page-zmq" class="page on">
+
+  <div class="connbar">
+    <label>Orin IP
+      <input id="ip" type="text" value="192.168.3.188">
+    </label>
+    <label>命令端口
+      <input id="port" type="text" value="5555">
+    </label>
+    <button id="connBtn" class="primary">连接</button>
+    <span id="zmqState" class="pill bad">未连接</span>
+    <span class="hint">连接前，先在 Orin 上跑
+      <code>python -m lerobot.robots.lekiwi.lekiwi_host --robot.port=/dev/ttyACM0 --robot.id=orin_kiwi</code>
+    </span>
+  </div>
+
+  <div id="telewrap">
+
+    <!-- 左：键盘 + 速度档 -->
+    <section class="panel">
+      <h2>键盘遥控 <span class="en">Keyboard drive</span></h2>
+      <p class="tip" id="focusTip">点面板任意处激活（边框变亮）：<b>WASD</b> 或<b>方向键</b>移动 · <b>QE</b> 转向 · <b>R/F</b> 调速 · <b>空格</b>急停。松手即停，失焦自动停。</p>
+
+      <div id="keypad">
+        <div class="krow">
+          <kbd data-k="q">Q<span>左转</span></kbd>
+          <kbd data-k="w">W<span>前进</span></kbd>
+          <kbd data-k="e">E<span>右转</span></kbd>
+        </div>
+        <div class="krow">
+          <kbd data-k="a">A<span>左移</span></kbd>
+          <kbd data-k="s">S<span>后退</span></kbd>
+          <kbd data-k="d">D<span>右移</span></kbd>
+        </div>
+        <div class="krow">
+          <kbd data-k="f">F<span>降速</span></kbd>
+          <kbd data-k=" " class="kspace">空格<span>急停</span></kbd>
+          <kbd data-k="r">R<span>升速</span></kbd>
+        </div>
+      </div>
+
+      <div class="speedrow">
+        <span class="slabel">速度档</span>
+        <button class="spd" data-i="0">慢<em>0.1 / 30</em></button>
+        <button class="spd on" data-i="1">中<em>0.25 / 60</em></button>
+        <button class="spd" data-i="2">快<em>0.4 / 90</em></button>
+        <span class="sunit">m/s · °/s</span>
+      </div>
+    </section>
+
+    <!-- 右：方向可视化 + 实时速度 -->
+    <section class="panel">
+      <h2>运动状态 <span class="en">Live command</span></h2>
+
+      <div id="vizwrap">
+        <svg id="viz" viewBox="0 0 240 240">
+          <!-- 底盘俯视：3 轮全向，车头朝上 -->
+          <circle cx="120" cy="120" r="86" class="chassis"/>
+          <text x="120" y="30" text-anchor="middle" class="vlabel">车头 ↑</text>
+          <!-- 三个轮子：左(150°) 后(-90°/下) 右(30°)，粗线示意 -->
+          <g class="wheels">
+            <rect x="150" y="66" width="10" height="30" rx="3" transform="rotate(60 155 81)"/>
+            <rect x="80"  y="66" width="10" height="30" rx="3" transform="rotate(-60 85 81)"/>
+            <rect x="115" y="168" width="10" height="30" rx="3"/>
+          </g>
+          <text x="176" y="70" class="wid">9右</text>
+          <text x="44"  y="70" class="wid">7左</text>
+          <text x="132" y="196" class="wid">8后</text>
+          <!-- 平移矢量箭头 -->
+          <line id="vArrow" x1="120" y1="120" x2="120" y2="120"
+                class="varrow" marker-end="url(#vh)"/>
+          <!-- 旋转指示弧 -->
+          <path id="vSpin" class="vspin" d=""/>
+          <defs>
+            <marker id="vh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#89b4fa"/>
+            </marker>
+          </defs>
+          <circle cx="120" cy="120" r="4" class="hub"/>
+        </svg>
+      </div>
+
+      <table id="velTable">
+        <tr><td>x.vel<span>前后</span></td><td id="vx">0.00</td><td class="u">m/s</td></tr>
+        <tr><td>y.vel<span>横移</span></td><td id="vy">0.00</td><td class="u">m/s</td></tr>
+        <tr><td>theta.vel<span>旋转</span></td><td id="vt">0.0</td><td class="u">°/s</td></tr>
+      </table>
+      <div id="pressed" class="pressed">按键：<span>—</span></div>
+    </section>
+  </div>
+</div>
+
+<!-- ======================= ROS 2 (占位) ======================= -->
+<div id="page-ros" class="page">
+  <div class="placeholder">
+    <div class="phicon">🤖</div>
+    <h2>ROS 2 Tab</h2>
+    <p>板子已装 ROS 2 Humble，这个 Tab 留给后续功能：</p>
+    <ul>
+      <li>把 LeKiwi 包成 ROS 2 节点，发 <code>/cmd_vel</code></li>
+      <li>接激光雷达 / 相机 topic，做建图导航</li>
+      <li>话题内省、节点状态、rosbag 录制</li>
+    </ul>
+    <p class="phnote">当前遥控走 ZeroMQ（原生 lerobot 通道），不依赖 ROS 2。</p>
+  </div>
+</div>
+</main>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

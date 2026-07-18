@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeKiwi 移植 Orin Nano · 手柄遥操作实施方案</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#22314e; --accent2:#2c6db5; --accent-dk:#1d5a99;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#eef5fb; --ok-line:#2c6db5; --ok-fg:#1d4e7a;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#141618; --fg:#e8e8e3; --muted:#9a9a92; --line:#2c2f33;
+      --card:#1c1f22; --accent:#7aa2d6; --accent2:#5b9bd5; --accent-dk:#8fb8e6;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#132131; --ok-line:#2c6db5; --ok-fg:#8fc0f0; --code-bg:#23262a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent2);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:30px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent2)}
+  h2 .en-h{color:var(--muted);font-weight:400;font-size:.7em;margin-left:8px}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent2);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  a{color:var(--accent-dk)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>LeKiwi 移植到 Orin Nano：手柄操控底盘与机械臂
+    <span class="en">Porting LeKiwi to Jetson Orin Nano — gamepad teleop for the mobile base &amp; SO-101 arm</span>
+  </h1>
+  <p class="sub">2026-07-16 · 依据维特智能（WitMotion）语雀教程 4 篇 + 本项目已完成的舵机总线 bring-up 整理 · 板子 jatson@192.168.3.188</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li>机器人 = <strong>LeKiwi</strong>：3 轮全向底盘（3 个 STS3215-C018，ID 7/8/9）+ SO-101 从臂（6 个 STS3215-C018，ID 1~6），<strong>9 个电机挂同一条总线、同一块舵机驱动板、一个 USB 口</strong>。Leader 主臂另配一块驱动板（本方案手柄替代主臂，Leader 可先不接）。</li>
+    <li>教程原方案是「树莓派/RDK X5 跑 <code>lekiwi_host</code> + PC 跑遥操作客户端」。移植到 Orin：<strong>host 与客户端全部跑在 Orin 上</strong>（<code>remote_ip=127.0.0.1</code>），手柄直接插 Orin，少一台机器、少一跳网络。</li>
+    <li>软件走 <strong>lerobot</strong>（教程锚定 commit <code>26ff40d</code>），不引入 ROS —— 遥操作用不上，别过度设计。</li>
+    <li>实施四步：① 接满 9 电机并扫总线确认 ID → ② Orin 装 miniconda + lerobot → ③ 标定 + 键盘遥操作打通 → ④ 手柄客户端（pygame，~200 行）。</li>
+    <li>舵机串口这条路本项目已趟平：CH340 驱动（自编 <code>ch341.ko</code>）、brltty 冲突、dialout 权限全部解决，裸协议扫描脚本 <code>~/scan_servos.py</code> 可直接复用。</li>
+  </ul>
+</div>
+
+<h2>0. 四篇资料读取结果<span class="en-h">Source docs</span></h2>
+<p>四篇语雀文档均可公开读取（无需登录），要点如下：</p>
+<table>
+<tr><th>文档</th><th>内容</th><th>对本方案的用处</th></tr>
+<tr><td><a href="https://wit-motion.yuque.com/wumwnr/wf4p82/bnl65qfqbwqki2h5">《lekiwi 介绍》</a></td><td>LeKiwi = LeRobot 生态的低成本移动操作方案；底盘 + SO100/101 从臂 + 主臂示教；数据采集→ACT 训练→评测闭环</td><td>确认软件栈选型：lerobot，<code>robot.type=lekiwi</code></td></tr>
+<tr><td><a href="https://wit-motion.yuque.com/wumwnr/wf4p82/fdgro7igu36u7xrv">《lekiwi 组装》</a></td><td>底盘/主从臂 BOM、组装步骤、<strong>电机编号图、供电接线</strong></td><td>硬件拓扑与 ID 分配的唯一依据（见 §1）</td></tr>
+<tr><td><a href="https://wit-motion.yuque.com/wumwnr/wf4p82/gnts9akmwve3qsgx">《RDK X5》</a></td><td>RDK X5 部署：miniconda → lerobot（<code>pip -e ".[lekiwi]"</code>）→ find-port → 编号 → 标定 → 遥操作/录数据/云端训练</td><td><strong>移植主参考</strong>——RDK X5 同为 aarch64 Ubuntu 22.04，步骤几乎原样适用于 Orin</td></tr>
+<tr><td><a href="https://wit-motion.yuque.com/wumwnr/wf4p82/tz4u8h3llgfh1pl6">《树莓派》</a></td><td>同上的树莓派版（python 3.10、JoyandAI fork <code>aa8f593</code>）</td><td>交叉印证；XLerobot 双臂时先接带底盘的那条 USB</td></tr>
+</table>
+
+<h2>1. 硬件拓扑<span class="en-h">Hardware topology</span></h2>
+
+<figure class="fig">
+<svg viewBox="0 0 920 470" font-family="-apple-system,'Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b9bd5"/>
+    </marker>
+  </defs>
+  <!-- gamepad -->
+  <rect x="20" y="60" width="150" height="70" rx="10" fill="#2c6db5"/>
+  <text x="95" y="90" text-anchor="middle" fill="#fff" font-size="15" font-weight="600">游戏手柄</text>
+  <text x="95" y="112" text-anchor="middle" fill="#cfe3f7" font-size="12">Xbox/北通 · USB或2.4G</text>
+  <!-- orin -->
+  <rect x="250" y="30" width="300" height="180" rx="12" fill="none" stroke="#5b9bd5" stroke-width="2"/>
+  <text x="400" y="56" text-anchor="middle" fill="#5b9bd5" font-size="15" font-weight="700">Jetson Orin Nano 8GB</text>
+  <text x="400" y="74" text-anchor="middle" fill="#9a9a92" font-size="11">JetPack 6.2.2 · Ubuntu 22.04 · 已装 ROS2/驱动</text>
+  <rect x="270" y="88" width="120" height="46" rx="8" fill="#22314e"/>
+  <text x="330" y="107" text-anchor="middle" fill="#fff" font-size="12.5">teleop 客户端</text>
+  <text x="330" y="124" text-anchor="middle" fill="#aebfd8" font-size="11">pygame 读手柄</text>
+  <rect x="410" y="88" width="120" height="46" rx="8" fill="#22314e"/>
+  <text x="470" y="107" text-anchor="middle" fill="#fff" font-size="12.5">lekiwi_host</text>
+  <text x="470" y="124" text-anchor="middle" fill="#aebfd8" font-size="11">lerobot 机器人主机</text>
+  <line x1="390" y1="111" x2="410" y2="111" stroke="#5b9bd5" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="400" y="152" text-anchor="middle" fill="#9a9a92" font-size="11">ZMQ · remote_ip = 127.0.0.1（同机，零网络跳）</text>
+  <rect x="270" y="162" width="260" height="34" rx="8" fill="none" stroke="#2c2f33" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="400" y="184" text-anchor="middle" fill="#9a9a92" font-size="11.5">相机 ×2（前视 + 腕部，UVC）→ 录数据阶段再接</text>
+  <!-- arrow gamepad->orin -->
+  <line x1="170" y1="95" x2="250" y2="95" stroke="#5b9bd5" stroke-width="2" marker-end="url(#ar)"/>
+  <!-- servo board -->
+  <rect x="640" y="50" width="250" height="110" rx="10" fill="#1d5a99"/>
+  <text x="765" y="78" text-anchor="middle" fill="#fff" font-size="14.5" font-weight="600">舵机驱动板（总线板）</text>
+  <text x="765" y="100" text-anchor="middle" fill="#cfe3f7" font-size="12">SERVO-BUS-TTL-V1.0S · 双串口座</text>
+  <text x="765" y="122" text-anchor="middle" fill="#cfe3f7" font-size="12">USB → /dev/ttyUSB0 或 /dev/ttyACM0</text>
+  <text x="765" y="144" text-anchor="middle" fill="#cfe3f7" font-size="12">供电 12V（电池或适配器）</text>
+  <line x1="550" y1="105" x2="640" y2="105" stroke="#5b9bd5" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="595" y="96" text-anchor="middle" fill="#9a9a92" font-size="11">1×USB</text>
+  <!-- bus split -->
+  <line x1="765" y1="160" x2="765" y2="200" stroke="#5b9bd5" stroke-width="2"/>
+  <line x1="765" y1="200" x2="560" y2="200" stroke="#5b9bd5" stroke-width="2"/>
+  <line x1="560" y1="200" x2="560" y2="240" stroke="#5b9bd5" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="765" y1="200" x2="765" y2="240" stroke="#5b9bd5" stroke-width="2" marker-end="url(#ar)"/>
+  <!-- arm -->
+  <rect x="430" y="240" width="260" height="100" rx="10" fill="#22314e"/>
+  <text x="560" y="268" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">SO-101 从臂 Follower</text>
+  <text x="560" y="292" text-anchor="middle" fill="#aebfd8" font-size="12.5">6× STS3215-C018（12V，1:345）</text>
+  <text x="560" y="314" text-anchor="middle" fill="#aebfd8" font-size="12.5">总线 ID 1~6（1=底座 … 6=夹爪）</text>
+  <!-- base -->
+  <rect x="710" y="240" width="190" height="100" rx="10" fill="#22314e"/>
+  <text x="805" y="268" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">3 轮全向底盘</text>
+  <text x="805" y="292" text-anchor="middle" fill="#aebfd8" font-size="12.5">3× STS3215-C018 轮式</text>
+  <text x="805" y="314" text-anchor="middle" fill="#aebfd8" font-size="12.5">总线 ID 7 / 8 / 9</text>
+  <!-- power -->
+  <rect x="20" y="380" width="880" height="60" rx="10" fill="none" stroke="#8a6d1f" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="40" y="405" fill="#e3b341" font-size="13.5" font-weight="600">供电</text>
+  <text x="40" y="426" fill="#9a9a92" font-size="12.5">11.1V 5600mAh 锂电池 → DC 分线器 → ① 舵机板 12V 直供；② 原方案 12V→5V 降压给树莓派 —— Orin devkit 需 9~20V DC，可由分线器另一路直接供，5V 降压模块弃用（见 §5 风险③）</text>
+  <text x="450" y="368" text-anchor="middle" fill="#9a9a92" font-size="11.5">桌面调试阶段：舵机板用 12V-3A 适配器，Orin 用原装电源，先不上电池</text>
+</svg>
+<figcaption>目标架构：手柄 → Orin（客户端 + host 同机）→ 一条 USB 总线驱动 9 个电机 / Target: all compute on the Orin, one serial bus for all 9 motors</figcaption>
+</figure>
+
+<p>关键事实（来自《lekiwi 组装》）：</p>
+<ul>
+  <li><strong>一条总线管全部 9 个电机。</strong>从臂 1 号舵机有两个接线口：一口向上串到 2~6 号，另一口的线穿过底盘顶板，插进底盘舵机驱动板的第二个串口座。臂 6 个 + 轮 3 个共享一个 USB 串口。</li>
+  <li><strong>ID 分配</strong>：臂 1~6（1 = 最下面的底座关节，6 = 夹爪），轮子 7~9。出厂成品已编好号、已标定（客服提供标定 JSON），自装件才需要 <code>lerobot-setup-motors</code>（编号顺序：臂 6→5→4→3→2→1，再轮 9→8→7，且编号时舵机两两断开）。</li>
+  <li><strong>Leader 主臂</strong>是 7.4V 舵机（C044/C001/C046，减速比小便于拖动），单独一块驱动板一条 USB。本方案用手柄替代主臂做遥操作，Leader 可完全不接；以后要示教录数据再上。</li>
+</ul>
+
+<h2>2. 移植差异：RDK X5/树莓派 → Orin Nano<span class="en-h">Porting deltas</span></h2>
+<p>RDK X5 教程是主参考（同为 aarch64 + Ubuntu 22.04），逐项对照后差异很小：</p>
+<table>
+<tr><th>教程步骤</th><th>Orin 上怎么做</th></tr>
+<tr><td>烧录 RDK/树莓派镜像、网络配置、SSH/VNC</td><td><strong>整章跳过</strong>——JetPack 6.2.2 已刷好，SSH 免密已配</td></tr>
+<tr><td>miniconda aarch64 + <code>conda create -n lerobot python=3.12</code></td><td>原样执行（Miniconda3-latest-Linux-aarch64.sh 通用）</td></tr>
+<tr><td>pip/conda 换清华源</td><td>原样执行；apt 层面板子已换 TUNA + ForceIPv4</td></tr>
+<tr><td>lerobot 固定 commit <code>26ff40ddd784…</code>（huggingface 上游）</td><td>原样执行。树莓派篇用的是 JoyandAI fork + python 3.10，<strong>不采用</strong>——跟 RDK 篇走上游仓库，一套代码少一个变量</td></tr>
+<tr><td><code>pip install -e ".[lekiwi]"</code></td><td>原样执行。遥操作阶段 CPU 版 torch 即可；<strong>别在这个 conda 环境里折腾 CUDA torch</strong>，Jetson 的 GPU 推理用 NVIDIA 官方 wheel，是后续「跑策略」阶段的事，与本篇无关</td></tr>
+<tr><td>串口设备 <code>/dev/ttyACM0</code> + <code>chmod 666</code></td><td>设备名以 <code>lerobot-find-port</code> 实测为准（CDC 板出 ttyACM，CH340 板出 ttyUSB——后者驱动本项目已自编装好）。权限用 dialout 组（jatson 已在组内），<strong>不需要 chmod 666</strong></td></tr>
+<tr><td>树莓派跑 <code>lekiwi_host</code>，PC 跑 teleoperate，中间过 Wi-Fi</td><td><strong>两者都跑在 Orin</strong>，<code>remote_ip=127.0.0.1</code>。Orin 8GB 远强于树莓派，没必要拆两台机器；以后想用 PC 大屏看相机流，再把客户端挪出去，架构不用改</td></tr>
+<tr><td>键盘 WASD 控底盘 + Leader 臂示教</td><td>先用键盘验证链路（§3 第 3 步），再换手柄（§4）</td></tr>
+</table>
+
+<h2>3. 实施步骤<span class="en-h">Implementation steps</span></h2>
+
+<h3>第 1 步 · 接满电机，扫总线确认 ID（半小时）</h3>
+<p>把从臂 6 个舵机 + 底盘 3 个轮子按 §1 拓扑接到同一块驱动板，12V 适配器供电，USB 接 Orin。先用本项目现成的裸协议脚本核对，不依赖 lerobot：</p>
+<pre><code># 板子上已有，扫 ID 0~20 · 读位置/电压/温度
+python3 ~/scan_servos.py
+# 期望：ID 1~9 全部应答，电压 ~12V</code></pre>
+<div class="box warn"><strong>⚠ 出厂成品应已是 ID 1~9</strong>之前单舵机调试只看到 ID 1，是因为只接了一个。如果扫出来 ID 有缺失或冲突（比如两个 ID 1），才需要走 <code>lerobot-setup-motors --robot.type=lekiwi</code> 重编号（编号时舵机两两断开，顺序 6→5→4→3→2→1→9→8→7）。</div>
+
+<h3>第 2 步 · Orin 上装 lerobot 环境（1 小时，多为下载等待）</h3>
+<pre><code># 1) miniconda（aarch64）
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh
+bash Miniconda3-latest-Linux-aarch64.sh          # 一路默认，接受 ToS
+conda create -y -n lerobot python=3.12
+conda activate lerobot
+
+# 2) 国内源
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# 3) ffmpeg（conda-forge）
+conda install -c conda-forge ffmpeg
+
+# 4) lerobot——锚定教程验证过的 commit
+#    ⚠ 板子直连 GitHub 拉不动（网页 200 但 git 传输必断），走 ghfast.top 镜像 + 按 SHA 浅拉
+mkdir -p ~/lerobot &amp;&amp; cd ~/lerobot &amp;&amp; git init -q
+git remote add origin https://ghfast.top/https://github.com/huggingface/lerobot.git
+git fetch --depth 1 origin 26ff40ddd784280efc133a8e5af1a76e5ac731c2
+git checkout FETCH_HEAD
+pip install -e ".[lekiwi]"
+
+# 5) 手柄支持（§4 用）+ notebook
+pip install pygame jupyterlab</code></pre>
+<div class="box ok"><strong>✔ 2026-07-16 已完成并验证</strong>
+lerobot <strong>0.5.2</strong>（commit <code>26ff40d</code>）装在 conda env <code>lerobot</code>（python 3.12）。
+实测 <code>FeetechMotorsBus</code> 读通全部 9 个电机：臂 1~6 在位置模式、轮 7~9 在速度模式。
+<code>lerobot-find-port</code> / <code>lerobot-calibrate</code> 等 CLI 齐全。</div>
+
+<h3>第 3 步 · 找端口、标定、键盘遥操作打通</h3>
+<pre><code>lerobot-find-port        # 插拔 USB 确认设备名，记为 &lt;PORT&gt;
+
+# 标定（成品：把客服发的标定 JSON 放进
+#   ~/.cache/huggingface/lerobot/calibration/robots/lekiwi/&lt;ID&gt;.json 即可跳过）
+lerobot-calibrate --robot.type=lekiwi --robot.port=&lt;PORT&gt; --robot.id=orin_lekiwi
+# 流程：中位 → 各关节最大/最小限位（教程有逐关节图示）
+
+# 终端 A：机器人主机
+python -m lerobot.robots.lekiwi.lekiwi_host --robot.port=&lt;PORT&gt; --robot.id=orin_lekiwi
+
+# 终端 B：官方键盘客户端（examples/lekiwi/teleoperate.py 里 remote_ip 改 "127.0.0.1"）
+python examples/lekiwi/teleoperate.py
+# W/S 前后 · A/D 平移 · Z/X 旋转 · R/F 调速</code></pre>
+<p>这一步过了，说明 lerobot ↔ 总线 ↔ 9 电机全链路正常，手柄只是换一个输入源。</p>
+
+<h3>第 4 步 · 手柄客户端（本方案核心增量）</h3>
+<p>手柄插 Orin（USB 或 2.4G 接收器，<code>/dev/input/js0</code>；蓝牙手柄也行但先用有线降变量）。写一个 <code>teleop_gamepad.py</code> 替代键盘客户端，结构与官方 example 相同，只是输入从 <code>keyboard</code> 换成 pygame joystick：</p>
+
+<table>
+<tr><th>手柄输入</th><th>底盘模式（默认）</th><th>机械臂模式</th></tr>
+<tr><td>左摇杆 ↑↓ / ←→</td><td>前后 <code>x.vel</code> / 左右平移 <code>y.vel</code></td><td>肩转 <code>shoulder_pan</code> / 肩抬 <code>shoulder_lift</code></td></tr>
+<tr><td>右摇杆 ←→ / ↑↓</td><td>旋转 <code>theta.vel</code> / —</td><td>肘 <code>elbow_flex</code> / 腕俯仰 <code>wrist_flex</code></td></tr>
+<tr><td>LB / RB</td><td>降速档 / 升速档</td><td>腕旋转 <code>wrist_roll</code> ∓</td></tr>
+<tr><td>LT / RT</td><td>—</td><td>夹爪开 / 合 <code>gripper</code></td></tr>
+<tr><td>Y 键</td><td colspan="2">切换 底盘 ⇄ 机械臂 模式</td></tr>
+<tr><td>B 键</td><td colspan="2">急停：底盘速度清零 + 臂保持当前位</td></tr>
+</table>
+
+<p>代码骨架（关节用「当前值 + 摇杆增量」的位置控制，底盘用速度控制——与 LeKiwi 动作空间一致：臂是 <code>*.pos</code>，底盘是 <code>x.vel/y.vel/theta.vel</code>）：</p>
+<pre><code>import pygame
+from lerobot.robots.lekiwi.lekiwi_client import LeKiwiClient, LeKiwiClientConfig
+
+JOINTS = ["arm_shoulder_pan", "arm_shoulder_lift", "arm_elbow_flex",
+          "arm_wrist_flex", "arm_wrist_roll", "arm_gripper"]
+DEAD, HZ, STEP = 0.15, 30, 1.5      # 死区 / 控制频率 / 每拍关节步进(度)
+
+pygame.init(); pygame.joystick.init()
+js = pygame.joystick.Joystick(0); js.init()
+
+robot = LeKiwiClient(LeKiwiClientConfig(remote_ip="127.0.0.1", id="orin_lekiwi"))
+robot.connect()
+obs = robot.get_observation()
+target = {j: obs[f"{j}.pos"] for j in JOINTS}   # 从当前姿态起步，避免上电跳变
+
+arm_mode, speed = False, 0.4
+clock = pygame.time.Clock()
+while True:
+    pygame.event.pump()
+    ax = lambda i: v if abs(v := js.get_axis(i)) > DEAD else 0.0
+    action = {f"{j}.pos": target[j] for j in JOINTS}
+    action.update({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+
+    if arm_mode:
+        target["arm_shoulder_pan"]  += -ax(0) * STEP
+        target["arm_shoulder_lift"] += -ax(1) * STEP
+        # ... 其余关节 / LT·RT 夹爪同理，并按标定限位 clamp
+    else:
+        action["x.vel"]     = -ax(1) * speed        # m/s
+        action["y.vel"]     = -ax(0) * speed
+        action["theta.vel"] = -ax(3) * 90 * speed   # deg/s
+
+    robot.send_action(action)
+    clock.tick(HZ)</code></pre>
+<div class="box ok"><strong>✔ 为什么自写而不用 lerobot 自带的 gamepad teleoperator</strong>上游的 gamepad 遥操作是给单臂末端（EE）控制设计的，不管底盘；LeKiwi 的键盘 example 又不管手柄。两边各缺一半，而 client 的动作接口（一个 dict）足够简单——直接对着它写 200 行，模式切换、限位、急停全在自己手里，这是最笨也最清晰的做法。</div>
+
+<h2>4. 验收标准<span class="en-h">Acceptance</span></h2>
+<ul>
+  <li><code>scan_servos.py</code> 扫出 ID 1~9，电压 12V±0.5。</li>
+  <li>键盘 WASD 能开底盘：前后/平移/旋转方向正确（方向反了是标定或轮序问题，别在手柄层面改符号硬补）。</li>
+  <li>手柄底盘模式：摇杆推多少走多快，回中即停；B 键急停立即生效。</li>
+  <li>手柄机械臂模式：6 关节可控、限位内不撞机械结构、松手保持不下坠。</li>
+</ul>
+
+<h2>5. 风险与坑<span class="en-h">Risks &amp; gotchas</span></h2>
+<div class="box err"><strong>① 桌面调试先把轮子架空</strong>底盘一通电就是 3 个能跑的轮子。手柄映射没验证前，垫高底盘让轮子悬空，或在空旷地面、手不离 B 键。</div>
+<div class="box warn"><strong>② 串口驱动板两种可能</strong>维特这块 SERVO-BUS-TTL 板若是 CDC 芯片则出 <code>/dev/ttyACM0</code>（内核原生支持）；若又是 CH340 则出 <code>/dev/ttyUSB0</code> —— 本项目已自编 <code>ch341.ko</code> 并 depmod 持久化、已卸 brltty，两条路都通。一切以 <code>lerobot-find-port</code> 实测为准。<strong>注意 nvidia 内核包升级后 ch341.ko 要重编</strong>（apt-mark hold 已挡住意外升级）。</div>
+<div class="box warn"><strong>③ Orin 供电别照抄树莓派方案</strong>教程的 12V→5V Type-C 降压模块是给树莓派的（5V/3A≈15W），Orin devkit 是 <strong>DC 圆口 9~20V</strong>，MAXN 下整机可到 25W。上底盘时 Orin 由电池经 DC 分线器<strong>直接供电</strong>（11.1V 三串锂 9.6~12.6V 恰在范围内），弃用 5V 降压模块；同时留意舵机堵转瞬间的电压跌落，供电线径要够。桌面阶段先用原装适配器。</div>
+<div class="box warn"><strong>④ 锚定 commit，别追上游 HEAD</strong>lerobot API 变动频繁，语雀教程明说「官方文档不保证成功」。全程锁 <code>26ff40d</code>；升级是独立事件，升级后需回归 §4 验收项。</div>
+<div class="box warn"><strong>⑤ PyPI 的 torch 在 Jetson 上没有 GPU（已实测踩到）</strong>
+<code>pip install -e ".[lekiwi]"</code> 装进来的是 <strong>torch 2.11.0+cu130</strong>，而 JetPack 6.2.2 的驱动是
+<strong>CUDA 12.6</strong> → <code>torch.cuda.is_available()</code> 返回 <strong>False</strong>（"NVIDIA driver is too old, found 12060"）。
+遥操作/标定纯 CPU，<strong>本篇不受影响</strong>；等到 §6 跑策略推理时必须换 <strong>NVIDIA 官方 Jetson torch wheel</strong>
+（JetPack 6.x / CUDA 12），并开 Super 模式。别指望 PyPI 的 torch 能用上 Orin 的 GPU。</div>
+<div class="box ok"><strong>⑥ 手柄设备权限</strong><code>/dev/input/js*</code>、<code>event*</code> 通常 input 组可读；若 pygame 找不到手柄，先 <code>jstest /dev/input/js0</code>（apt: joystick 包）确认内核层，再查 <code>usermod -aG input jatson</code>。</div>
+
+<h2>6. 后续路线（本篇不做）<span class="en-h">Later</span></h2>
+<ul>
+  <li>接 2 路 UVC 相机（前视 640×360@30 + 腕部 640×480@30），跑 <code>record.py</code> 录数据集。</li>
+  <li>Leader 主臂接入做示教遥操作（与手柄并存，两种客户端二选一）。</li>
+  <li>云端 ACT 训练（教程给了 AutoDL 全流程），回 Orin 用 <code>evaluate.py</code> 推理——那时再解决 Jetson CUDA torch，并开 Super 模式（<code>nvpmodel -m 2</code>，尚未开启）。</li>
+</ul>
+
+<h2>参考<span class="en-h">References</span></h2>
+<ul>
+  <li>维特智能语雀：<a href="https://wit-motion.yuque.com/wumwnr/wf4p82/bnl65qfqbwqki2h5">lekiwi 介绍</a> · <a href="https://wit-motion.yuque.com/wumwnr/wf4p82/fdgro7igu36u7xrv">lekiwi 组装</a> · <a href="https://wit-motion.yuque.com/wumwnr/wf4p82/gnts9akmwve3qsgx">RDK X5 部署</a> · <a href="https://wit-motion.yuque.com/wumwnr/wf4p82/tz4u8h3llgfh1pl6">树莓派部署</a></li>
+  <li>LeRobot 官方：<a href="https://huggingface.co/docs/lerobot/lekiwi">LeKiwi 文档</a> · <a href="https://github.com/huggingface/lerobot">github.com/huggingface/lerobot</a>（锚定 commit <code>26ff40d</code>）</li>
+  <li>本项目：<code>docs/orin-nano-super-install.html</code>（刷机）· <code>docs/ros2-humble-install.html</code>（ROS 2）· <code>.memory/servo-bus-ch341-bringup.md</code>（舵机总线 bring-up）</li>
+</ul>
+
+</div>
+</body>
+</html>

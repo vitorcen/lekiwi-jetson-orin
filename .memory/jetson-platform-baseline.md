@@ -12,6 +12,7 @@ metadata:
 - **系统**：JetPack 6.2.2 / Jetson Linux **36.5**（Ubuntu 22.04，内核 5.15，CUDA 12.x）。
 - **存储**：256GB M.2 NVMe 承载完整 rootfs（QSPI 只放 bootloader/UEFI），**不使用 SD 卡**。
 - **Super 模式**：67 TOPS 需系统内 `nvpmodel -m 2`（MAXN_SUPER）开启，刷机不会自动启用。
+  ⏳ **待办（截至 2026-07-16 尚未开启）**：当前仍是默认功耗档，跑性能测试/推理前需先 `sudo nvpmodel -m 2` 并 reboot。
 - **外设规划**：移动底盘、SO-101 机械臂、IMU、相机与传感器。
 
 **Why:** 后续实验的算力上限、CUDA/容器选型、可用磁盘空间都由这条基线决定；

@@ -1,0 +1,159 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #0b0e14; color: #cdd6f4;
+  font: 14px/1.5 system-ui, "Noto Sans CJK SC", "PingFang SC", sans-serif;
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+}
+
+/* ---- header ---- */
+header {
+  padding: 10px 18px; display: flex; gap: 12px; align-items: center;
+  border-bottom: 1px solid #1c2030; flex: none;
+}
+h1 { font-size: 17px; margin: 0; font-weight: 700; display: flex; align-items: baseline; gap: 10px; }
+.hsub { font-size: 12px; font-weight: 400; color: #6b7394; letter-spacing: .3px; }
+.sep { flex: 1; }
+
+.pill { padding: 3px 12px; border-radius: 999px; font-size: 12px; background: #31344b; white-space: nowrap; }
+.ok  { background: #1e3a2f; color: #7ee2a8; }
+.bad { background: #3a1e1e; color: #f38ba8; }
+.warn{ background: #3a331e; color: #f9e2af; }
+
+code { background: #161a26; border: 1px solid #262b3d; border-radius: 4px; padding: 1px 6px;
+       font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: #a6c8ff; }
+
+/* ===================== 醒目 Tab ===================== */
+#tabs {
+  display: flex; gap: 10px; padding: 12px 18px 0;
+  background: #0b0e14; border-bottom: 1px solid #1c2030; flex: none;
+}
+.tab {
+  display: flex; align-items: center; gap: 11px;
+  background: #121524; color: #8b93b5;
+  border: 1px solid #232840; border-bottom: none;
+  border-radius: 12px 12px 0 0; padding: 12px 26px 14px;
+  cursor: pointer; position: relative; top: 1px;
+  transition: background .12s, color .12s, transform .12s;
+}
+.tab:hover { color: #cdd6f4; background: #171b2d; }
+.tab .tico { font-size: 24px; line-height: 1; }
+.tab .tlab { display: flex; flex-direction: column; align-items: flex-start; font-size: 16px; font-weight: 700; }
+.tab .tlab em { font-style: normal; font-size: 11px; font-weight: 400; color: #6b7394; margin-top: 2px; }
+.tab.on {
+  background: #0b0e14; color: #cbe0ff;
+  border-color: #3a63a8; border-bottom: 2px solid #0b0e14;
+  box-shadow: 0 -2px 0 0 #89b4fa inset;
+}
+.tab.on .tlab em { color: #7ea6e0; }
+
+/* ---- main / pages ---- */
+main { flex: 1; overflow: auto; padding: 18px; }
+.page { display: none; }
+.page.on { display: block; }
+
+/* ---- connect bar ---- */
+.connbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: #12162080; border: 1px solid #1c2030; border-radius: 10px;
+  padding: 12px 16px; margin-bottom: 16px;
+}
+.connbar label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #a3abcc; }
+input[type=text] {
+  background: #161a26; color: #cdd6f4; border: 1px solid #31344b;
+  border-radius: 6px; padding: 5px 9px; font: 13px ui-monospace, monospace;
+}
+#ip { width: 130px; } #port { width: 66px; }
+button.primary {
+  background: #2a4a7f; color: #cbe0ff; border: 1px solid #3a63a8;
+  border-radius: 7px; padding: 6px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+button.primary:hover { background: #335a99; }
+button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8; }
+.hint { font-size: 12px; color: #6b7394; flex-basis: 100%; }
+.hint code { font-size: 11px; }
+
+/* ---- teleop layout ---- */
+#telewrap { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { #telewrap { grid-template-columns: 1fr; } }
+.panel {
+  background: #10131f; border: 1px solid #1c2030; border-radius: 12px; padding: 18px 20px;
+  transition: border-color .15s;
+}
+/* Whole panel armed (clicked): both halves glow so keyboard control is obviously live. */
+#telewrap.armed { outline: none; }
+#telewrap.armed .panel { border-color: #3a63a8; }
+.panel h2 { margin: 0 0 4px; font-size: 15px; font-weight: 700; }
+.panel h2 .en { font-size: 12px; font-weight: 400; color: #6b7394; margin-left: 8px; }
+.tip { font-size: 12.5px; color: #8b93b5; margin: 4px 0 16px; }
+#keypad.focus + * , #keypad.focus { }
+
+/* ---- keypad ---- */
+#keypad {
+  display: flex; flex-direction: column; gap: 10px; align-items: center;
+  padding: 18px; border-radius: 12px; outline: none;
+  border: 2px dashed #262b3d; transition: border-color .15s, background .15s;
+}
+#keypad.focus { border-color: #3a63a8; border-style: solid; background: #0e1830; }
+.krow { display: flex; gap: 10px; }
+kbd {
+  position: relative; width: 96px; height: 60px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: #1a1f30; color: #cdd6f4; border: 1px solid #2c3350;
+  border-bottom-width: 3px; border-radius: 9px;
+  font: 700 20px ui-monospace, monospace; user-select: none;
+}
+kbd span { font: 400 11px system-ui, "Noto Sans CJK SC", sans-serif; color: #7a83a6; margin-top: 3px; }
+kbd.kspace { font-size: 14px; }
+kbd.hit {
+  background: #2a4a7f; color: #cbe0ff; border-color: #89b4fa;
+  box-shadow: 0 0 0 2px #89b4fa66; transform: translateY(1px);
+}
+kbd.hit span { color: #a6c8ff; }
+kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 0 0 2px #f38ba866; }
+
+/* ---- speed selector ---- */
+.speedrow { display: flex; align-items: center; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
+.slabel { font-size: 13px; color: #a3abcc; }
+.spd {
+  display: flex; flex-direction: column; align-items: center;
+  background: #161a26; color: #8b93b5; border: 1px solid #2c3350;
+  border-radius: 8px; padding: 6px 16px; cursor: pointer; font-size: 14px; font-weight: 600;
+}
+.spd em { font-style: normal; font-size: 10px; font-weight: 400; color: #6b7394; margin-top: 1px; }
+.spd:hover { color: #cdd6f4; }
+.spd.on { background: #2a4a7f; color: #cbe0ff; border-color: #3a63a8; }
+.spd.on em { color: #7ea6e0; }
+.sunit { font-size: 11px; color: #6b7394; }
+
+/* ---- viz ---- */
+#vizwrap { display: flex; justify-content: center; padding: 6px 0 14px; }
+#viz { width: 240px; height: 240px; }
+.chassis { fill: #12182a; stroke: #2c3350; stroke-width: 2; }
+.wheels rect { fill: #3a4266; }
+.vlabel { fill: #6b7394; font: 11px system-ui; }
+.wid { fill: #6b7394; font: 11px ui-monospace, monospace; }
+.hub { fill: #89b4fa; }
+.varrow { stroke: #89b4fa; stroke-width: 4; stroke-linecap: round; }
+.vspin { fill: none; stroke: #f9e2af; stroke-width: 4; stroke-linecap: round; }
+
+/* ---- velocity table ---- */
+#velTable { width: 100%; border-collapse: collapse; margin-top: 4px; }
+#velTable td { padding: 7px 10px; border-top: 1px solid #1c2030; font: 15px ui-monospace, monospace; }
+#velTable td:first-child { color: #a3abcc; font: 13px ui-monospace, monospace; }
+#velTable td:first-child span { color: #6b7394; font-size: 11px; margin-left: 6px; font-family: system-ui, sans-serif; }
+#velTable td:nth-child(2) { text-align: right; color: #cbe0ff; font-weight: 600; }
+#velTable td.u { color: #6b7394; font-size: 12px; width: 40px; }
+.pressed { margin-top: 12px; font-size: 12px; color: #6b7394; }
+.pressed span { color: #a6c8ff; font-family: ui-monospace, monospace; }
+
+/* ---- ROS 2 placeholder ---- */
+.placeholder {
+  max-width: 560px; margin: 40px auto; text-align: center;
+  background: #10131f; border: 1px solid #1c2030; border-radius: 14px; padding: 40px 36px;
+}
+.placeholder .phicon { font-size: 56px; margin-bottom: 8px; }
+.placeholder h2 { margin: 0 0 12px; font-size: 20px; }
+.placeholder p { color: #a3abcc; }
+.placeholder ul { text-align: left; display: inline-block; color: #8b93b5; line-height: 1.9; }
+.placeholder .phnote { font-size: 12.5px; color: #6b7394; margin-top: 18px; }

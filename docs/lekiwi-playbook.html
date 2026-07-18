@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeKiwi 现成玩法总览 · 从遥操作到训练策略</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#22314e; --accent2:#2c6db5; --accent-dk:#1d5a99;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#eef5fb; --ok-line:#2c6db5; --ok-fg:#1d4e7a;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#141618; --fg:#e8e8e3; --muted:#9a9a92; --line:#2c2f33;
+      --card:#1c1f22; --accent:#7aa2d6; --accent2:#5b9bd5; --accent-dk:#8fb8e6;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#132131; --ok-line:#2c6db5; --ok-fg:#8fc0f0; --code-bg:#23262a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent2);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:30px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent2)}
+  h2 .en-h{color:var(--muted);font-weight:400;font-size:.7em;margin-left:8px}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent2);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  a{color:var(--accent-dk)}
+  .kbd{display:inline-block;min-width:22px;text-align:center;font-family:var(--mono);font-size:12px;
+    background:var(--card);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 7px;margin:0 1px}
+  .pill{display:inline-block;font-size:11.5px;font-family:var(--mono);padding:1px 8px;border-radius:20px;
+    background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-line);margin-left:6px;vertical-align:middle}
+  .lvl{font-size:12px;color:var(--muted);font-weight:400}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>LeKiwi 现成玩法总览：能拿它做什么
+    <span class="en">The LeKiwi playbook — what this mobile-manipulator can actually do out of the box</span>
+  </h1>
+  <p class="sub">2026-07-18 · 依据 LeRobot 官方 LeKiwi 文档 + SIGRobotics-UIUC/LeKiwi 仓库，并对齐本板实测（lerobot 0.5.2 @26ff40d，9 电机在线）</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR — 五种玩法，一条主线</h2>
+  <ul>
+    <li>LeKiwi 的全部玩法都围绕 LeRobot 的<strong>模仿学习闭环</strong>：<strong>遥操作 → 录数据 → 训练策略 → 自主执行</strong>。每一步都有现成命令，不用自己写控制器。</li>
+    <li><strong>① 遥操作</strong>：主臂示教机械臂 + 键盘 WASD 开底盘（我们的方案改成<strong>手柄</strong>）。这是最先能玩的，不需要训练。</li>
+    <li><strong>② 录数据集</strong>：一边遥操作一边录关节+双相机，自动存成 LeRobot 格式、可上传 HuggingFace Hub 共享。</li>
+    <li><strong>③ 训练策略</strong>：ACT / SmolVLA / Diffusion / π0 等 14 类策略任选，云端 GPU 跑（Orin 目前 torch 无 GPU，训练在云上）。</li>
+    <li><strong>④ 自主执行 & 回放</strong>：让训好的策略自己开车抓取（evaluate/rollout），或原样回放录过的一段（replay）。</li>
+    <li><strong>⑤ 现成资产</strong>：Hub 上有社区共享的 LeKiwi/LeRobot 数据集与预训练策略，可以直接下来跑，不必从零采数据。</li>
+    <li>经典入门任务：<strong>移动到不同位置抓取物体放进筐里</strong>（官方推荐 ≥50 段、每个位置 10 段）。</li>
+  </ul>
+</div>
+
+<h2>玩法全景<span class="en-h">The whole loop at a glance</span></h2>
+
+<figure class="fig">
+<svg viewBox="0 0 900 320" font-family="-apple-system,'Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b9bd5"/>
+    </marker>
+  </defs>
+  <!-- row of stages -->
+  <g>
+    <rect x="20" y="60" width="150" height="86" rx="10" fill="#2c6db5"/>
+    <text x="95" y="92" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">① 遥操作</text>
+    <text x="95" y="112" text-anchor="middle" fill="#cfe3f7" font-size="11.5">手柄 / 主臂 + WASD</text>
+    <text x="95" y="130" text-anchor="middle" fill="#cfe3f7" font-size="11.5">teleoperate.py</text>
+
+    <rect x="205" y="60" width="150" height="86" rx="10" fill="#1d5a99"/>
+    <text x="280" y="92" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">② 录数据</text>
+    <text x="280" y="112" text-anchor="middle" fill="#cfe3f7" font-size="11.5">关节+双相机</text>
+    <text x="280" y="130" text-anchor="middle" fill="#cfe3f7" font-size="11.5">record.py</text>
+
+    <rect x="390" y="60" width="150" height="86" rx="10" fill="#22314e"/>
+    <text x="465" y="92" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">③ 训练</text>
+    <text x="465" y="112" text-anchor="middle" fill="#aebfd8" font-size="11.5">ACT/SmolVLA…</text>
+    <text x="465" y="130" text-anchor="middle" fill="#aebfd8" font-size="11.5">lerobot-train（云）</text>
+
+    <rect x="575" y="60" width="150" height="86" rx="10" fill="#1d5a99"/>
+    <text x="650" y="88" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">④ 自主执行</text>
+    <text x="650" y="108" text-anchor="middle" fill="#cfe3f7" font-size="11.5">策略自己开车</text>
+    <text x="650" y="126" text-anchor="middle" fill="#cfe3f7" font-size="11.5">evaluate / rollout</text>
+
+    <rect x="760" y="60" width="120" height="86" rx="10" fill="none" stroke="#5b9bd5" stroke-width="2"/>
+    <text x="820" y="92" text-anchor="middle" fill="#5b9bd5" font-size="14" font-weight="700">⑤ 复用</text>
+    <text x="820" y="112" text-anchor="middle" fill="#9a9a92" font-size="11">Hub 数据集</text>
+    <text x="820" y="128" text-anchor="middle" fill="#9a9a92" font-size="11">/ 预训练策略</text>
+  </g>
+  <line x1="170" y1="103" x2="205" y2="103" stroke="#5b9bd5" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="355" y1="103" x2="390" y2="103" stroke="#5b9bd5" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="540" y1="103" x2="575" y2="103" stroke="#5b9bd5" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="725" y1="103" x2="760" y2="103" stroke="#5b9bd5" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#a)"/>
+  <!-- feedback loop -->
+  <path d="M650 146 L650 210 L280 210 L280 146" fill="none" stroke="#9a9a92" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a)"/>
+  <text x="465" y="230" text-anchor="middle" fill="#9a9a92" font-size="12">评测发现不足 → 补录更多数据 → 再训练（模仿学习的正常迭代）</text>
+  <!-- replay note -->
+  <path d="M280 146 L280 265 L465 265" fill="none" stroke="#9a9a92" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="470" y="269" fill="#9a9a92" font-size="12">replay.py：不训练，原样回放录过的一段（验机械重复性）</text>
+</svg>
+<figcaption>①②④ 在机器人上跑，③ 在云端 GPU 跑；⑤ 让你跳过采数据直接玩别人的成果 / Stages ①②④ run on-robot, ③ in the cloud</figcaption>
+</figure>
+
+<h2>① 遥操作：不训练就能玩<span class="en-h">Teleoperation</span> <span class="lvl">难度：入门</span></h2>
+<p>LeKiwi 是<strong>双机结构</strong>：机器人本体跑 <code>lekiwi_host</code>（我们的方案里 host 和客户端都在 Orin，官方是 Pi + 笔记本）。它同时接收两路输入：</p>
+<ul>
+  <li><strong>机械臂</strong>：移动<strong>主臂（Leader）</strong>，从臂 1:1 跟随（示教）。我们的方案用<strong>手柄摇杆</strong>替代主臂，见 <code>docs/lekiwi-orin-teleop-plan.html</code>。</li>
+  <li><strong>底盘</strong>：官方用键盘。三档速度，按 <span class="kbd">R</span>/<span class="kbd">F</span> 加减速：</li>
+</ul>
+<table>
+<tr><th>按键</th><th>动作</th><th></th><th>速度档</th><th>线速度</th><th>转速</th></tr>
+<tr><td><span class="kbd">W</span> / <span class="kbd">S</span></td><td>前进 / 后退</td><td rowspan="3"></td><td>Fast</td><td>0.4 m/s</td><td>90 °/s</td></tr>
+<tr><td><span class="kbd">A</span> / <span class="kbd">D</span></td><td>左移 / 右移（平移，不转身）</td><td>Medium</td><td>0.25 m/s</td><td>60 °/s</td></tr>
+<tr><td><span class="kbd">Z</span> / <span class="kbd">X</span></td><td>左转 / 右转</td><td>Slow</td><td>0.1 m/s</td><td>30 °/s</td></tr>
+</table>
+<pre><code># 机器人本体（Orin 上）
+python -m lerobot.robots.lekiwi.lekiwi_host --robot.id=my_awesome_kiwi
+# 客户端（改 examples/lekiwi/teleoperate.py 里的 remote_ip；本机调试填 127.0.0.1）
+python examples/lekiwi/teleoperate.py</code></pre>
+<div class="box warn"><strong>⚠ 官方键盘控底盘依赖全局键盘后端（pynput）</strong>只在 X11 / Windows / macOS（授权 Input Monitoring）下能用，<strong>Wayland 和无头 SSH 下失效</strong>。这正是我们改用<strong>手柄</strong>（pygame joystick）的原因之一 —— 手柄不受这个限制，SSH 无头也能跑。</div>
+
+<h2>② 录数据集：把演示存下来<span class="en-h">Record a dataset</span> <span class="lvl">难度：入门</span></h2>
+<p>一边遥操作一边录：每一帧同时记录 <strong>9 个关节角 + 前视相机 + 腕部相机</strong>，自动存成 LeRobot 标准格式（<code>~/.cache/huggingface/lerobot/{repo-id}</code>），可选一键上传 HuggingFace Hub 供社区复现。</p>
+<pre><code>python examples/lekiwi/record.py   # 先改脚本里的 remote_ip / repo_id / task</code></pre>
+<table>
+<tr><th>录制中按键</th><th>作用</th></tr>
+<tr><td><span class="kbd">→</span> 右方向键 / <span class="kbd">n</span></td><td>提前结束当前段，进入下一段</td></tr>
+<tr><td><span class="kbd">←</span> 左方向键 / <span class="kbd">r</span></td><td>重录当前段</td></tr>
+<tr><td><span class="kbd">Esc</span> / <span class="kbd">q</span></td><td>结束录制（<strong>别按 Ctrl+C</strong>，会损坏工程文件）</td></tr>
+</table>
+<div class="box ok"><strong>✔ 什么是「好数据集」</strong>入门任务选<strong>「抓取物体放进筐」</strong>：官方建议 ≥50 段、每个位置 10 段，相机固定、抓取动作一致、被操作物在画面内。经验法则：<strong>只看相机画面你自己也能完成这个任务</strong>，策略才学得会。先别急着加变化，等抓取稳了再逐步引入不同位置/手法。</div>
+
+<h2>③ 训练策略：让它学会自己做<span class="en-h">Train a policy</span> <span class="lvl">难度：进阶（需云端 GPU）</span></h2>
+<p>录够数据就能训练。LeRobot 内置 14 类策略，命令统一是 <code>lerobot-train --policy.type=&lt;名&gt;</code>：</p>
+<table>
+<tr><th>策略</th><th>是什么</th><th>适用</th></tr>
+<tr><td><code>act</code></td><td>Action Chunking Transformer</td><td><strong>首选入门</strong>，模仿学习标配，10 段数据 RTX5090 约 2h</td></tr>
+<tr><td><code>diffusion</code></td><td>Diffusion Policy</td><td>多模态动作分布</td></tr>
+<tr><td><code>smolvla</code> / <code>pi0</code> / <code>pi05</code></td><td>视觉-语言-动作大模型（VLA）</td><td>可跟语言指令，需额外 <code>pip install -e ".[smolvla]"</code></td></tr>
+<tr><td><code>tdmpc</code> / <code>vqbet</code> / <code>sac</code></td><td>其它模仿/强化学习策略</td><td>研究对比用</td></tr>
+</table>
+<pre><code>lerobot-train \
+  --policy.type=act \
+  --dataset.repo_id=${HF_USER}/lekiwi_pick \
+  --policy.device=cuda \
+  --output_dir=outputs/train/kiwi_act \
+  --wandb.enable=false</code></pre>
+<div class="box warn"><strong>⚠ 训练在云端，不在 Orin 上</strong>本板 pip 装的 torch 是 cu130，与 JetPack 6.2.2 的 CUDA 12.6 不匹配，<code>cuda.is_available()==False</code>。训练走云 GPU（维特文档给了 AutoDL 全流程，2 小时级）；训好的 <code>model.safetensors</code> 下回 Orin 做推理。等做推理时再解决 Jetson 官方 torch + 开 Super 模式。</div>
+
+<h2>④ 自主执行 & 回放<span class="en-h">Autonomous eval &amp; replay</span> <span class="lvl">难度：进阶</span></h2>
+<table>
+<tr><th>玩法</th><th>命令</th><th>要不要训练</th><th>做什么</th></tr>
+<tr><td><strong>评测策略</strong></td><td><code>examples/lekiwi/evaluate.py</code></td><td>要</td><td>加载训好的策略，让机器人<strong>自己开车+抓取</strong>，同时录评测数据</td></tr>
+<tr><td><strong>Rollout</strong></td><td><code>examples/lekiwi/rollout.py</code></td><td>要</td><td>跑策略推理循环（评测的底层形式）</td></tr>
+<tr><td><strong>回放</strong></td><td><code>examples/lekiwi/replay.py</code></td><td><strong>不要</strong></td><td>把录过的某一段动作<strong>原样重放</strong>，验证机械重复性 —— 遥操作后马上能玩</td></tr>
+</table>
+<p>先 <code>lekiwi_host</code> 起本体，再在客户端跑上面的脚本（改 <code>remote_ip</code> / 模型路径 / 段号）。</p>
+
+<h2>⑤ 复用社区资产：跳过采数据<span class="en-h">Reuse community assets</span> <span class="lvl">难度：入门</span></h2>
+<p>不想从零采 50 段数据，可以直接玩别人的：HuggingFace Hub 上按 <a href="https://huggingface.co/datasets?other=LeRobot"><code>LeRobot</code> 标签</a> 搜，有大量社区数据集和预训练策略。下载别人的数据集就能本地训练，或下预训练策略直接 evaluate。可视化数据集用：</p>
+<pre><code>lerobot-dataset-viz --repo-id &lt;某个社区数据集&gt;   # 浏览器里看关节曲线+相机回放</code></pre>
+
+<h2>本板可用的完整工具箱<span class="en-h">What's installed on this board</span></h2>
+<p>已实测板子上 <code>lerobot 0.5.2</code> 带以下命令（<code>examples/lekiwi/</code> 有 <code>teleoperate / record / replay / evaluate / rollout</code> 五个脚本）：</p>
+<table>
+<tr><th>命令</th><th>用途</th></tr>
+<tr><td><code>lerobot-find-port</code></td><td>找舵机驱动板串口（拔插识别）</td></tr>
+<tr><td><code>lerobot-find-cameras</code></td><td>枚举可用相机及其 index</td></tr>
+<tr><td><code>lerobot-setup-motors</code></td><td>给电机编号（臂 6→1，轮 9→8→7）—— 我们成品已编好 1~9</td></tr>
+<tr><td><code>lerobot-calibrate</code></td><td>标定主/从臂（轮子不用标定）</td></tr>
+<tr><td><code>lerobot-find-joint-limits</code></td><td>找关节限位</td></tr>
+<tr><td><code>lerobot-teleoperate</code></td><td>遥操作（CLI 版）</td></tr>
+<tr><td><code>lerobot-record</code> / <code>lerobot-replay</code></td><td>录制 / 回放数据集（CLI 版）</td></tr>
+<tr><td><code>lerobot-train</code></td><td>训练策略</td></tr>
+<tr><td><code>lerobot-eval</code> / <code>lerobot-rollout</code></td><td>评测 / 推理循环</td></tr>
+<tr><td><code>lerobot-dataset-viz</code> / <code>lerobot-edit-dataset</code></td><td>数据集可视化 / 编辑</td></tr>
+<tr><td><code>lerobot-info</code></td><td>打印环境/版本信息</td></tr>
+</table>
+
+<h2>对我们这台车：从哪开始<span class="en-h">Where we are, what's next</span></h2>
+<div class="box ok"><strong>✔ 已就位</strong>9 电机单总线全在线（臂 1~6 位置模式、轮 7/8/9 速度模式）；lerobot 0.5.2 装好并实测读通；底盘全向运动学脚本 <code>base_move.py</code> 已与 lerobot 源码交叉验证零误差；手动试车 notebook <code>notebooks/lekiwi-manual-test.ipynb</code> 可点。</div>
+<p>按玩法难度，建议路径：</p>
+<ol>
+  <li><strong>先辨认轮子</strong>（notebook 第一步）—— 确认 ID 7/8/9 对应左/后/右轮，方向对齐。</li>
+  <li><strong>标定机械臂</strong>：<code>lerobot-calibrate --robot.type=lekiwi --robot.id=orin_kiwi</code>（成品有客服标定 JSON 可直接放进 <code>~/.cache/.../calibration/</code> 跳过）。</li>
+  <li><strong>手柄遥操作打通</strong>（玩法①）—— 我们的方案核心，先能开车能动臂。</li>
+  <li><strong>接双相机 → 录一个小数据集</strong>（玩法②），跑 <code>replay</code> 验证。</li>
+  <li>数据够了上云训 ACT（玩法③）→ 回 Orin evaluate（玩法④）。</li>
+</ol>
+
+<h2>参考<span class="en-h">References</span></h2>
+<ul>
+  <li>LeRobot 官方 LeKiwi 文档：<a href="https://huggingface.co/docs/lerobot/lekiwi">huggingface.co/docs/lerobot/lekiwi</a></li>
+  <li>硬件仓库（BOM / 3D 打印 / 组装）：<a href="https://github.com/SIGRobotics-UIUC/LeKiwi">github.com/SIGRobotics-UIUC/LeKiwi</a></li>
+  <li>社区数据集（LeRobot 标签）：<a href="https://huggingface.co/datasets?other=LeRobot">huggingface.co/datasets?other=LeRobot</a> · Discord 频道 <code>mobile-so-100-arm</code></li>
+  <li>本项目：<code>docs/lekiwi-orin-teleop-plan.html</code>（手柄遥操作实施方案）· <code>notebooks/lekiwi-manual-test.ipynb</code>（手动试车）</li>
+</ul>
+
+</div>
+</body>
+</html>
