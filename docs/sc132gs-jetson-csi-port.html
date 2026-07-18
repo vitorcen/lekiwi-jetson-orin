@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RDK CS130WI/GS130WI (SC132GS) → Jetson Orin CSI 驱动移植方案</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  .box .en-i{font-style:normal;opacity:.75;font-size:.88em}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .st{font:600 13px var(--mono);fill:#fff}
+  .sl{font:12px -apple-system,sans-serif;fill:var(--muted)}
+  a{color:var(--accent-dk)}
+  @media (prefers-color-scheme:dark){a{color:var(--accent)}}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .kv{color:var(--muted);font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>RDK CS130WI/GS130WI（SC132GS）→ Jetson Orin CSI 驱动移植方案
+    <span class="en">Porting the D-Robotics GS130WI stereo camera (dual SC132GS + IMU) to Jetson Orin Nano native CSI</span>
+  </h1>
+  <p class="sub">目标板：Orin Nano 8GB ｜ L4T R36.5.0 / 内核 5.15.185-tegra（JetPack 6.2.2）｜ 相机：RDK 双目模组（官方文档型号 <a href="https://developer.d-robotics.cc/accessories_doc/en/stereo_camera_gs130wi/product_overview">GS130WI</a>：双 SmartSens SC132GS 全局快门 1.3MP + ICM-42688-P IMU，一体模组，左右两条 22-pin FPC 各占一个 CSI 口。<strong>传感器实测为彩色 Bayer（BGGR）、无 IR-cut</strong>——RDK X5 上 pre-ISP RAW 相位统计定谳，见 §3）｜ 状态：方案设计，未实施 ｜ 日期：2026-07-18（依 codex 评审 + RDK X5 实测数据修订）</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li><strong>拓扑先搞对</strong>：这不是「两个单目相机」，是<strong>一块双目一体模组</strong>——右排线走右目 + IMU（ICM-42688-P），左排线走左目。排线布 2 条数据 lane，但 <strong>X5 实机 1088×1280 寄存器表走 1-lane@1.2Gbps</strong>（30/60fps 同 PLL；896×896 才是 2-lane）——lane 数跟表走，别想当然按 2 配。模组只吃 3V3，<strong>没有 MCLK 输入脚</strong>（自带时钟），17 脚 RESET、18 脚 FSYNC。<span class="kv">One stereo module, two FPC cables; self-clocked, no MCLK input; proven 1088×1280 tables are 1-lane.</span></li>
+    <li><strong>传感器是彩色不是单色</strong>：RDK X5 上抓 pre-ISP RAW 做 2×2 相位统计——绿对角相等（64.7/64.7）、蓝位低、红位高，<strong>BGGR Bayer 实锤</strong>。但模组<strong>无 IR-cut</strong>（NIR 850/940nm 增强是卖点），室内近红外污染 R/B，色彩仅供参考；深度/VIO 用亮度即可。<span class="kv">Measured color BGGR, no IR-cut — treat color as best-effort.</span></li>
+    <li><strong>出厂标定白捡</strong>：每条排线上 <code>0x50</code> EEPROM 存出厂双目标定（魔数 "UNION"：双目内参/畸变/R/T，基线 69.7mm）——Jetson 侧直接解析复用，<strong>免自标定</strong>（解析布局与代码见 RDK-experience 仓 <code>stereo_cam.py parse_calib</code>）。</li>
+    <li>板上现状：无 <code>/dev/video*</code>；相机 I2C（<code>i2c-2</code>）当前 mux 分支扫到 <code>0x50/0x58/0x68</code>——<code>0x68</code> 与 ICM-42688-P 相符（旁证右排线在这个分支上）。sensor 地址待实测（0x30/0x32/0x33 都要试，见 P0）。</li>
+    <li>L4T 没有 SC132GS 驱动但<strong>不用从零写</strong>：地瓜开源 <code>x5-libcam-sensor</code> 出<strong>寄存器表</strong>，Rockchip <code>sc132gs.c</code> 出<strong>寄存器访问/控制参考</strong>（供电时序不适用——模组自供电），L4T <code>nv_imx219.c</code> 出 <strong>tegracam 框架骨架</strong>。</li>
+    <li>出图路线：<strong>Bayer RAW10 直读（BG10）</strong>——sensor 本来就是 BGGR，DT 按 <code>bayer/bggr</code> 如实申报（不再是"伪装"），应用侧自行去马赛克，或 2×2 四像素合并得半分辨率亮度图（544×640，深度/VIO 够用）。<strong>Argus 理论上能吃 bayer 但没有这颗的 ISP tuning + 无 IR-cut 色彩没救，全程 V4L2 RAW 路线</strong>。</li>
+    <li>工作量按里程碑分级：<strong>单路首帧 4–8 天</strong>；双路自由运行 + 控制齐全 + 稳定性验证累计 <strong>2–3 周</strong>；硬同步 + IMU 时间戳 + VIO 可用累计 <strong>3–6 周</strong>。前置死关：<strong>22-pin 电气映射逐 net 核对</strong>——过不了直接放弃，换 IMX219。</li>
+  </ul>
+</div>
+
+<h2>1. 现状诊断：为什么检测不到<span class="en">Why nothing shows up today</span></h2>
+<p>三层各查一遍，结论：模组疑似活着（IMU 在应答），驱动和设备树双缺。</p>
+<pre><code># ① 无任何视频节点
+ls /dev/video*            # → 无
+v4l2-ctl --list-devices   # → 无
+
+# ② 内核里根本没有 SC132GS 驱动（L4T 只带这些）
+ls /lib/modules/$(uname -r)/updates/drivers/media/i2c/
+# → nv_imx219 nv_imx477 nv_ov5693 nv_imx274 …  没有 sc132gs
+
+# ③ 设备树零相机节点：没有 cam_i2cmux，extlinux 没配 OVERLAYS
+ls /proc/device-tree/ | grep -i cam   # → 只有 camera-ivc-channels（框架，无 sensor）
+grep OVERLAYS /boot/extlinux/extlinux.conf   # → 无
+
+# ④ 相机 I2C 总线当前 mux 分支上有活物（i2c-2 = 3180000 = CAM I2C）
+i2cdetect -y 2
+# → 0x50(EEPROM) 0x58(?) 0x68 —— 0x68 与官方标配 ICM-42688-P 一致
+#   sensor 本体没应答；原因未定论：可能是地址不在默认扫描预期(0x32/0x33)、
+#   mux 停在另一分支、或 RESET 未拉起 —— P0 用示波器+分支切换逐一排除，
+#   不能拿 i2cdetect 的 NACK 单独下"没供电"结论</code></pre>
+
+<div class="box ok">
+  <strong>✓ 诊断结论 <span class="en-i">— triage verdict</span></strong>
+  IMU 在应答说明右排线 3V3/I2C 通路大概率是好的。缺的是软件全套：内核驱动 + 设备树。这不是插错线，是这款相机压根不在 Jetson 生态里——官方只支持 RDK X5。
+</div>
+
+<div class="box warn">
+  <strong>⚠ 型号对应 <span class="en-i">— naming</span></strong>
+  实物标称「CS130WI」在公开渠道查不到独立资料；官方文档体系里对应的是 <a href="https://developer.d-robotics.cc/accessories_doc/en/stereo_camera_gs130wi/product_overview">GS130WI</a>（双 SC132GS + ICM-42688-P）。本文按 GS130WI 资料展开；P0 用芯片 ID（<code>0x3107/0x3108</code> 期望 <code>0x0132</code>）和 IMU WHO_AM_I（ICM-42688-P 期望 <code>0x47</code>）实测定案。
+</div>
+
+<h2>2. 素材考古：三路合流<span class="en">Source material — three donors, one driver</span></h2>
+<table>
+  <tr><th>素材</th><th>是什么</th><th>拿来干什么</th><th>局限</th></tr>
+  <tr>
+    <td><a href="https://github.com/D-Robotics/x5-libcam-sensor">D-Robotics x5-libcam-sensor</a><br><code>sc132gs/</code></td>
+    <td><strong>用户态</strong> sensor 库（hobot VIN/ISP 框架的插件），不是内核驱动</td>
+    <td>全套<strong>寄存器表</strong>：1088×1280@60fps（master，<strong>1-lane@1.2Gbps</strong>）、896×896@10fps（2-lane）、slave 外触发表（注意：slave 表标 30fps，60fps 对称同步<strong>未经验证</strong>）、HDR(DOL2)、曝光/增益换算（曝光 <code>0x3e00/01/02</code>，模拟增益 <code>0x3e08/09</code>，数字增益 <code>0x3e06/07</code>；HDR 的 <code>0x3e10–0x3e13</code> 一期不碰）、RAW10。<strong>致命细节</strong>：X5 板载库存 30fps 表是<strong>外触发模式</strong>（<code>vts=0x3fff</code>，帧率=FSYNC/LPWM 触发）——Jetson 上 FSYNC 关死后用这张表<strong>一帧都不会出</strong>；必须用自由跑表（<code>0x3222=0x00</code>，X5 上热打此寄存器即从触发模式切自由跑 60fps，实测验证）</td>
+    <td>框架代码全不能用，只取数据；表是「某块模组某 revision」的实配，与手上模组可能有出入（<strong>已降险</strong>：30fps 表 + <code>0x3222=0</code> 自由跑序列在 RDK X5 同款模组上实测通过，见 RDK-experience 仓 <code>stereo_cam.py _SEQ_60FPS</code>）</td>
+  </tr>
+  <tr>
+    <td>Rockchip BSP<br><code>drivers/media/i2c/sc132gs.c</code></td>
+    <td>标准 <strong>V4L2 subdev 内核驱动</strong>（GPL），1-lane 720Mbps，1080×1280，Y8 输出</td>
+    <td><strong>寄存器访问与 V4L2 控制参考</strong>：芯片 ID 验证（<code>0x3107</code>=<code>0x0132</code>）、controls 骨架、i2c 读写封装</td>
+    <td><strong>供电/MCLK 时序不适用</strong>：RK 驱动伺候的是裸 sensor（AVDD/DOVDD/DVDD + xvclk），GS130WI 模组只暴露 3V3+RESET，板上自己完成电源和时钟——power_on 只该动 RESET</td>
+  </tr>
+  <tr>
+    <td>L4T nvidia-oot<br><code>nv_imx219.c</code></td>
+    <td>Jetson <strong>tegracam 框架</strong>的参考驱动</td>
+    <td>框架样板：<code>tegracam_device_register</code>、<code>sensor_common</code> 模式表怎么和 DT 对接、OOT 模块编译方式</td>
+    <td>只是骨架，sensor 逻辑全换</td>
+  </tr>
+</table>
+
+<figure class="fig">
+  <svg viewBox="0 0 720 250" role="img" aria-label="three source donors merge into one Jetson driver">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#8ed100"/><stop offset="1" stop-color="#5c9000"/>
+      </linearGradient>
+      <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#76b900"/>
+      </marker>
+    </defs>
+    <rect x="10" y="20" width="200" height="62" rx="8" fill="#4a6fa5"/>
+    <text x="110" y="46" text-anchor="middle" class="st">x5-libcam-sensor</text>
+    <text x="110" y="66" text-anchor="middle" class="st" font-size="11">寄存器表 · 触发表 · AE 换算</text>
+    <rect x="10" y="96" width="200" height="62" rx="8" fill="#7a5aa0"/>
+    <text x="110" y="122" text-anchor="middle" class="st">Rockchip sc132gs.c</text>
+    <text x="110" y="142" text-anchor="middle" class="st" font-size="11">寄存器访问 · 芯片ID · controls</text>
+    <rect x="10" y="172" width="200" height="62" rx="8" fill="#a0764a"/>
+    <text x="110" y="198" text-anchor="middle" class="st">nv_imx219.c (L4T OOT)</text>
+    <text x="110" y="218" text-anchor="middle" class="st" font-size="11">tegracam 框架 · DT 对接样板</text>
+    <line x1="210" y1="51" x2="330" y2="115" stroke="#76b900" stroke-width="2.5" marker-end="url(#ar)"/>
+    <line x1="210" y1="127" x2="330" y2="127" stroke="#76b900" stroke-width="2.5" marker-end="url(#ar)"/>
+    <line x1="210" y1="203" x2="330" y2="140" stroke="#76b900" stroke-width="2.5" marker-end="url(#ar)"/>
+    <rect x="340" y="90" width="180" height="74" rx="10" fill="url(#g)"/>
+    <text x="430" y="121" text-anchor="middle" class="st">nv_sc132gs.c</text>
+    <text x="430" y="143" text-anchor="middle" class="st" font-size="11">新写的 Jetson OOT 驱动</text>
+    <line x1="520" y1="127" x2="580" y2="127" stroke="#76b900" stroke-width="2.5" marker-end="url(#ar)"/>
+    <rect x="590" y="90" width="120" height="74" rx="10" fill="#3d6100"/>
+    <text x="650" y="121" text-anchor="middle" class="st">+ DT overlay</text>
+    <text x="650" y="143" text-anchor="middle" class="st" font-size="11">.dtbo (双CSI)</text>
+  </svg>
+  <figcaption>三路素材合流：数据取地瓜、寄存器访问取瑞芯微、框架取 NVIDIA —— 都是开源的，一行不用逆向。</figcaption>
+</figure>
+
+<h2>3. 管线原理：RDK X5 vs Jetson<span class="en">Pipeline anatomy — why the userspace lib can't be "ported" as-is</span></h2>
+<p>地瓜的「驱动」活在自家 VIN/ISP 用户态框架里；Jetson 的相机活在内核 V4L2 + tegracam 里。两边从 MIPI 往上没有一层是对得上的——所以移植的本质是<strong>用地瓜的数据重写一个 Jetson 驱动</strong>，不是搬代码。</p>
+
+<figure class="fig">
+  <svg viewBox="0 0 720 330" role="img" aria-label="RDK X5 vs Jetson camera pipeline comparison">
+    <defs>
+      <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+        <path d="M0 0 L10 5 L0 10 z" fill="#9a9a92"/>
+      </marker>
+    </defs>
+    <text x="180" y="24" text-anchor="middle" class="sl" font-weight="700">RDK X5（原生态）</text>
+    <text x="540" y="24" text-anchor="middle" class="sl" font-weight="700">Jetson Orin（移植目标）</text>
+    <rect x="80" y="40" width="200" height="44" rx="8" fill="#4a6fa5"/>
+    <text x="180" y="59" text-anchor="middle" class="st">GS130WI 双目模组</text>
+    <text x="180" y="76" text-anchor="middle" class="st" font-size="11">左目 / 右目+IMU · 2-lane ×2</text>
+    <rect x="440" y="40" width="200" height="44" rx="8" fill="#4a6fa5"/>
+    <text x="540" y="59" text-anchor="middle" class="st">GS130WI 双目模组</text>
+    <text x="540" y="76" text-anchor="middle" class="st" font-size="11">左目 / 右目+IMU · 2-lane ×2</text>
+    <line x1="180" y1="84" x2="180" y2="104" stroke="#9a9a92" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="540" y1="84" x2="540" y2="104" stroke="#9a9a92" stroke-width="2" marker-end="url(#ar2)"/>
+    <rect x="80" y="108" width="200" height="44" rx="8" fill="#5a7d8c"/>
+    <text x="180" y="135" text-anchor="middle" class="st">SIF / VIN（地瓜私有）</text>
+    <rect x="440" y="108" width="200" height="44" rx="8" fill="#5a7d8c"/>
+    <text x="540" y="135" text-anchor="middle" class="st">NVCSI → VI5（tegracam）</text>
+    <line x1="180" y1="152" x2="180" y2="172" stroke="#9a9a92" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="540" y1="152" x2="540" y2="172" stroke="#9a9a92" stroke-width="2" marker-end="url(#ar2)"/>
+    <rect x="80" y="176" width="200" height="44" rx="8" fill="#8a6d1f"/>
+    <text x="180" y="203" text-anchor="middle" class="st">hobot ISP + libcam(用户态)</text>
+    <rect x="440" y="176" width="200" height="44" rx="8" fill="#3d6100"/>
+    <text x="540" y="196" text-anchor="middle" class="st">V4L2 RAW（不走 Argus/ISP）</text>
+    <text x="540" y="212" text-anchor="middle" class="st" font-size="11">BG10（BGGR Bayer 如实申报）</text>
+    <line x1="180" y1="220" x2="180" y2="240" stroke="#9a9a92" stroke-width="2" marker-end="url(#ar2)"/>
+    <line x1="540" y1="220" x2="540" y2="240" stroke="#9a9a92" stroke-width="2" marker-end="url(#ar2)"/>
+    <rect x="80" y="244" width="200" height="44" rx="8" fill="#666"/>
+    <text x="180" y="271" text-anchor="middle" class="st">应用（地瓜 SDK）</text>
+    <rect x="440" y="244" width="200" height="44" rx="8" fill="#666"/>
+    <text x="540" y="264" text-anchor="middle" class="st">/dev/video* → 去马赛克/2×2合并</text>
+    <text x="540" y="280" text-anchor="middle" class="st" font-size="11">16-bit 容器 · stride 需验证</text>
+    <rect x="316" y="108" width="88" height="44" rx="8" fill="#a34440"/>
+    <text x="360" y="127" text-anchor="middle" class="st" font-size="11">这两层</text>
+    <text x="360" y="143" text-anchor="middle" class="st" font-size="11">互不兼容</text>
+    <text x="360" y="315" text-anchor="middle" class="sl">sensor 是同一颗 —— 寄存器表可复用；框架层全部重写</text>
+  </svg>
+  <figcaption>左：地瓜私有 VIN/ISP 栈（用户态 sensor 库）。右：Jetson 内核 tegracam/V4L2 栈，RAW 直读旁路 Argus。</figcaption>
+</figure>
+
+<div class="box warn">
+  <strong>⚠ CFA 事实与出图路线 <span class="en-i">— the sensor is color BGGR; routes</span></strong>
+  早期按「单色」规划——<strong>已被实测推翻</strong>：RDK X5 上抓 pre-ISP RAW（同款模组、同 1088×1280 表）做 2×2 相位统计，绿对角相等（64.7/64.7）、蓝位 48.8、红位 60.7，<strong>BGGR Bayer 彩色实锤</strong>。但模组无 IR-cut（NIR 增强设计），室内近红外污染 R/B——色彩只能当参考，深度/VIO 用亮度。注意：不走 Argus ≠ 不走 tegracam——内核侧仍是 tegracam sensor 框架，只是用户侧走 V4L2 RAW。<br>
+  <strong>路线 A（首选）</strong>：Bayer RAW10 如实申报——DT <code>mode_type="bayer"</code>、<code>pixel_phase="bggr"</code>，驱动报 <code>MEDIA_BUS_FMT_SBGGR10_1X10</code>（V4L2 fourcc <code>BG10</code>）。应用侧两个消费法：① 去马赛克得彩色（NIR 污染，仅监控用）；② <strong>2×2 四像素平均</strong>得 544×640 亮度图（CFA 各相位等权，天然抵消——深度/VIO 的正解）。bytesperline/16-bit 容器对齐要实测。上板后<strong>用同一套 2×2 相位统计自检</strong>（绿对角应相等）确认相位没被 flip/crop 搬动。改动全部圈在自己的驱动+DT 里。<br>
+  <strong>路线 B（二期，风险高）</strong>：原生 Y10——r36.x 的 DT 属性字典只有 bayer/yuv/wdr，要动 <code>sensor_common</code>/<code>camera_common</code>/<code>vi5_formats</code> 并<strong>重编 NVIDIA camera core OOT 模块</strong>；且 sensor 实为 Bayer，Y10 还得先在 sensor 内合并——<strong>价值存疑，基本可划掉</strong>。
+</div>
+
+<h2>4. 实施计划<span class="en">Implementation plan — phased, each phase has a kill switch</span></h2>
+<p>每个阶段有明确的通过判据，不过就地止损——尤其 P0，电气不兼容就直接放弃，一行驱动都别写。</p>
+
+<h3>P0 · 电气兼容性验证（1 天）—— 先决条件，过不了全盘放弃</h3>
+<p>已知两端完整引脚（模组来自 <a href="https://developer.d-robotics.cc/accessories_doc/en/stereo_camera_gs130wi/hardware">官方硬件页</a>，Jetson 来自载板规格书 Table 3-1）。模组 <strong>Pin1=GND … Pin22=3V3</strong>，Jetson J20/J21（Molex 54548-2272，下接触、金属面朝散热器）<strong>Pin1=3.3V … Pin22=GND</strong>——两端<strong>互为镜像</strong>。逐 pin 按反序（模组 m ↔ Jetson 23−m）核对，<strong>22 个里 21 个严丝合缝，唯一例外是 pin 18</strong>：</p>
+<table>
+  <tr><th>模组 pin</th><th>信号</th><th>↔ Jetson pin</th><th>信号</th><th>结果</th></tr>
+  <tr><td>1</td><td>GND</td><td>22</td><td>GND</td><td>✅</td></tr>
+  <tr><td>2 / 3</td><td>MDN0 / MDP0</td><td>21 / 20</td><td>CSI1_D0_N / _P</td><td>✅ N↔N、P↔P</td></tr>
+  <tr><td>4</td><td>GND</td><td>19</td><td>GND</td><td>✅</td></tr>
+  <tr><td>5 / 6</td><td>MDN1 / MDP1</td><td>18 / 17</td><td>CSI1_D1_N / _P</td><td>✅</td></tr>
+  <tr><td>7</td><td>GND</td><td>16</td><td>GND</td><td>✅</td></tr>
+  <tr><td>8 / 9</td><td>MCN / MCP</td><td>15 / 14</td><td>CSI1_CLK_N / _P</td><td>✅ 差分极性也对</td></tr>
+  <tr><td>10</td><td>GND</td><td>13</td><td>GND</td><td>✅</td></tr>
+  <tr><td>11 / 12</td><td><strong>NC（空脚）</strong></td><td>12 / 11</td><td>CSI0_D0_N / _P</td><td>✅ 模组不接 → Jetson CSI0 空用</td></tr>
+  <tr><td>13</td><td>GND</td><td>10</td><td>GND</td><td>✅</td></tr>
+  <tr><td>14 / 15</td><td><strong>NC（空脚）</strong></td><td>9 / 8</td><td>CSI0_D1_N / _P</td><td>✅ 同上</td></tr>
+  <tr><td>16</td><td>GND</td><td>7</td><td>GND</td><td>✅</td></tr>
+  <tr><td>17</td><td>RESET</td><td>6</td><td>CAM0_PWDN（1.8V 输出）</td><td>✅ 正好当复位控制</td></tr>
+  <tr><td><strong>18</strong></td><td><strong>FSYNC（输入）</strong></td><td><strong>5</strong></td><td><strong>CAM0_MCLK（1.8V 输出）</strong></td><td>⚠ <strong>唯一不一样</strong></td></tr>
+  <tr><td>19</td><td>GND</td><td>4</td><td>GND</td><td>✅</td></tr>
+  <tr><td>20 / 21</td><td>SCL / SDA</td><td>3 / 2</td><td>CAM_I2C_SCL / SDA</td><td>✅</td></tr>
+  <tr><td>22</td><td>3V3</td><td>1</td><td>+3.3V</td><td>✅ 电源对位</td></tr>
+</table>
+<div class="box warn">
+  <strong>⚠ pin 18：不是短路，是软件层要关掉的一根线 <span class="en-i">— the one exception, handled in DT not hardware</span></strong>
+  反序后 Jetson 的 <code>CAM0_MCLK</code>（输出）物理接到模组 <code>FSYNC</code>（输入）。<strong>两端都是 1.8V 信号线，不是电源，插反也不烧</strong>；问题只是若 DT 使能 MCLK，Jetson 会往这根线打 24MHz 方波灌进模组 FSYNC。对策：<strong>DT 里不配 mclk</strong>（这颗模组自带时钟不需要），该脚留 GPIO/不驱动即可；且自由跑表（<code>0x3222=0</code>，X5 实证）本就忽略 FSYNC——功能上无害。<em>反过来看这还是个便利：将来要硬同步，正好可把这根 GPIO 主动拉去驱动 FSYNC，见 P4。</em>
+</div>
+<p>两个结论：① 模组只用一组 2-lane，落在连接器 <strong>CSI1 brick</strong>；模组 pin 11/12/14/15 是 <strong>NC 空脚</strong>，反序后正好盖在 Jetson 的 CSI0 数据线上——<strong>不是冲突，是 Jetson CSI0 整组空用</strong>（P2 设备树只配 CSI1）。② 这套镜像反序正是树莓派 22-pin 相机约定，Orin Nano 本兼容树莓派相机，模组随附线（本给同约定的 RDK X5）大概率直接可用。</p>
+<div class="box err">
+  <strong>✗ 但"插异向排线就行"仍是待实测，不是已验证 <span class="en-i">— still to be verified, not confirmed</span></strong>
+  「镜像对得上」是<strong>纸面推演</strong>；实际该用同面还是异面 FPC，取决于两端连接器接触面朝向，光看引脚表定不了。而插反的失败模式是<strong>破坏性的</strong>（模组 3V3 撞 Jetson GND）。所以上电前<strong>必须万用表验反序连通</strong>：断电测 <code>Jetson pin1 ↔ 模组 pin22 通</code>（=反序，对，可限流上电）；若测出 <code>Jetson pin1 ↔ 模组 pin1 通</code>（=直通线）→ <strong>停，别上电，换线或翻面</strong>。
+</div>
+<table>
+  <tr><th>#</th><th>动作</th><th>通过判据 / 失败即止损</th></tr>
+  <tr><td>1</td><td><strong>用万用表验证上表的反序映射</strong>（纸面已全对位，此步只证实物排线是反序不是直通）：断电测 Jetson pin1 ↔ 模组 pin22、Jetson pin22 ↔ 模组 pin1</td><td>两条都通 = 反序，放行；若 Jetson pin1 ↔ 模组 pin1 通 = 直通线，3V3 撞 GND → <strong>停，换线/翻面，绝不上电</strong></td></tr>
+  <tr><td>2</td><td>首次上电用<strong>限流电源</strong>；<strong>DT 里不配 mclk</strong>，确认 <code>CAM0_MCLK</code>（pin5）不驱动——别灌进模组 FSYNC（pin18，唯一非镜像脚）</td><td>电流正常、无发热</td></tr>
+  <tr><td>3</td><td>I2C 认器件：<code>cam_i2cmux</code> 两个分支各扫一遍，<strong>0x30/0x32/0x33 逐一试</strong>（RDK X5 实测：右目 <code>0x30</code>、左目 <code>0x32</code>，库存配置扫 {0x30,0x33}）；示波器同看 RESET/SCL/SDA；必要时 <code>gpioset</code> 拉 RESET。<strong>顺手读 <code>0x50</code> EEPROM 前 5 字节</strong>：ASCII "UNION" = 模组在线的强证据 + <strong>出厂双目标定</strong>（内参/畸变/R/T，基线 69.7mm，解析布局见 RDK-experience 仓 <code>stereo_cam.py parse_calib</code>）——Jetson 侧免自标定</td><td>某地址读 <code>0x3107/0x3108</code> 得 <code>0x0132</code>；IMU <code>0x68</code> WHO_AM_I 得 <code>0x47</code>(ICM-42688-P)；EEPROM 读出 "UNION"</td></tr>
+  <tr><td>4</td><td><strong>做 mode timing 表</strong>：从 X5 实机配置抄链路率——<strong>1088×1280 表是 1-lane@1.2Gbps（mipiclk=1200，30/60fps 同 PLL），不是 2-lane</strong>；896×896 才是 2-lane。区分 lane bit rate / sensor pixel clock / HTS 寄存器单位 / DT <code>line_length</code>（像素单位，NVIDIA 要求 ≥ active_w，<strong>不能把 <code>0x320c/0x320d</code> 原值照抄</strong>）</td><td>一张经计算校验的表：active_w/h、line_length、pix_clk_hz、serdes 速率、<strong>lane 数（跟表）</strong></td></tr>
+</table>
+
+<h3>P1 · 内核驱动 <code>nv_sc132gs.c</code>（3–4 天）</h3>
+<pre><code># 构建环境：锁定与运行内核完全匹配的 r36.5 public sources
+#   需要 nvidia-oot 源 + Module.symvers + 内核 .config（vermagic 必须一致）
+#   ——"WiFi DKMS 能编"只证明 headers 在，不证明 OOT camera 树能编，单独验证
+以 nv_imx219.c 为骨架新建 nv_sc132gs.c：
+  probe:       只控 RESET（模组自供电、自时钟，无 regulator/无 xvclk）
+  芯片ID验证:  0x3107/0x3108 == 0x0132
+  mode 表:     1088x1280@60fps RAW10 · 1-lane（P0 校验过的 timing 表）
+               896x896@10fps 2-lane 低带宽档做 bring-up 基线
+               ⚠ 必须用自由跑表(0x3222=0x00)——库存 30fps 表是外触发模式
+               (vts=0x3fff,帧率=FSYNC 触发),Jetson 上 FSYNC 关死 => 零帧
+  fmt:         MEDIA_BUS_FMT_SBGGR10_1X10（实测 CFA=BGGR；一期不做 Y10）
+  controls:    曝光 0x3e00/01/02 · 模拟增益 0x3e08/09 · 数字增益 0x3e06/07
+               ← 换算抄地瓜 sc132gs_utility.c；一期固定 60fps,不做 set_frame_rate
+  stream_on:   0x0100=0x01 / off=0x00
+安装:  insmod 验证 → depmod 落位;记录回滚方式(删 ko + depmod);内核升级需重编</code></pre>
+<p class="kv">通过判据：<code>modprobe nv_sc132gs</code> 后 dmesg 报 probe 成功 + 芯片 ID 匹配（两路各自）。</p>
+
+<h3>P2 · 设备树 overlay（2 天）</h3>
+<pre><code>仿照 "Camera IMX219 Dual" 官方 overlay 写 tegra234-p3767-camera-p3768-sc132gs-dual.dts：
+  cam_i2cmux:    /bus@0/ 下的 i2c-mux-gpio,父控制器 3180000.i2c,两分支各挂 sensor
+  两路链路:      serial_b / serial_c → NVCSI/VI port-index 1/2
+                 (已对照本机 L4T 双 IMX219 overlay 反编译核实)
+                 CAM0(serial_b) 不能漏 lane_polarity="6"(官方双 IMX219 overlay 有)
+  endpoint 一致: sensor → NVCSI sink/source → VI 三处 bus-width 一致且跟表:
+                 1088x1280 表 => =1;896x896 表 => =2(别照抄 IMX219 的 2)
+  mode 属性:     active_w/h=1088/1280 · line_length(P0 表) · pix_clk_hz(P0 表)
+                 mode_type="bayer" · pixel_phase="bggr"(实测 CFA;上板后 2x2 相位自检)
+                 csi_pixel_bit_depth=10
+                 embedded_metadata_height=0 · phy_mode=DPHY · dpcm_enable=false
+  tegra-camera-platform: 两路 module 声明;overlay compatible 覆盖 p3767-0005/-super
+编译 .dtbo → /boot,jetson-io.py 或手写 OVERLAYS;保留无 overlay 的备份启动项</code></pre>
+<p class="kv">通过判据：启动后出现两个 video 节点（<strong>不假定编号</strong>，按 <code>v4l2-ctl --list-devices</code> 的 sensor 名认），<code>--list-formats-ext</code> 列出 BG10 1088×1280；<code>media-ctl -p</code> 图完整。</p>
+
+<h3>P3 · 出图与稳定性（3–5 天）</h3>
+<pre><code># 先单路、低速档（896x896@10fps）建立基线，再上 60fps，最后双路同抓
+v4l2-ctl -d /dev/videoN --set-fmt-video=width=1088,height=1280,pixelformat=BG10 \
+         --stream-mmap --stream-count=100 --stream-to=frm.raw
+# 收不到帧 → 打开 vi/csi trace 看 CHANSEL_NOMATCH / discontinuous frame：
+echo 1 &gt; /sys/kernel/debug/tracing/events/tegra_rtcpu/enable
+# 常见死点：dphy settle time（cil_settletime）、lane 数、pix_clk_hz 算错
+# 验证清单（首帧只是门槛,不是终点）：
+#   显式 FOURCC · bytesperline/sizeimage/位对齐核对 · 黑电平
+#   v4l2-compliance · 曝光/增益边界值 · stream on/off 循环
+#   双路同抓 30–60 min soak,盯丢帧/CRC/ECC/sequence 统计
+#   冷启动/热重启/模块卸载重载</code></pre>
+<p class="kv">通过判据：双路 60fps 同抓 30 分钟零丢帧;RAW10 做 2×2 相位统计确认 BGGR（绿对角相等），去马赛克/四像素合并出合理亮度图。</p>
+
+<h3>P4 · 双目硬同步 + IMU（独立子项目,3–10 天,按需）</h3>
+<ul>
+  <li><strong>硬同步不是「DT 加个属性」</strong>：地瓜的 master 表实为自由运行、slave 表是外触发且标 30fps——60fps 对称同步未经验证。需要：外部 FSYNC 源（PWM/GPIO,经转接把信号送到两路 18 脚,核对 1.8V/3.3V 阈值）、驱动显式实现 free-run/slave 模式切换、示波器或闪光 LED 实测左右曝光相位差（不能只看 V4L2 时间戳）、处理双节点启动顺序与序号对齐。</li>
+  <li><strong>IMU（ICM-42688-P @0x68）</strong>：r36.5 rootfs 没有现成 <code>inv_icm42600</code> 模块——要么使能/移植该 IIO 驱动,要么用户态 i2cdev 读 FIFO。「能读数」半天;<strong>VIO 可用</strong>（ODR/量程/FIFO/中断/时间戳/轴向/相机-IMU 外参标定/ROS 2 发布）是另外一周起步,单独立项。</li>
+</ul>
+
+<h2>5. 风险清单<span class="en">Risk register</span></h2>
+<table>
+  <tr><th>风险</th><th>概率</th><th>后果</th><th>对策</th></tr>
+  <tr><td>排线插向错导致直通（3V3 撞 GND）</td><td>纸面镜像 21/22 对位,但线的接触面朝向未实测</td><td><strong>致命</strong>,烧模组/烧板</td><td>上电前万用表验反序连通（Jetson pin1↔模组 pin22 通）+ 限流首上电;不确定不上电</td></tr>
+  <tr><td>pin 18：Jetson MCLK 灌模组 FSYNC</td><td>中（唯一非镜像脚）</td><td>触发异常（不烧,均 1.8V 信号）</td><td>DT 不配 mclk、该脚留 GPIO;自由跑表本就忽略 FSYNC</td></tr>
+  <tr><td>sensor I2C 地址/mux 分支判断错</td><td>中</td><td>P0 卡壳误判</td><td>两分支 × {0x30,0x32,0x33} 全扫,示波器佐证</td></tr>
+  <tr><td>D-PHY settle/timing 调不通</td><td>中</td><td>P3 卡 1–3 天</td><td>trace 定位;低速档先建基线</td></tr>
+  <tr><td>公开寄存器表与手上模组 revision 不一致</td><td>低（已降险）</td><td>坏帧/参数漂</td><td>30fps 表 + <code>0x3222=0</code> 自由跑 60fps 已在 RDK X5 同款模组实测通过;以 X5 实机配置为准绳</td></tr>
+  <tr><td>误用外触发表（库存 30fps 表）导致零帧</td><td>高（不知情必踩）</td><td>P3 长时间空转排障</td><td>P1 锁死自由跑表(<code>0x3222=0x00</code>);零帧先查此项再查 D-PHY</td></tr>
+  <tr><td>原生 Y10 需改 NVIDIA camera core</td><td>—（已划掉）</td><td>范围爆炸</td><td>sensor 实为 Bayer,路线 A（BG10 如实申报）即为正解</td></tr>
+  <tr><td>双路同抓带宽/VI 通道冲突</td><td>低–中</td><td>丢帧</td><td>单路验完再双路;盯 VI trace 统计</td></tr>
+  <tr><td>硬同步信号源缺失（需转接板）</td><td>中</td><td>P4 加 1–3 周含打板</td><td>先交付自由运行双目,同步单独立项</td></tr>
+  <tr><td>系统升级覆盖自编模块/overlay 启动失败</td><td>中</td><td>无法启动/功能消失</td><td>保留无 overlay 启动项;内核升级重编流程写死在文档</td></tr>
+</table>
+
+<div class="box err">
+  <strong>✗ 值不值得做,先想清楚 <span class="en-i">— honest cost/benefit</span></strong>
+  分级看：<strong>单路首帧 4–8 天;双路自由运行稳定 2–3 周;硬同步+IMU 的 VIO 级交付 3–6 周</strong>（若需 FSYNC 转接板再加打板周期）。换来的是全局快门+可硬同步双目+IMU——对 VIO/动态目标是真需求就值;如果只是「有相机能看」,IMX219 半小时出图。别为沉没成本（相机已买）做技术决策。
+</div>
+
+<h2>6. 参考<span class="en">References</span></h2>
+<ul>
+  <li>官方模组资料：<a href="https://developer.d-robotics.cc/accessories_doc/en/stereo_camera_gs130wi/product_overview">GS130WI Product Overview</a> · <a href="https://developer.d-robotics.cc/accessories_doc/en/stereo_camera_gs130wi/hardware">Hardware/引脚定义</a></li>
+  <li>地瓜开源 sensor 库：<a href="https://github.com/D-Robotics/x5-libcam-sensor">D-Robotics/x5-libcam-sensor</a>（<code>sc132gs/</code> 寄存器表与 AE 换算）</li>
+  <li>地瓜 X5 内核：<a href="https://github.com/D-Robotics/x5-kernel">D-Robotics/x5-kernel</a>（查 VIN/MIPI 实配、lane 速率）</li>
+  <li>Rockchip <code>sc132gs.c</code> V4L2 驱动（各 RK BSP 内核树 <code>drivers/media/i2c/</code>,GPL）</li>
+  <li>NVIDIA <a href="https://docs.nvidia.com/jetson/archives/r36.2/DeveloperGuide/SD/CameraDevelopment/SensorSoftwareDriverProgramming.html">Sensor Software Driver Programming</a>（tegracam 框架与 DT 属性字典）· <a href="https://developer.nvidia.com/downloads/assets/embedded/secure/jetson/orin_nano/docs/jetson_orin_nano_devkit_carrier_board_specification_sp.pdf">Orin Nano 载板规格书</a>（CSI 座引脚）</li>
+  <li>本仓相关：<code>docs/orin-nano-super-install.html</code>（刷机基线）、<code>docs/orin-wifi6e-ax210-install.html</code>（OOT/DKMS 编译环境背景）</li>
+  <li>姊妹仓 RDK-experience：<code>docs/gs130wi-stereo-camera-bringup.html</code>（同款模组在 RDK X5 的完整 bring-up 实录——EEPROM "UNION" 标定解码、60fps 自由跑解锁（0x3222）、<strong>彩色 BGGR/无 IR-cut 取证</strong>、BPU 深度）；<code>board/home/sunrise/nav_config/stereo_cam.py</code>（<code>parse_calib</code> EEPROM 解析、<code>_SEQ_60FPS</code> 热打序列）</li>
+</ul>
+
+<footer>
+  humanoid-training · docs/sc132gs-jetson-csi-port.html · 2026-07-18 · 方案设计稿(未实施),经 codex(gpt-5.6-sol) 评审修订;后依 RDK X5 同款模组实测数据二次修订(彩色 BGGR/1-lane@1.2G/自由跑表 0x3222/EEPROM 出厂标定);P0 电气验证通过前不投入编码
+</footer>
+
+</div>
+</body>
+</html>
