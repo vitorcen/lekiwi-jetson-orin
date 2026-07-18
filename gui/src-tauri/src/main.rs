@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tauri::async_runtime::Mutex;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
-use zeromq::{PushSocket, Socket, SocketSend, ZmqMessage};
+use zeromq::{PushSocket, Socket, SocketRecv, SocketSend, SubSocket, ZmqMessage};
 
 /// Messages the frontend commands hand to the ZMQ worker thread.
 enum Req {
@@ -103,6 +103,57 @@ fn spawn_worker() -> mpsc::UnboundedSender<Req> {
                         }
                         sock = None;
                         let _ = reply.send(());
+                    }
+                }
+            }
+        });
+    });
+    tx
+}
+
+// ---------------------------------------------------------------------------
+// Generic log bus: a ZMQ SUB socket that subscribes to a board-side PUB (the
+// gamepad daemon, and any future board process) on tcp://<ip>:5556. Each frame
+// is one JSON line {"src","text"} which we forward verbatim to the frontend as
+// a "log" event; the WebView's bottom panel timestamps and renders it. Same
+// dedicated-runtime-thread rule as the PUSH socket. One-directional, disposable.
+
+enum LogReq {
+    Connect(String),
+}
+
+struct LogBus {
+    tx: mpsc::UnboundedSender<LogReq>,
+}
+
+fn spawn_log_worker(app: tauri::AppHandle) -> mpsc::UnboundedSender<LogReq> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<LogReq>();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("log worker runtime");
+        rt.block_on(async move {
+            let mut sock: Option<SubSocket> = None;
+            loop {
+                tokio::select! {
+                    cmd = rx.recv() => match cmd {
+                        Some(LogReq::Connect(ep)) => {
+                            let mut s = SubSocket::new();
+                            if s.connect(&ep).await.is_ok() && s.subscribe("").await.is_ok() {
+                                sock = Some(s);
+                            }
+                        }
+                        None => break,   // app shutting down
+                    },
+                    msg = async { sock.as_mut().unwrap().recv().await }, if sock.is_some() => {
+                        match msg {
+                            Ok(m) => {
+                                if let Some(bytes) = m.get(0) {
+                                    if let Ok(text) = std::str::from_utf8(bytes) {
+                                        let _ = app.emit("log", text.to_string());
+                                    }
+                                }
+                            }
+                            Err(_) => sock = None,   // link died; a reconnect re-subscribes
+                        }
                     }
                 }
             }
@@ -363,6 +414,17 @@ fn zmq_arm_relax(state: State<'_, Zmq>) -> Result<(), String> {
         .map_err(|_| "zmq worker is gone".to_string())
 }
 
+/// Point the log SUB at the board's PUB bus (same IP as the command socket,
+/// fixed port 5556). Idempotent: re-issuing on reconnect just re-subscribes.
+#[tauri::command]
+fn log_connect(ip: String, state: State<'_, LogBus>) -> Result<(), String> {
+    let ep = format!("tcp://{ip}:5556");
+    state
+        .tx
+        .send(LogReq::Connect(ep))
+        .map_err(|_| "log worker is gone".to_string())
+}
+
 /// Point the socket at lekiwi_host's command port. A wrong IP surfaces later as
 /// commands that go nowhere, not as an error here — ZMQ connect is lazy.
 #[tauri::command]
@@ -429,9 +491,13 @@ fn main() {
             leader_disconnect,
             zmq_arm_mid,
             zmq_arm_relax,
+            log_connect,
         ])
         .setup(move |app| {
             app.manage(spawn_leader(app.handle().clone(), zmq_tx_for_leader));
+            app.manage(LogBus {
+                tx: spawn_log_worker(app.handle().clone()),
+            });
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }

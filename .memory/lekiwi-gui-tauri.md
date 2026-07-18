@@ -57,11 +57,11 @@ PUSH 卡死前端。速度三档严格对齐 lerobot：`0.1/0.25/0.4 m/s`、`30/
 `lerobot-calibrate --robot.type=lekiwi --robot.port=/dev/ttyACM0 --robot.id=orin_kiwi`
 （手摆姿势），之后 host 才起得来。
 
-**解法 — 免标定底盘 host `gui/board/base_host.py`**（2026-07-18）：轮子本就不用标定
-（官方明说），所以写了个只驱动 7/8/9 的 ZMQ host，**同样的线协议**（PULL 5555 收
+**解法 — 免标定底盘 host `board/home/jatson/base_host.py`**（2026-07-18）：轮子本就不用
+标定（官方明说），所以写了个只驱动 7/8/9 的 ZMQ host，**同样的线协议**（PULL 5555 收
 `{"x.vel","y.vel","theta.vel"}`），GUI 一行不用改。运动学复用 `base_move.py`（与 lerobot
-零误差）。启停：板子上 `bash ~/start_base_host.sh /dev/ttyACM0` / `~/stop_base_host.sh`
-（用 conda lerobot env 的 python，有 pyzmq 27.1）。带 watchdog（0.5s 断流停车）。
+零误差）。现由 systemd 管（`scripts/deploy_board.sh` 部署重启，手工 start/stop 脚本已废弃）。
+用 conda lerobot env 的 python（有 pyzmq 27.1）。带 watchdog（0.5s 断流停车）。
 已实测：bind 5555、收零速命令解析正常、进程稳定。**唯一未端到端实测**：Rust 纯 zeromq
 crate ↔ pyzmq 互通（ZMTP 标准应通），要 GUI 连上架空开车才最终确认。
 

@@ -1,5 +1,5 @@
 # LeKiwi base ZMQ host — owns /dev/ttyACM0, PULL on tcp://*:5555.
-# Install on the board: see install_services.sh
+# Deploy from the repo: scripts/deploy_board.sh (rsyncs board/ + restarts).
 [Unit]
 Description=LeKiwi base ZMQ host (wheels 7/8/9)
 After=multi-user.target

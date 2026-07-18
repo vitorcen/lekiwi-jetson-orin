@@ -15,7 +15,13 @@ metadata:
 （Linux WebKitGTK 的 Gamepad API 不可靠，且 daemon 本就无 GUI）。
 
 **开机自启**：`/etc/systemd/system/{base_host,pad_teleop}.service`（User=jatson，
-Restart=always），源文件在 `gui/board/`，`sudo bash ~/install_services.sh` 安装。
+Restart=always）。板端源码在项目 **`board/`**（1:1 镜像板子文件系统：
+`board/home/jatson/*.py` + `board/etc/systemd/system/*.service`），用
+部署脚本：首次 **`scripts/setup_board.sh <ip>`**（装单元 + 一条范围极小的
+`/etc/sudoers.d/lekiwi-deploy` NOPASSWD 规则，仅允许 jatson 免密 restart/stop/start/
+daemon-reload 这两个服务，无密码可入库），之后 **`scripts/deploy_board.sh <ip>`** 全程
+免密 rsync + `sudo systemctl restart`。SSH 公钥认证本机早已配好（`ssh-copy-id` 已生效）。
+板子 sudo 密码只在那**一次** setup 时手动输入，绝不写进任何文件/记忆。
 2026-07-18 已装好并 enable，之前手工 setsid 起的 base_host 已废弃改由 systemd 管。
 日志：`journalctl -u pad_teleop -u base_host`。
 
@@ -60,5 +66,16 @@ Rust serialport worker 同铁律:独立线程,不进 Tauri runtime。
 零位存 `~/.config/lekiwi-console/leader_zero.json`,连接自动加载,可重新对齐覆盖。
 停止跟随自动发 `arm.relax` 收臂松弛;GUI 也有「收臂松弛」常驻按钮(=手柄 START)。
 GUI 启动自动连 ZMQ + 主臂(主臂缺席静默)。
+
+**通用日志总线（2026-07-18）**：手柄在板上、GUI 在桌面,两者唯一连接是 GUI→板
+推指令,GUI 看不到手柄。为「按遥控看是哪个键」加了**单向日志通道**:pad_teleop.py
+除 PUSH→5555 外,再 bind 一个 **PUB `tcp://*:5556`**,每次按键/推杆广播一行
+`{"src":"pad","text":"BTN_SOUTH ↓ 爪子合"}`;轴做 0.25 步长去抖(HAT=±1/0,
+扳机=按下/松开),按键取 press/release 边沿。GUI 端 Rust 一个 **SUB worker**(同铁律:
+独立 tokio 线程,`zeromq::SubSocket` + `subscribe("")`)连 `<ip>:5556`,收到就
+`app.emit("log", text)`;前端 `log.js` 时间戳+来源标签渲染到底部日志栏。
+`log_connect(ip)` 命令随 `zmq_connect` 一起触发(同一板子 IP)。刻意做成**通用**:
+线格式是 `{src,text}`,任何板端进程往 5556 丢就能显示;键盘开车/主臂动作也调
+`logLine()` 进同栏。用户定的方向「通用通道,后续其他日志按需」。
 
 相关：[[lekiwi-gui-tauri]]（GUI 键盘链路 + ZMQ 线协议详情）、[[lekiwi-robot-target]]。

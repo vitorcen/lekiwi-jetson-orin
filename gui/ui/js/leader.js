@@ -8,6 +8,7 @@
 // the operator's grip on the physical leader arm is the dead-man here, and
 // base_host clamps every step.
 import { $, invoke } from './state.js';
+import { logLine } from './log.js';
 
 let connected = false;
 let aligned = false;
@@ -36,10 +37,11 @@ async function connectLeader(quiet) {
   try {
     await invoke('leader_connect', { path: $('lport').value.trim() });
     connected = true;
+    logLine('主臂', '已连接');
     refresh();
   } catch (e) {
     if (quiet) refresh();               // no leader plugged in: stay calm
-    else setState('连接失败: ' + e, 'bad');
+    else { setState('连接失败: ' + e, 'bad'); logLine('主臂', '连接失败: ' + e); }
   }
 }
 
@@ -57,6 +59,7 @@ $('lconn').onclick = async () => {
 // Glide the follower to its calibrated middle pose (needs ZMQ connected).
 $('lmid').onclick = () => {
   if (invoke) invoke('zmq_arm_mid').catch(() => {});
+  logLine('主臂', '从臂摆中位');
 };
 
 $('lalign').onclick = async () => {
@@ -64,9 +67,11 @@ $('lalign').onclick = async () => {
   try {
     await invoke('leader_align');
     aligned = true;
+    logLine('主臂', '已对齐零位');
     refresh();
   } catch (e) {
     setState('对齐失败: ' + e, 'bad');
+    logLine('主臂', '对齐失败: ' + e);
   }
 };
 
@@ -76,6 +81,7 @@ $('lfollow').onclick = async () => {
   await invoke('leader_follow', { on: following }).catch(() => {});
   // Stopping follow parks the follower: fold to rest, cut torque.
   if (!following) invoke('zmq_arm_relax').catch(() => {});
+  logLine('主臂', following ? '开始跟随' : '停止跟随 → 收臂松弛');
   refresh();
 };
 
@@ -88,6 +94,7 @@ $('lrelax').onclick = () => {
     refresh();
   }
   invoke('zmq_arm_relax').catch(() => {});
+  logLine('主臂', '收臂松弛');
 };
 
 const ev = window.__TAURI__ && window.__TAURI__.event;

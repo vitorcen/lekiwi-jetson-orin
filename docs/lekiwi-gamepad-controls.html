@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeKiwi 手柄键位说明 · Gamepad controls</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#22314e; --accent2:#2c6db5; --accent-dk:#1d5a99;
+    --base:#2c6db5; --arm:#2f8f5b; --sys:#8a7a2f;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#eef5fb; --ok-line:#2c6db5; --ok-fg:#1d4e7a;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#141618; --fg:#e8e8e3; --muted:#9a9a92; --line:#2c2f33;
+      --card:#1c1f22; --accent:#7aa2d6; --accent2:#5b9bd5; --accent-dk:#8fb8e6;
+      --base:#5b9bd5; --arm:#5cc98a; --sys:#d0bd6a;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#132131; --ok-line:#2c6db5; --ok-fg:#8fc0f0; --code-bg:#23262a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent2);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:30px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent2)}
+  h2 .en-h{color:var(--muted);font-weight:400;font-size:.7em;margin-left:8px}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent2);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  a{color:var(--accent-dk)}
+  .kbd{display:inline-block;min-width:22px;text-align:center;font-family:var(--mono);font-size:12px;
+    background:var(--card);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 7px;margin:0 1px}
+  .pill{display:inline-block;font-size:11.5px;font-family:var(--mono);padding:1px 8px;border-radius:20px;color:#fff}
+  .p-base{background:var(--base)} .p-arm{background:var(--arm)} .p-sys{background:var(--sys)}
+  td.ec{font-family:var(--mono);font-size:12.5px;color:var(--muted);white-space:nowrap}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;margin-top:6px;font-size:13px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:12px;height:12px;border-radius:3px;display:inline-block}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>LeKiwi 手柄键位说明<span class="en">Gamepad control map — board-side pad_teleop daemon</span></h1>
+  <p class="sub">通用 USB 手柄(DragonRise 0079:181c)接 Orin，板上 <code>pad_teleop.py</code> 用 evdev 读、转 ZMQ 推给 <code>base_host</code>。开机自启，无需 GUI。</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li><strong>右手管底盘</strong>：右摇杆前后走 / 左右转，十字键数字满速开车。<span class="en" style="display:inline">Right stick + D-pad = drive base.</span></li>
+    <li><strong>左手管机械臂</strong>：左摇杆前后 = 伸展/收回(2+3号)、左右 = 底座平移(1号)；<span class="kbd">Y</span>/<span class="kbd">A</span> = 4号腕升降；<span class="kbd">X</span>/<span class="kbd">B</span> = 腕旋转(5号)；右肩/右扳机 = 爪子开合(6号)。</li>
+    <li><strong>安全</strong>：<span class="kbd">SELECT</span> 按住 = 瞬时急停(松开即恢复)；<span class="kbd">START</span> = 收臂回休息位并断扭矩(松弛)。</li>
+    <li><strong>对码</strong>：GUI 底部日志会实时打出你按下的真实事件码 —— 键位不对照此改 <code>BTN_LABELS</code> 即可。</li>
+  </ul>
+</div>
+
+<figure class="fig">
+<svg viewBox="0 0 660 400" role="img" aria-label="手柄键位示意图">
+  <!-- body -->
+  <path d="M110 150 Q90 120 150 108 L510 108 Q570 120 550 150
+           Q600 210 560 300 Q535 350 470 330 Q420 312 400 300 L260 300
+           Q240 312 190 330 Q125 350 100 300 Q60 210 110 150 Z"
+        fill="var(--card)" stroke="var(--line)" stroke-width="2"/>
+
+  <!-- shoulder buttons -->
+  <rect x="150" y="88" width="70" height="16" rx="7" fill="none" stroke="var(--sys)" stroke-width="2.5"/>
+  <text x="185" y="100" text-anchor="middle" font-size="10" fill="var(--sys)" font-family="monospace">LB 降速</text>
+  <rect x="440" y="88" width="70" height="16" rx="7" fill="none" stroke="var(--arm)" stroke-width="2.5"/>
+  <text x="475" y="100" text-anchor="middle" font-size="10" fill="var(--arm)" font-family="monospace">RB 爪张</text>
+  <rect x="150" y="68" width="70" height="14" rx="7" fill="none" stroke="var(--sys)" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="185" y="79" text-anchor="middle" font-size="9.5" fill="var(--sys)" font-family="monospace">LT 升速</text>
+  <rect x="440" y="68" width="70" height="14" rx="7" fill="none" stroke="var(--arm)" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="475" y="79" text-anchor="middle" font-size="9.5" fill="var(--arm)" font-family="monospace">RT 爪合</text>
+
+  <!-- left stick (arm reach / pan) -->
+  <circle cx="185" cy="180" r="34" fill="none" stroke="var(--arm)" stroke-width="2.5"/>
+  <circle cx="185" cy="180" r="15" fill="var(--arm)" opacity="0.25"/>
+  <line x1="185" y1="146" x2="185" y2="128" stroke="var(--arm)" stroke-width="2"/>
+  <text x="185" y="122" text-anchor="middle" font-size="10" fill="var(--arm)">前后=伸/收</text>
+  <text x="185" y="230" text-anchor="middle" font-size="10" fill="var(--arm)">左右=平移(1号)</text>
+
+  <!-- D-pad (base drive/turn) -->
+  <g stroke="var(--base)" stroke-width="2.5" fill="none">
+    <rect x="150" y="248" width="22" height="52" rx="4"/>
+    <rect x="135" y="263" width="52" height="22" rx="4"/>
+  </g>
+  <text x="161" y="322" text-anchor="middle" font-size="10" fill="var(--base)">十字：↑↓ 前后 / ←→ 转向</text>
+
+  <!-- right stick (base fwd-back / rotate) -->
+  <circle cx="415" cy="245" r="34" fill="none" stroke="var(--base)" stroke-width="2.5"/>
+  <circle cx="415" cy="245" r="15" fill="var(--base)" opacity="0.25"/>
+  <text x="415" y="295" text-anchor="middle" font-size="10" fill="var(--base)">前后=走 / 左右=转</text>
+
+  <!-- face buttons Y A X B -->
+  <g font-family="monospace" font-size="12" font-weight="700">
+    <circle cx="490" cy="150" r="15" fill="none" stroke="var(--arm)" stroke-width="2.5"/>
+    <text x="490" y="155" text-anchor="middle" fill="var(--arm)">Y</text>
+    <circle cx="490" cy="210" r="15" fill="none" stroke="var(--arm)" stroke-width="2.5"/>
+    <text x="490" y="215" text-anchor="middle" fill="var(--arm)">A</text>
+    <circle cx="463" cy="180" r="15" fill="none" stroke="var(--arm)" stroke-width="2.5"/>
+    <text x="463" y="185" text-anchor="middle" fill="var(--arm)">X</text>
+    <circle cx="517" cy="180" r="15" fill="none" stroke="var(--arm)" stroke-width="2.5"/>
+    <text x="517" y="185" text-anchor="middle" fill="var(--arm)">B</text>
+  </g>
+  <text x="560" y="145" font-size="10" fill="var(--arm)">Y/A 4号腕升降</text>
+  <text x="560" y="222" font-size="10" fill="var(--arm)">X/B 腕旋转(5号)</text>
+
+  <!-- select / start -->
+  <g>
+    <rect x="285" y="170" width="30" height="13" rx="6" fill="none" stroke="var(--err-line)" stroke-width="2"/>
+    <text x="300" y="165" text-anchor="middle" font-size="9.5" fill="var(--err-line)" font-family="monospace">SELECT 急停</text>
+    <rect x="345" y="170" width="30" height="13" rx="6" fill="none" stroke="var(--sys)" stroke-width="2"/>
+    <text x="360" y="165" text-anchor="middle" font-size="9.5" fill="var(--sys)" font-family="monospace">START 松臂</text>
+  </g>
+</svg>
+<figcaption>
+  <span class="legend">
+    <span><i class="dot" style="background:var(--base)"></i>底盘 Base</span>
+    <span><i class="dot" style="background:var(--arm)"></i>机械臂 Arm</span>
+    <span><i class="dot" style="background:var(--sys)"></i>系统/调速 System</span>
+    <span><i class="dot" style="background:var(--err-line)"></i>急停 E-stop</span>
+  </span>
+</figcaption>
+</figure>
+
+<h2>底盘 <span class="en-h">Base — right hand</span></h2>
+<table>
+  <tr><th>手柄</th><th>事件码</th><th>动作</th><th>舵机</th></tr>
+  <tr><td>右摇杆 前后</td><td class="ec">ABS_RZ</td><td>底盘前进 / 后退</td><td>轮 7/8/9</td></tr>
+  <tr><td>右摇杆 左右</td><td class="ec">ABS_Z</td><td>原地旋转(转向)</td><td>轮 7/8/9</td></tr>
+  <tr><td>十字键 ↑ / ↓</td><td class="ec">ABS_HAT0Y</td><td>前进 / 后退(数字满速)</td><td>轮 7/8/9</td></tr>
+  <tr><td>十字键 ← / →</td><td class="ec">ABS_HAT0X</td><td>左转 / 右转</td><td>轮 7/8/9</td></tr>
+</table>
+<p class="sub">速度三档 <span class="pill p-sys">0.10 / 30</span> <span class="pill p-sys">0.25 / 60</span> <span class="pill p-sys">0.40 / 90</span>(m/s · °/s)，默认中档；摇杆是模拟量、十字键是数字满速。</p>
+
+<h2>机械臂 <span class="en-h">Arm — left hand</span></h2>
+<table>
+  <tr><th>手柄</th><th>事件码</th><th>动作</th><th>舵机</th></tr>
+  <tr><td>左摇杆 前 / 后</td><td class="ec">ABS_Y</td><td>伸展(前伸) / 收回，两关节协调</td><td><b>2 肩抬 + 3 肘</b></td></tr>
+  <tr><td>左摇杆 左 / 右</td><td class="ec">ABS_X</td><td>底座水平平移(pan)</td><td>1 肩转</td></tr>
+  <tr><td><span class="kbd">Y</span> / <span class="kbd">A</span></td><td class="ec">BTN_WEST / BTN_SOUTH</td><td>4号腕 上抬 / 下落</td><td><b>4 腕俯仰</b></td></tr>
+  <tr><td><span class="kbd">X</span> / <span class="kbd">B</span></td><td class="ec">BTN_NORTH / BTN_EAST</td><td>腕 左旋 / 右旋</td><td>5 腕旋转</td></tr>
+  <tr><td>RB(右肩)</td><td class="ec">BTN_TR</td><td>爪子 <b>张开</b>(按住)</td><td>6 爪</td></tr>
+  <tr><td>RT(右扳机)</td><td class="ec">BTN_TR2</td><td>爪子 <b>合拢</b>(按住)</td><td>6 爪</td></tr>
+</table>
+<p class="sub">2、3 号伸展方向相反(从休息到前伸：2号 raw 增、3号 raw 减)，daemon 已给 3 号取负号，所以前推 = 真正伸出去。所有关节都夹在标定行程内。</p>
+
+<h2>系统与安全 <span class="en-h">System &amp; safety</span></h2>
+<table>
+  <tr><th>手柄</th><th>事件码</th><th>动作</th></tr>
+  <tr><td>LB(左肩)</td><td class="ec">BTN_TL</td><td>底盘 <b>降</b>速档</td></tr>
+  <tr><td>LT(左扳机)</td><td class="ec">BTN_TL2</td><td>底盘 <b>升</b>速档</td></tr>
+  <tr><td>SELECT <b>按住</b></td><td class="ec">BTN_SELECT</td><td>瞬时急停：一切归零(松开即恢复，<b>无闩锁</b>)</td></tr>
+  <tr><td>START</td><td class="ec">BTN_START</td><td>收臂回休息位 → 断扭矩(松弛，可手摆)；碰任意臂输入即唤醒</td></tr>
+</table>
+
+<div class="box warn">
+  <strong>为什么急停做成"按住"而不是"一按锁定"？</strong>
+  杂牌手柄丝印 ≠ 事件码：一按锁定的急停，解锁键往往按不对，车看着像坏了。急停一律做成瞬时(momentary)，松手即恢复。
+</div>
+
+<h2>对码：GUI 底部日志 <span class="en-h">Remap via the GUI log</span></h2>
+<p>手柄接在板子上、GUI 在桌面，两者原本互不可见。为此加了一条<b>单向日志总线</b>：<code>pad_teleop.py</code> 每次按键 / 推杆都往 <code>tcp://*:5556</code>(PUB)广播一行，GUI 底部日志栏实时显示。</p>
+<pre><code>手柄  BTN_TR ↓  爪张开
+手柄  ABS_Y +0.72  臂前伸/收
+手柄  ABS_HAT0X -1.00  底盘转向</code></pre>
+<div class="box ok">
+  <strong>键位不对怎么办</strong>
+  按一下那个键，看底部日志打出的真实 <code>BTN_xxx</code> / <code>ABS_xxx</code>，去 <code>board/home/jatson/pad_teleop.py</code> 的 <code>BTN_LABELS</code> / 映射处改，跑 <code>scripts/deploy_board.sh</code> 重新部署即可。无需 ssh 翻 journal。
+</div>
+
+<h2>部署 <span class="en-h">Deploy</span></h2>
+<pre><code># 首次一次性：ssh 免密 + 装单元 + NOPASSWD 规则（唯一要 sudo 的一次）
+ssh-copy-id jatson@192.168.3.188        # ssh/scp/rsync 从此免密，密码不入库
+scripts/setup_board.sh 192.168.3.188    # 只跑一次
+
+# 之后改完 board/ 里的程序，一条命令 rsync + 重启，全程免密
+scripts/deploy_board.sh 192.168.3.188
+
+# 看日志
+ssh jatson@192.168.3.188 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'</code></pre>
+<p class="sub">板端源码在项目 <code>board/</code>(1:1 镜像板子文件系统)：<code>board/home/jatson/pad_teleop.py</code> · <code>base_host.py</code> · <code>probe_bus.py</code>(总线诊断) · <code>board/etc/systemd/system/*.service</code>。</p>
+
+</div>
+</body>
+</html>

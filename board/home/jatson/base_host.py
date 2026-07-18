@@ -22,14 +22,13 @@ without any of that:
                   messages (base is only driven when "x.vel" is present).
 
 Arm control (servos 1-6, optional — skipped if the arm doesn't answer):
-three-pose teleop, no calibration and no cartesian IK. lift/elbow/wrist
-travel in joint space between REST (raw positions captured at boot — park
-the arm at its rest pose before starting), EXT_RAW (reaching forward) and
-UP_RAW (whole arm upright); holding an input pulls the pose toward that
-target with an exponential approach (slows as it arrives). pan/roll/gripper
-are plain raw increments with range clamps. Every write is rate-limited.
-This matches how the operator thinks: stick forward = reach out, stick back
-= come home, Y = stand up, A = settle down.
+direct per-joint velocity teleop, no calibration and no cartesian IK. Left
+stick fwd/back integrates LIFT(id2) + ELBOW(id3) as a coordinated reach
+(ELBOW opposite sign, so forward = reach out, back = retract); Y/A integrates
+WRIST(id4) pitch up/down; left stick left/right = pan(id1); X/B = roll(id5);
+triggers = gripper(id6). Every joint clamps to its calibrated range and every
+write is rate-limited. REST_RAW (parked pose) is still used by the relax/mid
+glide helpers, not by live teleop.
 
 Kinematics is identical to lerobot's LeKiwi._body_to_wheel_raw (v0.5.2):
 wheels 7/8/9 at 150/-90/30 deg, base_radius 0.125 m, wheel_radius 0.05 m,
@@ -70,9 +69,12 @@ ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP = 1, 2, 3, 4, 5, 6
 # Calibrated ranges: lift [847,3244] elbow [897,3114] wrist [904,3193]
 # pan [1097,3097] grip [1452,2959] roll full-turn.
 REST_RAW = {ID_LIFT: 1001, ID_ELBOW: 3003, ID_WRIST: 1902}  # parked/folded
-EXT_RAW = {ID_LIFT: 2500, ID_ELBOW: 1300, ID_WRIST: 2700}   # reach forward
-UP_RAW = {ID_LIFT: 2048, ID_ELBOW: 1100, ID_WRIST: 2900}    # whole arm upright
-POSE_K = 1.2                   # 1/s exponential approach rate at full input
+POSE_K = 1.2                   # 1/s exp approach (relax/mid glide only)
+# Direct per-joint velocity teleop (raw counts/s at full stick). Left stick
+# fwd/back drives LIFT(id2)+ELBOW(id3) as a coordinated reach: from REST toward
+# reach-forward LIFT rises but ELBOW opens the other way, hence ELBOW's negative
+# sign in step(). Y/A drives WRIST(id4) pitch up/down. Each clamps to ARM_LIMS.
+LIFT_RATE, ELBOW_RATE, WRIST_RATE = 700, 800, 700
 PAN_LIM = (1120, 3075)         # absolute, from calibration (margin 25)
 PAN_RATE = 500                 # raw counts/s at full input
 ROLL_RANGE = 600               # roll is full-turn: keep boot-relative range
@@ -152,7 +154,7 @@ def clamp(v, lo, hi):
 
 
 class Arm:
-    """Three-pose joint-space teleop: REST (boot) <-> EXT_RAW / UP_RAW."""
+    """Direct per-joint velocity teleop: left stick = lift+elbow, Y/A = wrist."""
 
     def __init__(self, ser):
         self.ser = ser
@@ -265,20 +267,17 @@ class Arm:
         self.grip = float(self.raw[ID_GRIP])
 
     def step(self, vf, vpan, vz, vroll, gv, dt):
-        # Pose axes: +vf pulls toward EXTENDED, +vz toward UPRIGHT, either
-        # negative pulls back toward REST. Exponential approach: fast when
-        # far, easing in as it arrives; both pulls may blend.
+        # Direct per-joint velocity. Left stick fwd/back drives LIFT + ELBOW as
+        # a coordinated reach (ELBOW opposite sign so +vf reaches forward); Y/A
+        # drives WRIST pitch. Each integrates at its own rate, clamped to limits.
         if self.relaxed:
             self.wake()
-        pulls = []
-        if vf:
-            pulls.append((EXT_RAW if vf > 0 else self.rest, abs(vf)))
-        if vz:
-            pulls.append((UP_RAW if vz > 0 else self.rest, abs(vz)))
-        for target, w in pulls:
-            f = min(1.0, POSE_K * w * dt)
-            for sid in self.pose:
-                self.pose[sid] += (target[sid] - self.pose[sid]) * f
+        self.pose[ID_LIFT] = clamp(self.pose[ID_LIFT] + vf * LIFT_RATE * dt,
+                                   *ARM_LIMS[ID_LIFT])
+        self.pose[ID_ELBOW] = clamp(self.pose[ID_ELBOW] - vf * ELBOW_RATE * dt,
+                                    *ARM_LIMS[ID_ELBOW])
+        self.pose[ID_WRIST] = clamp(self.pose[ID_WRIST] - vz * WRIST_RATE * dt,
+                                    *ARM_LIMS[ID_WRIST])
         self.pan = clamp(self.pan + vpan * PAN_RATE * dt, *self.pan_lim)
         self.roll = clamp(self.roll + vroll * ROLL_RATE * dt, *self.roll_lim)
         self.grip = clamp(self.grip + gv * GRIP_RATE * dt, *self.grip_lim)

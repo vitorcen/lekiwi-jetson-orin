@@ -6,6 +6,7 @@
 // has an idle watchdog, so we send a zero the moment all keys release and never
 // stream from an unfocused/hidden tab (dead-man safety).
 import { $, S, invoke } from './state.js';
+import { logLine } from './log.js';
 
 // Speed levels mirror lerobot's LeKiwi defaults exactly (xy m/s, theta deg/s).
 const LEVELS = [
@@ -49,6 +50,9 @@ async function connect() {
     setState('已连接 ' + ep, 'ok');
     $('connBtn').textContent = '断开';
     $('connBtn').classList.add('live');
+    logLine('系统', '已连接 ' + ep);
+    // Point the log bus at the same board so gamepad events start streaming in.
+    invoke('log_connect', { ip }).catch(() => {});
   } catch (e) {
     setState('连接失败: ' + e, 'bad');
   }
@@ -61,6 +65,15 @@ async function disconnect() {
   setState('未连接', 'bad');
   $('connBtn').textContent = '连接';
   $('connBtn').classList.remove('live');
+  logLine('系统', '已断开');
+}
+
+// Log the base command only when it actually changes (not every 20 Hz tick).
+let lastDrive = '';
+function logDrive() {
+  const { x, y, theta } = compute();
+  const s = `x=${x.toFixed(2)} y=${y.toFixed(2)} θ=${theta.toFixed(0)}`;
+  if (s !== lastDrive) { lastDrive = s; logLine('键盘', s); }
 }
 
 function setState(text, cls) {
@@ -100,6 +113,7 @@ function stopStream() {
   keysDown.clear();
   render(0, 0, 0);
   refreshKeys();
+  logDrive();
   if (connected && invoke) { invoke('zmq_send_base', { x: 0, y: 0, theta: 0 }).catch(() => {}); }
 }
 
@@ -177,12 +191,14 @@ function onKeyDown(e) {
   keysDown.add(k);
   refreshKeys();
   startStream();
+  logDrive();
 }
 
 function onKeyUp(e) {
   const k = e.key === ' ' ? ' ' : e.key.toLowerCase();
   if (!keysDown.delete(k)) return;
   refreshKeys();
+  logDrive();
   if (!keysDown.size) stopStream();
 }
 
