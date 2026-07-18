@@ -4,6 +4,9 @@
 Description=LeKiwi gamepad teleop (evdev -> ZMQ)
 After=base_host.service
 Wants=base_host.service
+# Never stop retrying — a Bluetooth pad may pair minutes after boot, and we
+# were once found dead (inactive) with Restart alone. 0 = no start-rate limit.
+StartLimitIntervalSec=0
 
 [Service]
 User=jatson

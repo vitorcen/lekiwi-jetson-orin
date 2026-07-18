@@ -7,7 +7,7 @@ the exact same wire protocol the desktop GUI uses, so both can coexist
 (ZMQ PULL fair-queues multiple PUSH peers) and base_host stays the single
 owner of the serial bus.
 
-Controls (DragonRise 0079:181c "Controller", generic layout):
+Controls (works on DragonRise 0079:181c and Xbox Wireless Controller):
   RIGHT hand drives the base, LEFT hand drives the arm.
   right stick  : base — Y forward/back, X rotation; diagonal = arc-turn
   D-pad up/down: base forward/back, digital
@@ -16,10 +16,12 @@ Controls (DragonRise 0079:181c "Controller", generic layout):
                  to REST; X = pan left/right
   Y / A (held) : arm toward UPRIGHT pose / back down toward REST
   X / B (held) : wrist roll left / right
-  RB / RT      : gripper open (BTN_TR) / close (BTN_TR2), held
+  RB / RT      : gripper open (BTN_TR) / close — RT is BTN_TR2 on the
+                 DragonRise pad, ABS_GAS (analog trigger) on Xbox; held
   START        : fold the arm to REST, then cut its torque (limp, safe to
                  hand-pose); touching any arm input wakes it back up
-  LB / LT      : base speed level down (BTN_TL) / up (BTN_TL2)
+  LB / LT      : base speed down (BTN_TL) / up — LT is BTN_TL2 on the
+                 DragonRise pad, ABS_BRAKE (analog trigger) on Xbox
   SELECT       : momentary e-stop — everything zero WHILE HELD (no latch;
                  a latched e-stop proved unrecoverable on no-name pads whose
                  printed labels don't match their event codes)
@@ -62,8 +64,10 @@ AXIS_LABELS = {
     _ec.ABS_RZ: "底盘前后", _ec.ABS_Z: "底盘旋转",
     _ec.ABS_HAT0Y: "十字前后", _ec.ABS_HAT0X: "十字转向",
     _ec.ABS_Y: "臂前伸/收", _ec.ABS_X: "臂平移",
+    _ec.ABS_BRAKE: "升速(LT)", _ec.ABS_GAS: "爪合拢(RT)",
 }
-TRIGGER_AXES = {_ec.ABS_BRAKE, _ec.ABS_GAS}  # analog levers, now unused for grip
+# Xbox reports LT/RT as these analog axes (rest 0, full ~max), not BTN_TL2/TR2.
+TRIGGER_AXES = {_ec.ABS_BRAKE, _ec.ABS_GAS}
 
 
 def key_name(code):
@@ -169,7 +173,17 @@ def main():
             code: dev.absinfo(code).value
             for code, _ in dev.capabilities().get(ecodes.EV_ABS, [])
         }
+
+        absinfo = dict(dev.capabilities().get(ecodes.EV_ABS, []))
+
+        def trig(code):
+            # Analog trigger "pressed": raw past mid-scale. Triggers rest at min
+            # (not center), so norm() (built for centered sticks) can't be used.
+            ai = absinfo.get(code)
+            return ai is not None and axes.get(code, ai.min) > (ai.min + ai.max) / 2
+
         speed = 1
+        lt_prev = False        # analog LT edge, so one pull = one speed step
         estop_held = False
         held = set()           # face buttons currently held (EE up/down, grip)
         was_active = False
@@ -232,6 +246,14 @@ def main():
                 if hx:
                     theta = -hx * th
 
+                # Xbox LT (analog) = speed up, rising-edge only. The DragonRise
+                # BTN_TL2 path in the EV_KEY branch above handles the digital pad.
+                lt_now = trig(ecodes.ABS_BRAKE)
+                if lt_now and not lt_prev:
+                    speed = min(len(LEVELS) - 1, speed + 1)
+                    log(f"speed -> {LEVELS[speed]}")
+                lt_prev = lt_now
+
                 # Arm = left hand, all -1..1: stick fwd = reach out, back =
                 # return to rest; Y/A = upright/down; X/B = wrist roll;
                 # triggers = gripper.
@@ -239,8 +261,10 @@ def main():
                 vpan = norm(ecodes.ABS_X, axes.get(ecodes.ABS_X))  # left/right un-reversed
                 vz = float((ecodes.BTN_WEST in held) - (ecodes.BTN_SOUTH in held))
                 vroll = float((ecodes.BTN_NORTH in held) - (ecodes.BTN_EAST in held))
-                # Gripper: right shoulder RB open / right trigger RT close, held.
-                gv = float(ecodes.BTN_TR in held) - float(ecodes.BTN_TR2 in held)
+                # Gripper: RB open / RT close, held. RT = BTN_TR2 (DragonRise)
+                # or ABS_GAS analog trigger (Xbox).
+                gv = float(ecodes.BTN_TR in held) - float(
+                    ecodes.BTN_TR2 in held or trig(ecodes.ABS_GAS))
 
                 active = (not estop_held) and (x or y or theta or vf or vpan
                                                or vz or vroll or gv)
