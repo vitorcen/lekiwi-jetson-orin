@@ -274,6 +274,11 @@ sudo jtop                 # 需要先 pip install jetson-stats</code></pre>
   ① 板子从 NVMe 启动，不再需要 SD 卡；② <code>lsblk</code> 显示 <code>nvme0n1p1</code> 挂在 <code>/</code>；③ <code>nvpmodel -q</code> 能切到 MAXN_SUPER；④ <code>nv_tegra_release</code> 显示 R36 REVISION 5.0。
 </div>
 
+<div class="box warn">
+  <strong>⚠ 无线网卡要单独启用 <span class="en-i">— Wi-Fi needs a separate step</span></strong>
+  Intel AX210 Wi-Fi 6E 的固件随系统预装，但 <code>iwlwifi</code> 驱动模块 L4T 默认没编，刷完机设置里看不到 Wireless。启用步骤（装 backport-iwlwifi DKMS + 一个 cfg80211 符号冲突的坑）见 <a href="orin-wifi6e-ax210-install.html">Orin · AX210 Wi-Fi 6E 驱动启用记录</a>。
+</div>
+
 <h2>6. 参考<span class="en">References</span></h2>
 <ul>
   <li><a href="https://developer.nvidia.com/embedded/jetson-linux">NVIDIA · Jetson Linux 下载页</a></li>

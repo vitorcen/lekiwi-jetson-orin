@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jetson Orin · Intel AX210 Wi-Fi 6E 驱动启用记录 · backport-iwlwifi DKMS</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  .box .en-i{font-style:normal;opacity:.75;font-size:.88em}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .st{font:600 13px var(--mono);fill:#fff}
+  .sl{font:12px -apple-system,sans-serif;fill:var(--muted)}
+  a{color:var(--accent-dk)}
+  @media (prefers-color-scheme:dark){a{color:var(--accent)}}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .kv{color:var(--muted);font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Orin 上启用 Intel AX210 Wi-Fi 6E
+    <span class="en">Bringing up the Intel AX210 Wi-Fi 6E on Jetson Orin (L4T R36.5)</span>
+  </h1>
+  <p class="sub">目标板：Orin Nano 8GB ｜ 网卡：Intel AX210 160MHz（PCIe，2725:0024 rev 0x420，RF GF）｜ L4T R36.5.0 / 内核 5.15.185-tegra ｜ 日期：2026-07-18</p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li>硬件在、<strong>固件也在</strong>（<code>/lib/firmware/iwlwifi-ty-a0-gf-a0-*.ucode</code>），唯独 <strong>Tegra 内核没编 <code>iwlwifi</code> 驱动模块</strong> —— 所以设置里没有 Wireless。<span class="kv">The firmware ships; the kernel module doesn't.</span></li>
+    <li>解法：装 Intel 官方 <strong><code>backport-iwlwifi-dkms</code></strong>，DKMS 对着已装的内核头文件现编 <code>iwlwifi</code>/<code>iwlmvm</code>/<code>mac80211</code>/<code>cfg80211</code> 一整套。<strong>不用重编内核</strong>。</li>
+    <li>唯一的坑：<code>modprobe iwlmvm</code> 报 <strong><code>Invalid argument</code></strong> —— 开机时常驻的<strong>内核自带 <code>cfg80211</code></strong> 与 backport 的符号版本对不上。<code>modprobe -r cfg80211</code> 卸掉再加载即可（免重启）。</li>
+    <li>成功后网卡名是 <strong><code>wlP1p1s0</code></strong>（predictable naming，不是 <code>wlan0</code>），<code>nmcli</code> 立刻能扫网。</li>
+  </ul>
+</div>
+
+<h2>1. 症状与诊断<span class="en">Symptom &amp; triage</span></h2>
+<p>GNOME 设置里没有 Wireless、<code>ip link</code> 里没有无线网卡。先分层确认「硬件 / 固件 / 驱动」哪一层缺：</p>
+<pre><code># 硬件在吗？ → 看到 AX210 = 在
+lspci | grep -i network
+# → Network controller: Intel Corporation Wi-Fi 6 AX210/AX211/AX411 160MHz
+
+# 有无线网卡接口吗？ → 没有任何 wl* = 驱动没起来
+ip -o link show
+# → lo / enP8p1s0(有线) / can0 / usb0 …  无 wl*
+
+# 驱动模块在内核树里吗？ → 关键判据
+modinfo iwlwifi
+# → 报错找不到 = iwlwifi 根本没编进这个 Tegra 内核
+
+# 固件在吗？ → AX210 需要 ty-a0-gf-a0-*.ucode
+ls /lib/firmware/iwlwifi-ty-a0-gf-a0-*
+# → 一堆版本都在，固件不缺
+
+# 无线模块目录里有 intel 吗？
+ls /lib/modules/$(uname -r)/kernel/drivers/net/wireless/
+# → ath broadcom marvell ti …  就是没有 intel/iwlwifi</code></pre>
+
+<div class="box ok">
+  <strong>✓ 诊断结论 <span class="en-i">— what's actually missing</span></strong>
+  硬件 ✅、固件 ✅、<code>cfg80211</code> 配置层 ✅，<strong>只差 <code>iwlwifi</code>/<code>iwlmvm</code> 内核模块</strong>。L4T 的 <code>5.15.185-tegra</code> 默认 <code>CONFIG_IWLWIFI</code> 没开——这在 Jetson 上很常见，不是你装漏了固件。
+</div>
+
+<h2>2. 模块栈：装的到底是什么<span class="en">The module stack DKMS builds</span></h2>
+<figure class="fig">
+  <svg viewBox="0 0 640 300" role="img" aria-label="iwlwifi backport module stack">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#8ed100"/><stop offset="1" stop-color="#5c9000"/>
+      </linearGradient>
+    </defs>
+    <!-- firmware -->
+    <rect x="430" y="35" width="180" height="52" rx="8" fill="none" stroke="#6b6b66" stroke-dasharray="5 4"/>
+    <text x="520" y="58" text-anchor="middle" class="sl" style="fill:#8a8a82">firmware（已随系统安装）</text>
+    <text x="520" y="76" text-anchor="middle" class="sl" style="font-family:var(--mono);fill:#8a8a82">ty-a0-gf-a0-86.ucode</text>
+    <!-- stack boxes -->
+    <rect x="40" y="35"  width="330" height="44" rx="8" fill="url(#g)"/>
+    <text x="205" y="62" text-anchor="middle" class="st">iwlmvm  · op_mode（AX210 走这个）</text>
+    <rect x="40" y="95" width="330" height="44" rx="8" fill="url(#g)"/>
+    <text x="205" y="122" text-anchor="middle" class="st">iwlwifi · PCIe 总线驱动</text>
+    <rect x="40" y="155" width="330" height="44" rx="8" fill="url(#g)"/>
+    <text x="205" y="182" text-anchor="middle" class="st">mac80211 · 软 MAC 层</text>
+    <rect x="40" y="215" width="330" height="44" rx="8" fill="url(#g)"/>
+    <text x="205" y="242" text-anchor="middle" class="st">cfg80211 · 配置/nl80211</text>
+    <!-- arrows depend -->
+    <g stroke="#6b6b66" stroke-width="1.5" fill="none">
+      <path d="M205 95 L205 79" marker-end="url(#a)"/>
+      <path d="M205 155 L205 139" marker-end="url(#a)"/>
+      <path d="M205 215 L205 199" marker-end="url(#a)"/>
+      <path d="M430 61 L372 60"/>
+    </g>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="#6b6b66"/>
+    </marker>
+    <text x="205" y="288" text-anchor="middle" class="sl">DKMS 把这 4 个 .ko 装进 <tspan style="font-family:var(--mono)">/lib/modules/&lt;kver&gt;/updates/dkms/</tspan></text>
+  </svg>
+  <figcaption>backport-iwlwifi 自带并替换 cfg80211/mac80211，四个模块必须成套加载、版本一致。</figcaption>
+</figure>
+
+<h2>3. 安装：backport-iwlwifi DKMS<span class="en">Install</span></h2>
+<p>前提：内核头文件已装（<code>ls /usr/src/linux-headers-$(uname -r)*</code> 有目录，L4T BSP 一般自带），DKMS 才能现编。</p>
+<pre><code>sudo apt update
+sudo apt install -y backport-iwlwifi-dkms   # DKMS 自动对 tegra 头文件编译四个模块
+
+# 编译要几分钟，结束后确认已 installed（不是只 added）
+dkms status | grep iwl
+# → backport-iwlwifi/11510, 5.15.185-tegra, aarch64: installed</code></pre>
+<div class="box warn">
+  <strong>⚠ 别急着判失败 <span class="en-i">— the build is slow, not stuck</span></strong>
+  <code>apt install</code> 期间 DKMS 会同步编译四个模块（<code>make.log</code> 里几百个 <code>CC</code>），要几分钟。中途看 <code>dkms status</code> 显示 <code>added</code> 是<strong>正在编</strong>，编完才变 <code>installed</code>。别中断 apt。
+</div>
+
+<h2>4. 唯一的坑：cfg80211 符号版本冲突<span class="en">The one gotcha</span></h2>
+<p>装完 <code>modprobe iwlmvm</code>，撞上：</p>
+<pre><code>modprobe: ERROR: could not insert 'iwlmvm': Invalid argument</code></pre>
+<p>根因：<strong>开机时内核自带的 <code>cfg80211</code> 已经常驻内存</strong>（引用计数 0，没人用，但占着位），而 backport 的 <code>iwlmvm</code> 期望的是 backport 自带 <code>cfg80211</code>/<code>mac80211</code> 的符号版本（modversions CRC）。两套 CRC 对不上 → 内核拒绝插入 → <code>EINVAL</code>。<span class="kv">Not a build error — a stale in-tree cfg80211 already resident with different symbol CRCs.</span></p>
+<pre><code># 卸掉常驻的旧 cfg80211（refcount 0，安全），再成套加载 backport
+sudo modprobe -r cfg80211
+sudo modprobe iwlmvm            # 自动带出 backport 的 cfg80211→mac80211→iwlwifi→iwlmvm</code></pre>
+<div class="box err">
+  <strong>✗ 若 <code>modprobe -r cfg80211</code> 说 in use <span class="en-i">— fall back to reboot</span></strong>
+  说明有别的东西正用着它，那就 <code>sudo reboot</code>。重启后 depmod 已把 backport 模块放进优先级更高的 <code>updates/dkms/</code>，开机会成套加载正确版本，一样出 <code>wl*</code>。
+</div>
+
+<h2>5. 验证<span class="en">Verify</span></h2>
+<pre><code># 内核日志：固件加载 + 识别 AX210
+sudo dmesg | grep -i iwlwifi | tail
+# → loaded firmware version 86.… ty-a0-gf-a0-86.ucode op_mode iwlmvm
+# → Detected Intel(R) Wi-Fi 6 AX210 160MHz, REV=0x420
+#   （WRT: Invalid time point / Failed to allocate TLV 是 AX210 已知无害告警，忽略）
+
+# 四个模块成套加载
+lsmod | grep -E 'iwlmvm|iwlwifi|mac80211|cfg80211'
+
+# 网卡出现（注意名字是 wlP1p1s0，不是 wlan0）
+ip -o link show | grep -i wl
+
+# 能扫到网就成了
+nmcli device wifi list | head</code></pre>
+<div class="box ok">
+  <strong>✓ 成功判据 <span class="en-i">— how to know it worked</span></strong>
+  ① <code>lsmod</code> 见到 <code>iwlmvm/iwlwifi/mac80211/cfg80211</code> 四件套；② <code>ip link</code> 出现 <code>wlP1p1s0</code>；③ <code>nmcli device wifi list</code> 能列出周边 SSID；④ GNOME 设置里出现 Wireless。连网只需 <code>nmcli device wifi connect &lt;SSID&gt; password &lt;密码&gt;</code>（密码不入库）。
+</div>
+
+<h2>6. 持久化与后续<span class="en">Persistence &amp; caveats</span></h2>
+<ul>
+  <li><strong>重启后自动加载</strong>：DKMS 模块在 <code>updates/dkms/</code>（优先级高于内核自带），本次要手动卸 <code>cfg80211</code> 只是因为它在装 DKMS <em>之前</em>就已常驻。建议装完<strong>重启一次做回归验证</strong>，确认开机自动出 <code>wl*</code>（会短暂打断 base_host / pad_teleop）。</li>
+  <li><strong>内核升级</strong>：只要 <code>linux-headers</code> 在，DKMS 会对新内核自动重编；若升级后无线消失，先 <code>dkms status</code> 看是否 <code>installed</code>，需要时 <code>sudo dkms autoinstall</code>。</li>
+  <li><strong>蓝牙</strong>：AX210 的蓝牙（<code>8087:0032</code>）走 <code>btintel</code>，本就正常（Xbox 手柄即经它连接），与本文的 WiFi 驱动无关。</li>
+</ul>
+
+<h2>7. 参考<span class="en">References</span></h2>
+<ul>
+  <li>Intel Wireless · <a href="https://wireless.wiki.kernel.org/en/users/drivers/iwlwifi">iwlwifi 驱动与固件对照</a></li>
+  <li>backport 源码：<code>git://git.kernel.org/pub/scm/linux/kernel/git/iwlwifi/backport-iwlwifi.git</code>（apt 无包时的源码编译退路）</li>
+  <li>本项目：<a href="orin-nano-super-install.html">Orin Nano Super 刷机安装记录</a> —— 刷机与 Super 模式的上游步骤</li>
+</ul>
+
+<footer>
+  Orin · AX210 Wi-Fi 6E 驱动启用记录 · 2026-07-18 · L4T R36.5.0 / 内核 5.15.185-tegra · backport-iwlwifi 11510<br>
+  <span style="opacity:.8">固件随 L4T 预装；WiFi 密码等敏感信息不写入本仓库。</span>
+</footer>
+
+</div>
+</body>
+</html>
