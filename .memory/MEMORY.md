@@ -10,3 +10,4 @@
 - [目标机器人 LeKiwi](lekiwi-robot-target.md) — 3轮底盘+SO-101 从臂 9电机单总线；lerobot 锚定 26ff40d；语雀资料可走 API 匿名读
 - [板子已装 lerobot](lerobot-installed-orin.md) — conda env lerobot/py3.12；GitHub 必须走 ghfast.top 镜像；PyPI torch 是 cu130 用不了 GPU
 - [LeKiwi 控制台 GUI](lekiwi-gui-tauri.md) — gui/ Tauri 桌面端；ZeroMQ Tab 键盘遥控已成；ZMQ 只能在 Rust 后端；改遥控前必看
+- [LeKiwi 手柄遥控](lekiwi-pad-teleop.md) — 板载 systemd daemon evdev→ZMQ 开机自启；evdev 轴必须 absinfo 初始化否则满偏自走

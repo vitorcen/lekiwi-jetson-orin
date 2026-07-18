@@ -6,3 +6,4 @@ Linux_for_Tegra/
 
 # flash run log
 flash.log
+__pycache__/

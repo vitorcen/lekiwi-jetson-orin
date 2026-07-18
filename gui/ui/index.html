@@ -77,6 +77,28 @@
       </div>
     </section>
 
+    <!-- 中：主臂遥操作 -->
+    <section class="panel" id="leaderPanel">
+      <h2>主臂遥操作 <span class="en">Leader arm</span></h2>
+      <p class="tip">流程：① 连接主臂 → ② 点「从臂摆中位」（从臂自动立正：大臂竖直、小臂水平、腕伸直）→ ③ 把主臂也摆成同样中位 → ④ 对齐零位 → ⑤ 开始跟随。零位会存盘，下次连接自动加载，可随时重新对齐。</p>
+      <div class="lrow">
+        <input id="lport" type="text" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041438-if00" title="主臂串口">
+      </div>
+      <div class="lrow">
+        <button id="lconn" class="primary">连接主臂</button>
+        <button id="lmid">从臂摆中位</button>
+        <button id="lalign" disabled>对齐零位</button>
+        <button id="lfollow" disabled>开始跟随</button>
+        <button id="lrelax" title="从臂折回休息位并断扭矩（同手柄 START）">收臂松弛</button>
+        <span id="lstate" class="pill bad">未连接</span>
+      </div>
+      <table id="ljoints">
+        <tr><td>1 肩转</td><td class="ljv" id="lj0">—</td><td>2 肩抬</td><td class="ljv" id="lj1">—</td></tr>
+        <tr><td>3 肘</td><td class="ljv" id="lj2">—</td><td>4 腕俯仰</td><td class="ljv" id="lj3">—</td></tr>
+        <tr><td>5 腕旋转</td><td class="ljv" id="lj4">—</td><td>6 爪</td><td class="ljv" id="lj5">—</td></tr>
+      </table>
+    </section>
+
     <!-- 右：方向可视化 + 实时速度 -->
     <section class="panel">
       <h2>运动状态 <span class="en">Live command</span></h2>

@@ -215,3 +215,7 @@ window.addEventListener('blur', dropFocus);           // window lost focus = rel
 document.addEventListener('visibilitychange', () => { if (document.hidden) dropFocus(); });
 
 render(0, 0, 0);
+
+// Auto-connect on launch with the prefilled endpoint; failure just lands in
+// the status pill and the button still works manually.
+if (invoke) connect();

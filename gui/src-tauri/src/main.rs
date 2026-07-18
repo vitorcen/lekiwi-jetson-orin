@@ -23,10 +23,11 @@
 // {"x.vel": m/s, "y.vel": m/s, "theta.vel": deg/s}; the host filters ".vel"
 // keys through _body_to_wheel_raw and stops the base if commands stop arriving.
 
-use std::time::Duration;
+use std::io::Write as _;
+use std::time::{Duration, Instant};
 
 use tauri::async_runtime::Mutex;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 use zeromq::{PushSocket, Socket, SocketSend, ZmqMessage};
 
@@ -34,6 +35,8 @@ use zeromq::{PushSocket, Socket, SocketSend, ZmqMessage};
 enum Req {
     Connect(String, oneshot::Sender<Result<String, String>>),
     Send(f64, f64, f64),
+    /// Pre-framed JSON (leader-arm follow messages).
+    SendJson(String),
     Disconnect(oneshot::Sender<()>),
 }
 
@@ -80,6 +83,15 @@ fn spawn_worker() -> mpsc::UnboundedSender<Req> {
                             .await;
                         }
                     }
+                    Req::SendJson(json) => {
+                        if let Some(s) = sock.as_mut() {
+                            let _ = tokio::time::timeout(
+                                Duration::from_millis(200),
+                                s.send(ZmqMessage::from(json)),
+                            )
+                            .await;
+                        }
+                    }
                     Req::Disconnect(reply) => {
                         if let Some(s) = sock.as_mut() {
                             let zero = ZmqMessage::from(base_json(0.0, 0.0, 0.0));
@@ -97,6 +109,258 @@ fn spawn_worker() -> mpsc::UnboundedSender<Req> {
         });
     });
     tx
+}
+
+// ---------------------------------------------------------------------------
+// Leader arm: a local Feetech STS3215 bus (SO-101 leader) read over USB serial.
+// Same worker-thread pattern as the ZMQ socket: the port lives on its own
+// thread; commands arrive over a channel; joint state streams to the frontend
+// as "leader" events. While following, leader deltas from the aligned zero
+// pose are pushed to base_host as {"arm.dq": [...]} via the ZMQ worker.
+
+enum LReq {
+    Connect(String, oneshot::Sender<Result<String, String>>),
+    /// Capture the current pose as the zero reference (leader posed like the
+    /// follower's rest pose).
+    Align(oneshot::Sender<Result<(), String>>),
+    Follow(bool),
+    Disconnect,
+}
+
+struct Leader {
+    tx: std::sync::mpsc::Sender<LReq>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct LeaderFrame {
+    connected: bool,
+    following: bool,
+    aligned: bool,
+    joints: Vec<u16>,
+}
+
+/// One position read: FF FF id 04 02 38 02 cks -> FF FF id len err lo hi cks.
+fn sts_read_pos(port: &mut Box<dyn serialport::SerialPort>, id: u8) -> Option<u16> {
+    let body = [id, 4u8, 2, 56, 2];
+    let cks = !(body.iter().map(|&b| b as u32).sum::<u32>() as u8);
+    let mut pkt = vec![0xFFu8, 0xFF];
+    pkt.extend_from_slice(&body);
+    pkt.push(cks);
+    let _ = port.clear(serialport::ClearBuffer::Input);
+    port.write_all(&pkt).ok()?;
+    port.flush().ok()?;
+    let mut buf = [0u8; 32];
+    let mut got = 0usize;
+    let deadline = Instant::now() + Duration::from_millis(15);
+    while Instant::now() < deadline {
+        match port.read(&mut buf[got..]) {
+            Ok(n) => {
+                got += n;
+                // Scan for FF FF id, need 8 bytes total from there.
+                for i in 0..got.saturating_sub(6) {
+                    if buf[i] == 0xFF && buf[i + 1] == 0xFF && buf[i + 2] == id && i + 7 <= got {
+                        let lo = buf[i + 5] as u16;
+                        let hi = buf[i + 6] as u16;
+                        return Some((lo | (hi << 8)) & 0x0FFF);
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    None
+}
+
+/// The aligned zero pose persists across launches; re-aligning overwrites it.
+fn zero_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config/lekiwi-console/leader_zero.json")
+}
+
+fn load_zero() -> Option<[i32; 6]> {
+    let text = std::fs::read_to_string(zero_path()).ok()?;
+    let v: Vec<i32> = serde_json::from_str(&text).ok()?;
+    v.try_into().ok()
+}
+
+fn save_zero(z: &[i32; 6]) {
+    let p = zero_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(p, serde_json::to_string(&z.to_vec()).unwrap_or_default());
+}
+
+fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Leader {
+    let (tx, rx) = std::sync::mpsc::channel::<LReq>();
+    std::thread::spawn(move || {
+        let mut port: Option<Box<dyn serialport::SerialPort>> = None;
+        let mut zero: Option<[i32; 6]> = None;
+        let mut following = false;
+        loop {
+            // The command channel doubles as the ~30 Hz tick clock.
+            match rx.recv_timeout(Duration::from_millis(33)) {
+                Ok(LReq::Connect(path, reply)) => {
+                    match serialport::new(&path, 1_000_000)
+                        .timeout(Duration::from_millis(10))
+                        .open()
+                    {
+                        Ok(mut p) => {
+                            // All six must answer or it's not a leader arm.
+                            let ok = (1..=6u8).all(|id| sts_read_pos(&mut p, id).is_some());
+                            if ok {
+                                port = Some(p);
+                                zero = load_zero();   // reuse last alignment
+                                following = false;
+                                let _ = reply.send(Ok(path));
+                            } else {
+                                let _ = reply.send(Err("主臂 1-6 号舵机未全部应答".into()));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = reply.send(Err(format!("打开串口失败: {e}")));
+                        }
+                    }
+                }
+                Ok(LReq::Align(reply)) => {
+                    let result = match port.as_mut() {
+                        Some(p) => {
+                            let mut z = [0i32; 6];
+                            let mut ok = true;
+                            for (i, id) in (1..=6u8).enumerate() {
+                                match sts_read_pos(p, id) {
+                                    Some(v) => z[i] = v as i32,
+                                    None => ok = false,
+                                }
+                            }
+                            if ok {
+                                zero = Some(z);
+                                save_zero(&z);
+                                Ok(())
+                            } else {
+                                Err("读主臂关节失败".into())
+                            }
+                        }
+                        None => Err("主臂未连接".into()),
+                    };
+                    let _ = reply.send(result);
+                }
+                Ok(LReq::Follow(on)) => following = on && zero.is_some(),
+                Ok(LReq::Disconnect) => {
+                    port = None;
+                    zero = None;
+                    following = false;
+                    let _ = app.emit("leader", LeaderFrame {
+                        connected: false,
+                        following: false,
+                        aligned: false,
+                        joints: vec![],
+                    });
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if let Some(p) = port.as_mut() {
+                let mut joints = Vec::with_capacity(6);
+                for id in 1..=6u8 {
+                    match sts_read_pos(p, id) {
+                        Some(v) => joints.push(v),
+                        None => break,
+                    }
+                }
+                if joints.len() == 6 {
+                    if following {
+                        if let Some(z) = zero {
+                            let dq: Vec<i32> = joints
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &v)| v as i32 - z[i])
+                                .collect();
+                            let json = format!(
+                                "{{\"arm.dq\": [{}, {}, {}, {}, {}, {}]}}",
+                                dq[0], dq[1], dq[2], dq[3], dq[4], dq[5]
+                            );
+                            let _ = zmq_tx.send(Req::SendJson(json));
+                        }
+                    }
+                    let _ = app.emit("leader", LeaderFrame {
+                        connected: true,
+                        following,
+                        aligned: zero.is_some(),
+                        joints,
+                    });
+                } else {
+                    // Port died (unplugged): drop it, stop following.
+                    port = None;
+                    zero = None;
+                    following = false;
+                    let _ = app.emit("leader", LeaderFrame {
+                        connected: false,
+                        following: false,
+                        aligned: false,
+                        joints: vec![],
+                    });
+                }
+            }
+        }
+    });
+    Leader { tx }
+}
+
+#[tauri::command]
+async fn leader_connect(path: String, state: State<'_, Leader>) -> Result<String, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(LReq::Connect(path, reply_tx))
+        .map_err(|_| "leader worker is gone".to_string())?;
+    reply_rx.await.map_err(|_| "leader worker dropped reply".to_string())?
+}
+
+#[tauri::command]
+async fn leader_align(state: State<'_, Leader>) -> Result<(), String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(LReq::Align(reply_tx))
+        .map_err(|_| "leader worker is gone".to_string())?;
+    reply_rx.await.map_err(|_| "leader worker dropped reply".to_string())?
+}
+
+#[tauri::command]
+fn leader_follow(on: bool, state: State<'_, Leader>) -> Result<(), String> {
+    state
+        .tx
+        .send(LReq::Follow(on))
+        .map_err(|_| "leader worker is gone".to_string())
+}
+
+#[tauri::command]
+fn leader_disconnect(state: State<'_, Leader>) -> Result<(), String> {
+    state
+        .tx
+        .send(LReq::Disconnect)
+        .map_err(|_| "leader worker is gone".to_string())
+}
+
+/// Ask base_host to glide the follower arm to the calibrated middle pose
+/// (alignment reference for leader follow).
+#[tauri::command]
+fn zmq_arm_mid(state: State<'_, Zmq>) -> Result<(), String> {
+    state
+        .tx
+        .send(Req::SendJson("{\"arm.mid\": 1}".to_string()))
+        .map_err(|_| "zmq worker is gone".to_string())
+}
+
+/// Fold the follower arm to REST, then cut its torque (same as the gamepad's
+/// START button). Sent when follow stops, and from the standalone button.
+#[tauri::command]
+fn zmq_arm_relax(state: State<'_, Zmq>) -> Result<(), String> {
+    state
+        .tx
+        .send(Req::SendJson("{\"arm.relax\": 1}".to_string()))
+        .map_err(|_| "zmq worker is gone".to_string())
 }
 
 /// Point the socket at lekiwi_host's command port. A wrong IP surfaces later as
@@ -147,6 +411,7 @@ async fn zmq_status(state: State<'_, Zmq>) -> Result<Option<String>, String> {
 
 fn main() {
     let tx = spawn_worker();
+    let zmq_tx_for_leader = tx.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
         .manage(Zmq {
@@ -158,8 +423,15 @@ fn main() {
             zmq_send_base,
             zmq_disconnect,
             zmq_status,
+            leader_connect,
+            leader_align,
+            leader_follow,
+            leader_disconnect,
+            zmq_arm_mid,
+            zmq_arm_relax,
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            app.manage(spawn_leader(app.handle().clone(), zmq_tx_for_leader));
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
             }

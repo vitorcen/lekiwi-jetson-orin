@@ -23,7 +23,8 @@
 
 1. **先在 Orin 上起 host**（车要通电、9 电机在线）。有两个选择：
 
-   **A. 底盘专用 host（推荐，免标定）** — 只驱动 3 个轮子，立刻能开车：
+   **A. 底盘专用 host（推荐，免标定）** — 只驱动 3 个轮子，立刻能开车。
+   已做成 **systemd 开机自启**（见下节），装好后无需手动起。手动方式仍保留：
    ```bash
    scp gui/board/base_host.py gui/board/*.sh jatson@192.168.3.188:~/   # 首次部署
    ssh jatson@192.168.3.188 'bash ~/start_base_host.sh /dev/ttyACM0'   # 起（停：stop_base_host.sh）
@@ -46,6 +47,53 @@
 4. 松手即停；切走 Tab、窗口失焦、页面隐藏都会自动停车（dead-man）。
 
 **先把底盘架空再试。**
+
+## 手柄遥控（板载守护进程，无需 GUI）
+
+手柄接收器直接插 **Orin**，板上 `pad_teleop.py`（evdev 读手柄）把摇杆转成同一条
+ZMQ 协议推给本机 `base_host`，**开机自启**，和 GUI 键盘可共存（PULL 公平排队多个
+PUSH 端）。串口始终只有 base_host 一个所有者。
+
+```bash
+# 首次部署（板上要先 pip install evdev 到 lerobot env）
+scp gui/board/{base_host.py,pad_teleop.py,base_host.service,pad_teleop.service,install_services.sh} jatson@192.168.3.188:~/
+ssh -t jatson@192.168.3.188 'sudo bash ~/install_services.sh'
+# 看日志
+ssh jatson@192.168.3.188 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'
+```
+
+| 手柄输入 | 动作 | 对应键盘 |
+|---|---|---|
+| 左摇杆 | 平移：前后 + 左右横移（模拟量） | W/S + A/D |
+| 右摇杆左右 | 转向（模拟量，细调用它） | Q/E 无级版 |
+| 十字键 ←/→ | 左转 / 右转（数字量满速档） | Q/E |
+| 十字键 ↑/↓ | 前进 / 后退（数字量） | W/S |
+| LB / RB | 降 / 升速档（0.10/0.25/0.40 m/s） | F/R |
+| B **按住** | 瞬时急停（松开即恢复，无闩锁） | 空格 |
+
+摇杆回中即发零速停车；手柄拔掉发零速并等待热插拔；base_host 的 watchdog 仍是兜底。
+杂牌手柄丝印≠事件码：按未映射键会在 `journalctl -u pad_teleop` 里打出真实键码，照此改映射。
+
+## 主臂遥操作（Leader arm，GUI 内）
+
+主臂(SO-101 leader)USB 插**跑 GUI 的电脑**，ZeroMQ Tab 中间「主臂遥操作」面板操作，
+关节空间直通：`从臂目标 = 从臂休息位 + (主臂当前 − 主臂零位)`，30Hz 走同一条 ZMQ
+通道（`arm.dq` 键），base_host 端行程限位 + 单步限幅兜底。手柄/键盘同时可用
+（底盘键缺省不驱动，互不干扰）。
+
+流程（顺序重要）：
+
+1. 从臂按手柄 **START** 收到休息位（或确认它在休息位附近）；
+2. **主臂手动摆成同样的休息姿态**（折叠收拢）；
+3. GUI：**连接主臂 → 对齐零位 → 开始跟随**；
+4. 停止跟随即回手柄/摇杆控制，衔接无跳变。
+
+对齐零位代替主臂标定——两臂同型号，差值映射即可；主臂拉超程时从臂被标定限位夹住。
+Rust 端串口 worker 与 ZMQ worker 同一铁律：独立线程，不进 Tauri runtime。
+
+## 机械臂标定
+
+见项目根 `README.md` 的「机械臂标定 Arm calibration」一节（先按 START 收臂松弛，再停服务跑 `lerobot-calibrate`）。
 
 ## 架构要点（为什么这么写）
 

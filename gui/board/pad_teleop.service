@@ -1,0 +1,15 @@
+# LeKiwi gamepad teleop daemon — evdev pad -> ZMQ tcp://127.0.0.1:5555.
+# Independent of the GUI; hotplug-safe (waits for the pad if absent).
+[Unit]
+Description=LeKiwi gamepad teleop (evdev -> ZMQ)
+After=base_host.service
+Wants=base_host.service
+
+[Service]
+User=jatson
+ExecStart=/home/jatson/miniconda3/envs/lerobot/bin/python /home/jatson/pad_teleop.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

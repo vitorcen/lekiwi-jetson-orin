@@ -2,6 +2,7 @@
 // connect/keyboard handlers (side-effect module by design).
 import { S } from './state.js';
 import { onLeaveZmq } from './zmq.js';
+import './leader.js';
 
 document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   const prev = S.page;
