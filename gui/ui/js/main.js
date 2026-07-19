@@ -3,6 +3,7 @@
 import { S } from './state.js';
 import { onLeaveZmq } from './zmq.js';
 import { onEnterVision, onLeaveVision } from './vision.js';
+import { onEnterVoice, onLeaveVoice } from './voice.js';
 import './leader.js';
 import './log.js';
 import './health.js';
@@ -20,4 +21,8 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   // enter promotes to watch + starts polling, leave stands it back down.
   if (prev === 'vision' && S.page !== 'vision') onLeaveVision();
   if (S.page === 'vision' && prev !== 'vision') onEnterVision();
+  // Voice: polling only — the conversation window itself lives on the daemon
+  // and survives tab switches (no dead-man on purpose).
+  if (prev === 'voice' && S.page !== 'voice') onLeaveVoice();
+  if (S.page === 'voice' && prev !== 'voice') onEnterVoice();
 });

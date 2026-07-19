@@ -242,10 +242,17 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .askrow { display: flex; gap: 8px; margin-bottom: 4px; }
 #vlmAsk { flex: 1; font: 13px system-ui, "Noto Sans CJK SC", sans-serif; }
 #readPanel button.primary { border-radius: 7px; padding: 6px 18px; }
-#capfeed {
+#capfeed, #vofeed {
   margin-top: 10px; max-height: 420px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px;
 }
+#aListenBtn, #aIntBtn { border-radius: 7px; padding: 6px 18px; white-space: nowrap; }
+#aListenBtn.live { background: #1e3a2f; color: #7ee2a8; border-color: #2f5e48; }
+#aListenBtn:disabled, #aIntBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+#aIntBtn { background: #171b2d; color: #f9e2af; border: 1px solid #262b3d; cursor: pointer; }
+#aWin { text-align: center; }
+#aSay { flex: 1; font: 13px system-ui, "Noto Sans CJK SC", sans-serif; }
+#voicePanel { max-width: 980px; }
 .caprow {
   background: #12162080; border: 1px solid #1c2030; border-left: 3px solid #2c3350;
   border-radius: 8px; padding: 8px 12px;

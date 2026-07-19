@@ -72,6 +72,10 @@
     <span class="tico">📷</span>
     <span class="tlab">视觉 Vision<em>相机 + VLM 解读</em></span>
   </button>
+  <button class="tab" data-page="voice">
+    <span class="tico">🎤</span>
+    <span class="tlab">语音 Voice<em>Hermes 实时对话</em></span>
+  </button>
   <button class="tab" data-page="ros">
     <span class="tico">🤖</span>
     <span class="tlab">ROS 2<em>待建</em></span>
@@ -252,6 +256,44 @@
       <div id="capfeed"></div>
     </section>
   </div>
+</div>
+
+<!-- ======================= 语音 Voice ======================= -->
+<div id="page-voice" class="page">
+
+  <div class="connbar">
+    <label>语音服务 IP
+      <input id="voip" type="text" value="127.0.0.1">
+    </label>
+    <span class="svcbtns" title="语音服务(voice-daemon)手动控制。只影响本次运行,不改开机自启。">
+      <button id="asvcRestart">重启服务</button>
+      <button id="asvcStop">停止服务</button>
+      <button id="asvcStart">启动服务</button>
+      <label class="svcauto" title="开机自启(systemctl --user enable/disable voice-daemon)">
+        <input type="checkbox" id="asvcAuto"> 开机自启
+      </label>
+    </span>
+    <span id="aState" class="pill bad">离线</span>
+    <span class="hint">麦克风 → SenseVoice 识别 → Hermes(DeepSeek)→ 小晓播报（<code>voice-daemon</code>，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。</span>
+  </div>
+
+  <section class="panel" id="voicePanel">
+    <h2>Hermes 语音对话 <span class="en">Voice chat</span></h2>
+    <div class="watchrow">
+      <button id="aListenBtn" class="primary" disabled>开始对话</button>
+      <button id="aIntBtn" disabled>打断</button>
+      <label class="svcauto" title="按「开始对话」后麦克风常开的时长，期间免按键连续对话；每轮对话自动续期，到期自动关麦。">
+        常开 <input id="aWin" type="number" min="1" max="60" value="8" style="width:52px"> 分钟
+      </label>
+      <span id="aStage" class="tip">待机</span>
+    </div>
+    <div class="askrow">
+      <input id="aSay" type="text" placeholder="打字和龙虾对话（回答会播报），或「仅播报」直接出声…">
+      <button id="aSendBtn" class="primary">发送</button>
+      <button id="aSayBtn" title="调试：文字直接 TTS 播出，不经过 Hermes">仅播报</button>
+    </div>
+    <div id="vofeed"></div>
+  </section>
 </div>
 
 <!-- ======================= ROS 2 (占位) ======================= -->

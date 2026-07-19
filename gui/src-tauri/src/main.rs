@@ -731,6 +731,108 @@ async fn vlm_set_state(ip: String, state: String) -> Result<String, String> {
     .map_err(|e| format!("vlm task failed: {e}"))?
 }
 
+// ---------------------------------------------------------------------------
+// voice-daemon proxy — same token-in-Rust pattern as the VLM block above.
+// The voice daemon (voice/daemon.py) serves HTTP on tcp://<ip>:8092; the GUI
+// polls /health + /feed?since=<seq> and posts /listen /stop /interrupt /say.
+const VOICE_PORT: u16 = 8092;
+
+fn voice_auth() -> Result<String, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let p = std::path::PathBuf::from(home).join("work/lekiwi-jatson-orin/voice/token");
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|t| format!("Bearer {t}"))
+        .ok_or_else(|| "no voice token (daemon not running?)".to_string())
+}
+
+/// Generic GET proxy: path is fixed by the frontend (health/feed/state only).
+#[tauri::command]
+async fn voice_get(ip: String, path: String) -> Result<String, String> {
+    if !(path == "/health" || path == "/state" || path.starts_with("/feed")) {
+        return Err(format!("bad path: {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let auth = voice_auth()?;
+        vlm_agent(6)
+            .get(&format!("http://{ip}:{VOICE_PORT}{path}"))
+            .set("Authorization", &auth)
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("voice task failed: {e}"))?
+}
+
+/// Generic POST proxy for the control endpoints. body is a JSON string ("{}"
+/// for none); the daemon validates it, we just forward.
+#[tauri::command]
+async fn voice_post(ip: String, path: String, body: String) -> Result<String, String> {
+    if !matches!(path.as_str(), "/listen" | "/stop" | "/interrupt" | "/say" | "/simulate") {
+        return Err(format!("bad path: {path}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let auth = voice_auth()?;
+        vlm_agent(15)
+            .post(&format!("http://{ip}:{VOICE_PORT}{path}"))
+            .set("Authorization", &auth)
+            .set("Content-Type", "application/json")
+            .send_string(if body.trim().is_empty() { "{}" } else { &body })
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("voice task failed: {e}"))?
+}
+
+/// Manual control of the voice service, mirroring vlm_service (runtime-only
+/// start/stop/restart + boot-autostart enable/disable/is-enabled).
+#[tauri::command]
+async fn voice_service(ip: String, action: String) -> Result<String, String> {
+    if !matches!(
+        action.as_str(),
+        "start" | "stop" | "restart" | "enable" | "disable" | "is-enabled"
+    ) {
+        return Err(format!("bad action: {action}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let sc = format!(
+            "systemctl --user {action} voice-daemon.service{}",
+            if action == "is-enabled" { " || true" } else { "" }
+        );
+        let out = if ip == "127.0.0.1" || ip == "localhost" {
+            std::process::Command::new("sh").args(["-c", &sc]).output()
+        } else {
+            std::process::Command::new("ssh")
+                .args([
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=6",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    &format!("jatson@{ip}"),
+                    &sc,
+                ])
+                .output()
+        }
+        .map_err(|e| format!("spawn failed: {e}"))?;
+        if out.status.success() {
+            if action == "is-enabled" {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                Ok(action)
+            }
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("voice_service task failed: {e}"))?
+}
+
 fn main() {
     let tx = spawn_worker();
     let zmq_tx_for_leader = tx.clone();
@@ -759,6 +861,9 @@ fn main() {
             vlm_caption,
             vlm_describe,
             vlm_set_state,
+            voice_get,
+            voice_post,
+            voice_service,
         ])
         .setup(move |app| {
             app.manage(spawn_leader(app.handle().clone(), zmq_tx_for_leader));
