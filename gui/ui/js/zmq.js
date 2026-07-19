@@ -5,7 +5,7 @@
 // {x.vel, y.vel, theta.vel} command that Rust forwards to the host. The host
 // has an idle watchdog, so we send a zero the moment all keys release and never
 // stream from an unfocused/hidden tab (dead-man safety).
-import { $, S, invoke } from './state.js';
+import { $, S, invoke, saveConn } from './state.js';
 import { logLine } from './log.js';
 
 // Speed levels mirror lerobot's LeKiwi defaults exactly (xy m/s, theta deg/s).
@@ -51,6 +51,7 @@ async function connect() {
     $('connBtn').textContent = '断开';
     $('connBtn').classList.add('live');
     logLine('系统', '已连接 ' + ep);
+    saveConn();                      // 连接成功即记住,下次启动自动连这个 IP
     // Point the log bus at the same board so gamepad events start streaming in.
     invoke('log_connect', { ip }).catch(() => {});
   } catch (e) {

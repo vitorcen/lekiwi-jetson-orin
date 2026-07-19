@@ -139,6 +139,7 @@ async function pollHealth() {
   try {
     const h = JSON.parse(await invoke('vlm_health', { ip: curIp() }));
     if (!online) goOnline();
+    else framePump();          // 兜底:在线但泵已死(有 framePumping 防重入)
     paintHealth(h);
   } catch {
     if (online) goOffline();
@@ -165,7 +166,10 @@ async function framePump() {
         paintStateBadge();
         tickAge();
       } catch {
-        break;   // transient/offline; health loop owns online/offline
+        // 瞬时失败(相机抖动/daemon 正在重启)绝不能杀泵:health 探测在线时
+        // 状态永不翻转,泵一死画面就永久定格。退避 1s 继续,离线由外层条件退出。
+        await sleep(1000);
+        continue;
       }
       const dt = performance.now() - t0;
       if (dt < FRAME_MIN_MS) await sleep(FRAME_MIN_MS - dt);
