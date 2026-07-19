@@ -1,0 +1,20 @@
+[Unit]
+Description=LeKiwi voice frontend daemon (VAD + SenseVoice ASR + Hermes + edge/Melo TTS)
+# Hermes gateway must be up first — the daemon opens the "voice" session at boot.
+After=hermes-gateway-robot.service network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h = the user's home; the repo lives under it. Adjust WorkingDirectory if the
+# checkout moves (installer rewrites ExecStart/WorkingDirectory to the real path).
+WorkingDirectory=%h/work/lekiwi-jatson-orin/voice
+ExecStart=%h/work/lekiwi-jatson-orin/voice/.venv/bin/python %h/work/lekiwi-jatson-orin/voice/daemon.py
+Restart=on-failure
+RestartSec=3
+StartLimitBurst=5
+# 稳态 RSS ~955MB(三套 ONNX 模型常驻);MemoryHigh 给软上限、不硬杀。
+MemoryHigh=900M
+
+[Install]
+WantedBy=default.target
