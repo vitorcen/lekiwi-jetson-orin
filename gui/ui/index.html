@@ -13,6 +13,50 @@
   <span id="connPill" class="pill bad">未连接</span>
 </header>
 
+<!-- ===================== 顶部状态栏 System status bar ===================== -->
+<div id="statusbar">
+  <span id="sbDot" class="sbdot" title="Orin 遥测（ssh 采集）">●</span>
+
+  <span class="sbcell" title="主机（Orin）实时板级功耗 VDD_IN。E351S 主机电池经 EV60-T1219 DC-DC 稳压到 19V，电池电量在板上不可测，故显示功耗。">
+    <span class="sbico">⚡</span><span class="sblab">主机</span>
+    <b id="pwrTxt">--</b>
+  </span>
+
+  <span class="sbcell" title="舵机电池：WitMotion Li-Po 11.1V 5600mAh（3S）。取自舵机 Present-Voltage 寄存器，负载下会瞬时下垂。base_host 未运行时显示离线。">
+    <span class="sbico">🔋</span><span class="sblab">舵机</span>
+    <span class="sbgauge"><span id="battFill" class="sbfill"></span></span>
+    <b id="battTxt">--</b>
+  </span>
+
+  <span class="sbcell" title="CPU 负载（loadavg1 / 核数）">
+    <span class="sblab">CPU</span>
+    <span class="sbgauge"><span id="cpuFill" class="sbfill"></span></span>
+    <b id="cpuTxt">--</b>
+  </span>
+
+  <span class="sbcell" title="GPU 利用率（GR3D）">
+    <span class="sblab">GPU</span>
+    <span class="sbgauge"><span id="gpuFill" class="sbfill"></span></span>
+    <b id="gpuTxt">--</b>
+  </span>
+
+  <span class="sbcell" title="统一内存（CPU/GPU 共享）已用 / 总量">
+    <span class="sblab">内存</span>
+    <span class="sbgauge"><span id="ramFill" class="sbfill"></span></span>
+    <b id="ramTxt">--</b>
+  </span>
+
+  <span class="sbcell" title="根分区 已用 / 总量">
+    <span class="sblab">硬盘</span>
+    <span class="sbgauge"><span id="hdFill" class="sbfill"></span></span>
+    <b id="hdTxt">--</b>
+  </span>
+
+  <span class="sbcell" title="SoC 最高温（tj）">
+    <span class="sbico">🌡</span><b id="tempTxt">--</b>
+  </span>
+</div>
+
 <!-- ===================== 醒目 Tab 栏 ===================== -->
 <nav id="tabs">
   <button class="tab on" data-page="zmq">

@@ -471,6 +471,56 @@ async fn zmq_status(state: State<'_, Zmq>) -> Result<Option<String>, String> {
     Ok(state.endpoint.lock().await.clone())
 }
 
+// ---------------------------------------------------------------------------
+// System telemetry for the top status bar. The GUI runs on the desktop, so the
+// only channel to the Orin's own vitals is ssh (passwordless key already set
+// up). One round-trip returns newline-delimited "key value..." lines the
+// frontend parses; the ssh call runs on a blocking pool so the 4 s poll never
+// stalls Tauri's async runtime.
+//
+// - temp  <max thermal-zone milli-°C>
+// - cpu   <loadavg1> <nproc>
+// - gpu   <per-mille 0..1000, or -1 if unreadable>
+// - mem   <MemTotal_kB> <MemAvailable_kB>          (unified memory)
+// - disk  <used_MB> <total_MB>   of /
+// - pwr   <VDD_IN mV> <VDD_IN mA> from the INA3221   (board draw = host power)
+// - sbatt <servo pack volts>  (base_host publishes it; empty when base is down)
+const SYSINFO_SH: &str = concat!(
+    "printf 'temp %s\\n' \"$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -rn | head -1)\";",
+    "printf 'cpu %s %s\\n' \"$(cut -d' ' -f1 /proc/loadavg)\" \"$(nproc)\";",
+    "printf 'gpu %s\\n' \"$(cat /sys/devices/platform/gpu.0/load 2>/dev/null || echo -1)\";",
+    "awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{print \"mem\",t,a}' /proc/meminfo;",
+    "df -m / | awk 'NR==2{print \"disk\",$3,$2}';",
+    "for h in /sys/class/hwmon/hwmon*; do if [ \"$(cat $h/name 2>/dev/null)\" = ina3221 ]; then ",
+    "printf 'pwr %s %s\\n' \"$(cat $h/in1_input)\" \"$(cat $h/curr1_input)\"; break; fi; done;",
+    "printf 'sbatt %s\\n' \"$(cat /tmp/lekiwi_batt 2>/dev/null)\"",
+);
+
+/// SSH to the board and read its vitals. BatchMode=yes fails fast (no password
+/// prompt) if the key isn't set up, surfacing as an error the UI shows offline.
+#[tauri::command]
+async fn sysinfo(ip: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = std::process::Command::new("ssh")
+            .args([
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=6",
+                "-o", "StrictHostKeyChecking=accept-new",
+                &format!("jatson@{ip}"),
+                SYSINFO_SH,
+            ])
+            .output()
+            .map_err(|e| format!("ssh spawn failed: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("sysinfo task failed: {e}"))?
+}
+
 fn main() {
     let tx = spawn_worker();
     let zmq_tx_for_leader = tx.clone();
@@ -485,6 +535,7 @@ fn main() {
             zmq_send_base,
             zmq_disconnect,
             zmq_status,
+            sysinfo,
             leader_connect,
             leader_align,
             leader_follow,

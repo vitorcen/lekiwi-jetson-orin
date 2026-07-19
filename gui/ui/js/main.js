@@ -4,6 +4,7 @@ import { S } from './state.js';
 import { onLeaveZmq } from './zmq.js';
 import './leader.js';
 import './log.js';
+import './health.js';
 
 document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   const prev = S.page;

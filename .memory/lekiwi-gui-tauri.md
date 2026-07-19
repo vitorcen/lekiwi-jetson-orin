@@ -67,3 +67,13 @@ crate ↔ pyzmq 互通（ZMTP 标准应通），要 GUI 连上架空开车才最
 
 **注意**：base_host 与原版 lekiwi_host 都 bind 5555，**二选一起**，别同时跑。
 base_host 只管底盘，不涉及臂/录数据；要完整 lerobot 流程仍走原版+标定。
+
+**顶部状态栏（2026-07-19）**：`index.html` header 下加 `#statusbar`，`ui/js/health.js`
+每 4s 调 Rust `sysinfo(ip)` 命令 → 后端 `ssh -o BatchMode=yes jatson@<ip>` 跑一条
+oneliner 读 `/proc`+sysfs，返回 `key value` 行前端解析。显示：**主机功耗 W**（VDD_IN，
+真实）、**舵机电池 %/V**（来自 base_host 写的 `/tmp/lekiwi_batt`，base_host 没跑时显
+「离线」）、CPU/GPU/统一内存/硬盘/温度。**主机电池不可测**（DC-DC 隔离，见
+[[lekiwi-robot-target]]）故显功耗替代。ssh 走 `std::process::Command` +
+`spawn_blocking`（不占 Tauri async runtime，无新依赖）。base_host 读舵机 reg 62 的
+改动随本功能进 `board/home/jatson/base_host.py`，`scripts/deploy_board.sh` 部署。
+浏览器模式（无 invoke）状态栏显示 `--`。

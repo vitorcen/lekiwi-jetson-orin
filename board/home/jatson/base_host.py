@@ -40,6 +40,7 @@ dead-man behaviour as the real host, so a dropped client never runs away.
 """
 import json
 import math
+import os
 import sys
 import time
 
@@ -51,8 +52,17 @@ BIND = sys.argv[2] if len(sys.argv) > 2 else "tcp://*:5555"
 BAUD = 1000000
 WATCHDOG_S = 0.5
 
+# Servo-battery telemetry: the STS3215s run off the WitMotion 11.1 V (3S) pack,
+# so a wheel servo's Present-Voltage register is a stand-in for pack voltage
+# (the Orin cannot read it any other way — this daemon owns the only serial
+# port). Published to a world-readable file the GUI polls over ssh. The Orin's
+# OWN supply (E351S -> EV60-T1219 DC-DC -> 19 V) is regulated away and is not
+# measurable on-board; the GUI shows board power (VDD_IN) for the host instead.
+BATT_FILE = "/tmp/lekiwi_batt"
+BATT_PERIOD_S = 5.0
+
 ADDR_MODE, ADDR_TORQUE, ADDR_ACCEL, ADDR_SPEED, ADDR_LOCK = 33, 40, 41, 46, 55
-ADDR_GOAL, ADDR_POS = 42, 56
+ADDR_GOAL, ADDR_POS, ADDR_VOLT = 42, 56, 62
 WHEELS = {7: 240.0 - 90, 8: 0.0 - 90, 9: 120.0 - 90}   # id -> mounting angle (deg)
 BASE_R, WHEEL_R, MAX_RAW = 0.125, 0.05, 2500
 
@@ -147,6 +157,23 @@ def solve(vx, vy, omega_deg):
 def read_pos(ser, sid):
     r = read(ser, sid, ADDR_POS, 2)
     return None if r is None else (r[0] | (r[1] << 8)) & 0x0FFF
+
+
+def read_volt(ser, sid):
+    """Present Voltage (reg 62) in volts, or None if the servo is silent."""
+    r = read(ser, sid, ADDR_VOLT, 1)
+    return None if r is None else r[0] / 10.0
+
+
+def write_batt(v):
+    """Publish pack voltage atomically to BATT_FILE (best effort)."""
+    try:
+        tmp = BATT_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{v:.1f}\n")
+        os.replace(tmp, BATT_FILE)
+    except OSError:
+        pass
 
 
 def clamp(v, lo, hi):
@@ -334,6 +361,7 @@ def main():
     print(f"[base_host] listening on {BIND}", flush=True)
 
     last_cmd = time.time()
+    last_batt = 0.0
     moving = False
     relaxing = False
     mid_seek = False
@@ -390,6 +418,18 @@ def main():
                     relaxing = False
             if arm and mid_seek and arm.mid_tick(0.05):
                 mid_seek = False
+            # Battery telemetry: one wheel-servo voltage read every few seconds.
+            # Cheap (~4 ms) and rare, so it never disturbs the 20 Hz drive loop;
+            # a serial death here escapes as OSError like any other, triggering
+            # the systemd restart against the stable by-id path.
+            now_b = time.time()
+            if now_b - last_batt >= BATT_PERIOD_S:
+                last_batt = now_b
+                for sid in WHEELS:
+                    v = read_volt(ser, sid)
+                    if v:
+                        write_batt(v)
+                        break
     except KeyboardInterrupt:
         pass
     except OSError as e:

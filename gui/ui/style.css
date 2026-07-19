@@ -23,6 +23,24 @@ h1 { font-size: 17px; margin: 0; font-weight: 700; display: flex; align-items: b
 code { background: #161a26; border: 1px solid #262b3d; border-radius: 4px; padding: 1px 6px;
        font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: #a6c8ff; }
 
+/* ===================== 顶部状态栏 ===================== */
+#statusbar {
+  display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap;
+  padding: 7px 18px; background: #0d1017; border-bottom: 1px solid #1c2030;
+  flex: none; font-size: 12.5px;
+}
+#statusbar .sbdot { color: #f38ba8; font-size: 11px; transition: color .3s; cursor: default; }
+#statusbar .sbdot.up { color: #7ee2a8; }
+.sbcell { display: flex; align-items: center; gap: 6px; color: #a3abcc; white-space: nowrap; cursor: default; }
+.sbcell .sbico { font-size: 13px; }
+.sbcell .sblab { color: #6b7394; }
+.sbcell b { font-weight: 600; color: #cdd6f4; font-variant-numeric: tabular-nums; min-width: 2ch; }
+.sbgauge {
+  width: 54px; height: 7px; border-radius: 4px; background: #1c2030;
+  overflow: hidden; flex: none;
+}
+.sbfill { display: block; height: 100%; width: 0; background: #7ea6e0; transition: width .4s, background .4s; }
+
 /* ===================== 醒目 Tab ===================== */
 #tabs {
   display: flex; gap: 10px; padding: 12px 18px 0;
