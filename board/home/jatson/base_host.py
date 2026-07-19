@@ -59,6 +59,7 @@ WATCHDOG_S = 0.5
 # OWN supply (E351S -> EV60-T1219 DC-DC -> 19 V) is regulated away and is not
 # measurable on-board; the GUI shows board power (VDD_IN) for the host instead.
 BATT_FILE = "/tmp/lekiwi_batt"
+ARM_FILE = "/tmp/lekiwi_arm"   # "limp" | "holding" | "none" for the GUI statusbar
 BATT_PERIOD_S = 5.0
 
 ADDR_MODE, ADDR_TORQUE, ADDR_ACCEL, ADDR_SPEED, ADDR_LOCK = 33, 40, 41, 46, 55
@@ -79,6 +80,8 @@ ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP = 1, 2, 3, 4, 5, 6
 # Calibrated ranges: lift [847,3244] elbow [897,3114] wrist [904,3193]
 # pan [1097,3097] grip [1452,2959] roll full-turn.
 REST_RAW = {ID_LIFT: 1001, ID_ELBOW: 3003, ID_WRIST: 1902}  # parked/folded
+REST_NEAR = 150  # raw counts (~13°): within this of REST at startup -> stay limp
+ARM_IDLE_RELAX_S = 60  # no arm command for this long -> fold to REST + torque off
 POSE_K = 1.2                   # 1/s exp approach (relax/mid glide only)
 # Direct per-joint velocity teleop (raw counts/s at full stick). Left stick
 # fwd/back drives LIFT(id2)+ELBOW(id3) as a coordinated reach: from REST toward
@@ -176,6 +179,17 @@ def write_batt(v):
         pass
 
 
+def write_arm_state(s):
+    """Publish arm torque state atomically to ARM_FILE (best effort)."""
+    try:
+        tmp = ARM_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(s + "\n")
+        os.replace(tmp, ARM_FILE)
+    except OSError:
+        pass
+
+
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -191,11 +205,22 @@ class Arm:
             if p is None:
                 raise OSError(f"arm servo {sid} silent")
             self.raw[sid] = p
-        # Hold current pose: goal = present BEFORE torque on, so nothing jumps.
+        # Power-on posture policy: if the gravity-loaded joints are already at
+        # the parked pose, stay limp (torque off — bench-friendly). Only when
+        # the arm is clearly raised do we lock it to keep it from dropping,
+        # e.g. when base_host restarts mid-operation.
+        # Only the load-bearing joints decide: a limp wrist merely droops,
+        # while a raised LIFT/ELBOW would crash down without torque.
+        parked = all(
+            abs(self.raw[sid] - REST_RAW[sid]) < REST_NEAR
+            for sid in (ID_LIFT, ID_ELBOW)
+        )
         for sid, p in self.raw.items():
-            write(ser, sid, ADDR_GOAL, le(p))
             write(ser, sid, ADDR_ACCEL, [20])
-            write(ser, sid, ADDR_TORQUE, [1])
+            if not parked:
+                # Hold current pose: goal = present BEFORE torque on, no jump.
+                write(ser, sid, ADDR_GOAL, le(p))
+                write(ser, sid, ADDR_TORQUE, [1])
         self.rest = {sid: float(v) for sid, v in REST_RAW.items()}
         self.pose = {sid: float(self.raw[sid]) for sid in REST_RAW}
         self.pan = float(self.raw[ID_PAN])
@@ -204,8 +229,9 @@ class Arm:
         self.roll_lim = (self.roll - ROLL_RANGE, self.roll + ROLL_RANGE)
         self.grip = float(self.raw[ID_GRIP])
         self.grip_lim = GRIP_LIM
-        self.relaxed = False
-        print(f"[base_host] arm up at "
+        self.relaxed = parked
+        write_arm_state("limp" if parked else "holding")
+        print(f"[base_host] arm {'limp (parked)' if parked else 'holding'} at "
               f"{ {s: int(v) for s, v in self.pose.items()} } "
               f"pan={self.pan:.0f} roll={self.roll:.0f} grip={self.grip:.0f}",
               flush=True)
@@ -223,6 +249,7 @@ class Arm:
         self.roll = float(self.raw[ID_ROLL])
         self.grip = float(self.raw[ID_GRIP])
         self.relaxed = False
+        write_arm_state("holding")
         print("[base_host] arm awake", flush=True)
 
     def relax_tick(self, dt):
@@ -242,6 +269,7 @@ class Arm:
             for sid in self.raw:
                 write(self.ser, sid, ADDR_TORQUE, [0])
             self.relaxed = True
+            write_arm_state("limp")
             print("[base_host] arm at rest, torque released (limp)", flush=True)
 
     def mid_tick(self, dt):
@@ -350,6 +378,7 @@ def main():
         arm = Arm(ser)
     except OSError as e:
         arm = None
+        write_arm_state("none")
         print(f"[base_host] arm disabled: {e}", flush=True)
 
     ctx = zmq.Context()
@@ -362,6 +391,7 @@ def main():
 
     last_cmd = time.time()
     last_batt = 0.0
+    last_arm_cmd = time.time()
     moving = False
     relaxing = False
     mid_seek = False
@@ -403,15 +433,25 @@ def main():
                     relaxing = False
                     mid_seek = False
                     arm.follow(dq)
+                    last_arm_cmd = now
                 if arm and any(ee):
                     relaxing = False          # any arm input cancels/wakes
                     mid_seek = False
                     arm.step(*ee, dt=min(0.1, now - last_cmd))
+                    last_arm_cmd = now
+                if data.get("arm.mid") or data.get("arm.relax"):
+                    last_arm_cmd = now
                 last_cmd = now
             elif moving and time.time() - last_cmd > WATCHDOG_S:
                 stop(ser)
                 moving = False
                 print("[base_host] watchdog: stopped (no command)", flush=True)
+            # Idle auto-relax: torque holding costs power/heat for nothing, so
+            # after ARM_IDLE_RELAX_S without arm input, glide to REST and limp.
+            if (arm and not arm.relaxed and not relaxing and not mid_seek
+                    and time.time() - last_arm_cmd > ARM_IDLE_RELAX_S):
+                relaxing = True
+                print("[base_host] arm idle -> auto relax", flush=True)
             if arm and relaxing:
                 arm.relax_tick(0.05)
                 if arm.relaxed:
@@ -441,6 +481,7 @@ def main():
             for sid in WHEELS:
                 write(ser, sid, ADDR_TORQUE, [0])
             ser.close()
+            write_arm_state("limp")
             print("[base_host] stopped, torque released", flush=True)
         except OSError:
             pass  # serial already gone
