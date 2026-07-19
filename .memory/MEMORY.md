@@ -13,4 +13,6 @@
 - [LeKiwi 控制台 GUI](lekiwi-gui-tauri.md) — gui/ Tauri 桌面端；ZeroMQ Tab 键盘遥控已成；ZMQ 只能在 Rust 后端；改遥控前必看
 - [LeKiwi 手柄遥控](lekiwi-pad-teleop.md) — 板载 systemd daemon evdev→ZMQ 开机自启；evdev 轴必须 absinfo 初始化否则满偏自走
 - [Hermes 语音大脑方案](hermes-voice-agent-plan.md) — Hermes+deepseek-v4-flash 上板、自研 voice-frontend、受限 drive MCP、端侧 Qwen3-VL-2B；安全四层是核心，方案在 docs 经 codex 两轮评审
+- [按需派 Opus 子代理](delegate-to-opus-agents.md) — 边界清晰的功能开发交给 Opus Agent，省主会话上下文
+- [板上视觉栈已通](vlm-stack-orin.md) — llama.cpp sm_87 + Qwen3-VL-2B Q4 + vlm/ 三态省电 daemon + MCP + GUI Tab,改视觉先读 vlm/README
 - [GS130WI 双目相机移植](rdk-gs130wi-camera.md) — CS130WI=GS130WI 双目模组（彩色 BGGR 非单色、无 IR-cut，X5 实测）；Jetson 无驱动，方案在 docs、实施在 dependencies submodule；EEPROM 出厂标定可复用

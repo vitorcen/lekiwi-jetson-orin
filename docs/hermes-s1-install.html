@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes 语音大脑 S1 落地记录 · 音频 + Hermes + DeepSeek 路由 · Orin Nano</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#22314e; --accent2:#2c6db5; --accent-dk:#1d5a99;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#eef5fb; --ok-line:#2c6db5; --ok-fg:#1d4e7a;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#141618; --fg:#e8e8e3; --muted:#9a9a92; --line:#2c2f33;
+      --card:#1c1f22; --accent:#7aa2d6; --accent2:#5b9bd5; --accent-dk:#8fb8e6;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#132131; --ok-line:#2c6db5; --ok-fg:#8fc0f0; --code-bg:#23262a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent2);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:30px;line-height:1.3;letter-spacing:-.02em}
+  .en{color:var(--muted);font-weight:400;font-size:.62em;display:block;margin-top:4px;letter-spacing:0}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent2)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent2);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  .box .en-i{font-style:normal;opacity:.75;font-size:.88em}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .st{font:600 13px var(--mono);fill:#fff}
+  .sl{font:12px -apple-system,sans-serif;fill:var(--muted)}
+  a{color:var(--accent-dk)}
+  code.ok-i{color:#2c6db5}
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .kv{color:var(--muted);font-size:13.5px}
+  .pill{display:inline-block;font:600 12px var(--mono);padding:1px 8px;border-radius:20px;background:var(--ok-bg);color:var(--ok-fg);border:1px solid var(--ok-line)}
+  .yes{color:#2c6db5;font-weight:600}
+  .no{color:#d9534f;font-weight:600}
+  .pend{color:#8a6d1f;font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Hermes 语音大脑 · S1 落地记录
+    <span class="en">Stage S1 — Audio I/O, Hermes install &amp; pin, DeepSeek routing, ASR/TTS verification on Jetson Orin Nano</span>
+  </h1>
+  <p class="sub">板卡：Jetson Orin Nano（hostname <code>vitor-desktop</code>）｜阶段 <span class="pill">S1</span> 语音大脑地基 ｜日期：2026-07-19 ｜方案见 <a href="hermes-lekiwi-voice-agent-plan.html">Hermes Agent 上车方案</a></p>
+</header>
+
+<div class="tldr">
+  <h2>TL;DR</h2>
+  <ul>
+    <li>USB 免驱会议麦克风音响 <strong>Lenovo MCP01</strong>（ALSA 卡名 <code>MCP01</code>）跑通录/放，设备按卡名寻址 <code>plughw:MCP01</code>。</li>
+    <li>MCP01 有硬件回声消除（AEC）——<strong>自放自录测不了 ASR</strong>，验证要用干净音频文件或真人说话。</li>
+    <li>Hermes <strong>v0.18.2 (2026.7.7.2)</strong> 官方脚本 + ghfast.top / TUNA 镜像装成，git 方式，<strong>版本已 pin</strong>，所有 profile 字段以此版本源码核实。</li>
+    <li><code>robot</code> profile：DeepSeek 走 <code>custom:deepseek</code> provider（<code>openai_chat</code> transport），toolset 裁到只留 web/vision/todo/skills。</li>
+    <li>API Server + gateway systemd user service 起在 <code>127.0.0.1:8642</code>，SSE 事件流完整可读 ✅；faster-whisper 中文逐字正确 ✅；edge-tts 直连微软成功 ✅。</li>
+    <li><strong>唯一缺口</strong>：环境继承了一个无效旧 DeepSeek key，待填有效 <code>DEEPSEEK_API_KEY</code> 后 TUI 对话 gate 才算过；<code>nvpmodel -m 2</code> 需 sudo，留给用户。</li>
+  </ul>
+</div>
+
+<h2>1. 硬件与音频<span class="en">Audio device baseline</span></h2>
+<table>
+  <tr><th>项</th><th>值</th></tr>
+  <tr><td>设备</td><td>Lenovo MCP01 USB 会议麦克风音响（UAC 免驱，即插即用）</td></tr>
+  <tr><td>ALSA 卡名</td><td><code>MCP01</code>，寻址用 <code>plughw:MCP01</code>（按卡名，不用易变的 <code>hw:N</code> 序号）</td></tr>
+  <tr><td>放音</td><td>48 kHz / 16 bit 立体声，走 <code>PCM</code></td></tr>
+  <tr><td>录音</td><td>48 kHz / 16 bit 单声道</td></tr>
+  <tr><td>mixer</td><td><code>Mic</code> capture 100%，playback 走 <code>PCM</code></td></tr>
+</table>
+
+<div class="box err">
+  <strong>❌ 坑 1：设备"插了没反应" <span class="en-i">— speaker was powered off</span></strong>
+  第一次插入内核只有一行 <code>new full-speed USB device number 13</code> 然后设备消失、无法枚举。原因不是驱动 —— 是<strong>音箱本体没开机</strong>。按开机键后立即枚举成功、ALSA 出卡。
+</div>
+<div class="box err">
+  <strong>❌ 坑 2：自放自录测试无效 <span class="en-i">— on-device AEC cancels the loopback</span></strong>
+  MCP01 内置硬件回声消除（AEC），自己喇叭放的声音会被自己麦克风<strong>消掉</strong>，录到的只剩残渣，喂给 whisper 会输出典型幻觉文本（如"请点赞订阅转发"）。<br>
+  <strong style="display:inline;margin:0">正解：</strong>验证 ASR 用<strong>干净音频文件</strong>或<strong>真人说话</strong>，绝不能靠声学回环。
+</div>
+<div class="box warn">
+  <strong>⚠ 坑 3：whisper 对近静音音频出幻觉 <span class="en-i">— hallucination on near-silence</span></strong>
+  near-silence 输入下 whisper 会凭空吐字幕（如"字幕by索兰娅"）。生产链路<strong>必须 VAD 前置</strong>，只在检测到语音时才送 ASR。
+</div>
+
+<h2>2. GUI 环境（gui/init.sh）<span class="en">Tauri/Rust build env</span></h2>
+<p>新增 <code>gui/init.sh</code>：一键装齐 Tauri 编译依赖，幂等可重跑。</p>
+<pre><code># apt dev 包
+libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+libayatana-appindicator3-dev libssl-dev libudev-dev
+
+# rustup 走 rsproxy.cn 镜像
+export RUSTUP_DIST_SERVER=https://rsproxy.cn
+export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+# ~/.cargo/config.toml 配 rsproxy-sparse crates 镜像</code></pre>
+<div class="box err">
+  <strong>❌ 坑 4：rustup 半装状态报 "could not choose a version of cargo" <span class="en-i">— no default toolchain</span></strong>
+  shim 已进 PATH 但没有 default toolchain，<code>cargo</code> 直接报 <code>rustup could not choose a version of cargo</code>。起因是两个安装过程<strong>并发竞态</strong>。<br>
+  <strong style="display:inline;margin:0">自愈：</strong><code>init.sh</code> 加了兜底 —— <code>cargo --version</code> 失败就跑 <code>rustup default stable</code>。
+</div>
+<div class="box ok">
+  <strong>✓ GUI 首次编译通过</strong>
+  cargo 1.97.1，debug 产物 263 MB。
+</div>
+
+<h2>3. Hermes 安装<span class="en">Install &amp; pin</span></h2>
+<figure class="fig">
+<svg viewBox="0 0 900 210" role="img" aria-label="Hermes 安装流程图">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#9a9a92"/>
+    </marker>
+    <style>
+      .a{fill:#2c6db5} .b{fill:#8a6d1f} .c{fill:#3d7a4a} .d{fill:#7a3d6b}
+      .ln{stroke:#9a9a92;stroke-width:1.8;fill:none;marker-end:url(#ar)}
+    </style>
+  </defs>
+  <rect x="20"  y="50" width="160" height="72" rx="8" class="b"/>
+  <text x="100" y="78" class="st" text-anchor="middle">① uv 0.11.29</text>
+  <text x="100" y="98" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">miniconda base pip</text>
+  <text x="100" y="112" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">symlink ~/.local/bin</text>
+
+  <rect x="210" y="50" width="170" height="72" rx="8" class="a"/>
+  <text x="295" y="74" class="st" text-anchor="middle">② 官方脚本</text>
+  <text x="295" y="93" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">sed 换 ghfast.top</text>
+  <text x="295" y="108" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">TUNA / mirror python</text>
+
+  <rect x="410" y="50" width="170" height="72" rx="8" class="c"/>
+  <text x="495" y="74" class="st" text-anchor="middle">③ v0.18.2 pin</text>
+  <text x="495" y="93" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">git · e598cef8</text>
+  <text x="495" y="108" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">uv 自带 py3.11</text>
+
+  <rect x="610" y="50" width="170" height="72" rx="8" class="c"/>
+  <text x="695" y="74" class="st" text-anchor="middle">④ 依赖补齐</text>
+  <text x="695" y="93" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">node22 · rg14 已有</text>
+  <text x="695" y="108" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">ffmpeg 8 conda-forge</text>
+
+  <rect x="795" y="50" width="90" height="72" rx="8" class="d"/>
+  <text x="840" y="82" class="st" text-anchor="middle" style="font-size:12px">⑤ profile</text>
+  <text x="840" y="100" class="st" text-anchor="middle" style="font-size:10.5px;opacity:.9">robot</text>
+
+  <path d="M180,86 L208,86" class="ln"/>
+  <path d="M380,86 L408,86" class="ln"/>
+  <path d="M580,86 L608,86" class="ln"/>
+  <path d="M780,86 L793,86" class="ln"/>
+
+  <text x="450" y="165" class="sl" text-anchor="middle" style="font-size:12.5px">板上无系统 pip3 → uv 经 miniconda base 装；ffmpeg 也走 conda-forge 免 sudo，再 symlink 出来</text>
+  <text x="450" y="187" class="sl" text-anchor="middle" style="font-size:11.5px;opacity:.8">No system pip3 on-board — bootstrap via miniconda base, then symlink into ~/.local/bin</text>
+</svg>
+<figcaption>图 1 · Hermes 五步安装管线（uv → 官方脚本换镜像 → pin → 依赖 → profile）<br><span style="opacity:.8">Fig 1 · Five-stage Hermes install pipeline, all mirrored for CN network</span></figcaption>
+</figure>
+
+<h3>① uv + 官方安装脚本（换镜像）</h3>
+<pre><code># uv 0.11.29：板上无系统 pip3，先经 miniconda base pip 装，再 symlink
+~/miniconda/bin/pip install uv==0.11.29
+ln -sf ~/miniconda/bin/uv ~/.local/bin/uv
+
+# 官方脚本下载后改仓库地址走 ghfast.top 代理
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh
+sed -i 's#REPO_URL_HTTPS=.*#REPO_URL_HTTPS=https://ghfast.top/https://github.com/NousResearch/hermes-agent.git#' \
+    /tmp/hermes-install.sh
+
+# 环境变量：PyPI 走清华 TUNA，python-build-standalone 走 ghfast.top 前缀
+export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+export UV_PYTHON_INSTALL_MIRROR=https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download
+bash /tmp/hermes-install.sh</code></pre>
+<table>
+  <tr><th>项</th><th>值</th></tr>
+  <tr><td>版本</td><td>Hermes <code>v0.18.2</code>（build <code>2026.7.7.2</code>），commit <code>e598cef8</code></td></tr>
+  <tr><td>方式</td><td>git 安装，位于 <code>~/.hermes/hermes-agent</code></td></tr>
+  <tr><td>Python</td><td>uv 自带 py3.11，<strong>不动</strong>系统 3.10</td></tr>
+  <tr><td>依赖</td><td>node v22 已有、ripgrep 14 已有；ffmpeg 8.0.1 用 conda-forge 装进 miniconda base（免 sudo）再 symlink <code>~/.local/bin</code></td></tr>
+</table>
+<div class="box warn">
+  <strong>⚠ 版本已 pin <span class="en-i">— all config fields verified against v0.18.2 source</span></strong>
+  下文 profile 的每一个字段都对着 <code>v0.18.2</code> 源码核实过，<strong>非猜测</strong>。后续升级 Hermes 需重新核对字段名。
+</div>
+<div class="box warn">
+  <strong>⚠ 坑 5：安装器尾巴报 "ripgrep not found" 是误报 <span class="en-i">— PATH timing false alarm</span></strong>
+  安装收尾时提示 <code>ripgrep not found</code>，实为 PATH 时序问题，<code>rg</code> 实际在（rg 14 已装）。忽略即可。
+</div>
+
+<h2>4. robot profile 配置<span class="en">DeepSeek routing &amp; toolset trim</span></h2>
+<pre><code>hermes profile create robot
+# → ~/.hermes/profiles/robot/，wrapper 命令名 robot</code></pre>
+<p><code>config.yaml</code>（字段全部经 v0.18.2 源码核实）：</p>
+<pre><code>model:
+  provider: "custom:deepseek"     # custom: 前缀在 provider 字段
+  default: "deepseek-v4-flash"     # bare 名，不带 custom: 前缀
+
+providers:
+  deepseek:
+    api: https://api.deepseek.com
+    key_env: DEEPSEEK_API_KEY
+    transport: openai_chat
+
+agent:
+  disabled_toolsets: [terminal, file, browser, cronjob, skills_hub]  # kill-list 最后生效
+  max_turns: 40
+  api_max_retries: 3
+
+platform_toolsets:
+  cli: [web, vision, todo, skills]
+
+skills:
+  creation_nudge_interval: 0</code></pre>
+<div class="box warn">
+  <strong>⚠ toolset 粒度与裁剪边界 <span class="en-i">— read/write bundled, no standalone skill switch</span></strong>
+  裁剪是 toolset 粒度：<code>file</code> toolset 读写<strong>捆绑</strong>，不能只禁写；skill 自建<strong>无独立开关</strong>，只能靠禁 <code>file</code> + <code>skills_hub</code> 间接约束。<code>disabled_toolsets</code> 是 kill-list，最后生效、优先于 <code>platform_toolsets</code> 里的启用项。
+</div>
+<p><code>.env</code>（<code>600</code> 权限，占位值，<strong>永不进 git</strong>）：</p>
+<pre><code>DEEPSEEK_API_KEY=&lt;key&gt;              # 占位，只存板上
+API_SERVER_ENABLED=1
+API_SERVER_KEY=&lt;openssl rand -hex 32 生成&gt;   # 只存板上，不外泄
+API_SERVER_PORT=8642</code></pre>
+<pre><code># gateway：装成 systemd user service + linger，监听 127.0.0.1:8642
+robot gateway install
+# → hermes-gateway-robot.service</code></pre>
+
+<h2>5. 验证 gate 结果<span class="en">Acceptance gates</span></h2>
+
+<h3>API Server（Bearer 鉴权 + SSE 流）</h3>
+<pre><code># 无 / 错 Bearer → 401
+curl -s http://127.0.0.1:8642/api/sessions            # 401
+curl -s -H "Authorization: Bearer $KEY" .../api/sessions   # sessions JSON
+
+# 建会话 + 流式对话
+curl -s -H "Authorization: Bearer $KEY" -X POST .../api/sessions \
+     -d '{"id":"robot-main"}'
+curl -N -H "Authorization: Bearer $KEY" -X POST \
+     .../api/sessions/robot-main/chat/stream -d '{...}'</code></pre>
+<div class="box ok">
+  <strong>✓ SSE 事件序列完整可读</strong>
+  <code>run.started</code> → <code>message.started</code> → <code>assistant.completed</code> → <code>run.completed</code> → <code>done</code>，鉴权行为正确（无/错 Bearer 401、对 Bearer 出 JSON），POST 建会话 <code>robot-main</code> 成功。
+</div>
+<div class="box warn">
+  <strong>⚠ 请求确实路由到了 DeepSeek，但 key 无效 <span class="en-i">— inherited a stale key</span></strong>
+  收到 <strong>DeepSeek 格式的 401</strong>（证明路由正确到 <code>api.deepseek.com</code>），但环境里继承了一个<strong>无效旧 key</strong>。待填入有效 <code>DEEPSEEK_API_KEY</code> 后，TUI 对话 gate 才算真正通过。
+</div>
+
+<h3>ASR / TTS</h3>
+<div class="box ok">
+  <strong>✓ faster-whisper 1.2.1 中文逐字正确</strong>
+  <code>voice/.venv</code>（uv py3.11），<code>small</code> int8 CPU。转写 edge-tts 生成的中文句"语音测试开始，请在提示音后对我说一句话"—— <strong>逐字正确</strong>。
+</div>
+<div class="box ok">
+  <strong>✓ edge-tts 可用（S2 主链路提前验证）</strong>
+  <code>zh-CN-XiaoxiaoNeural</code>，板上<strong>直连微软服务成功</strong>。S2 的 TTS 主链路提前跑通。
+</div>
+<div class="box err">
+  <strong>❌ 坑 6：hf-mirror.com 已变 308 跳板 <span class="en-i">— set HF_ENDPOINT and it breaks</span></strong>
+  2026-07 实测：<code>hf-mirror.com</code> 已经变成 <strong>308 重定向到 huggingface.co</strong> 的跳板，设 <code>HF_ENDPOINT=https://hf-mirror.com</code> 反而报 <code>FileMetadataError</code>。板上 <code>huggingface.co</code> <strong>直连 200</strong> —— 干脆<strong>不设镜像</strong>就能下模型。
+</div>
+
+<h3>坑 7（遗留，交 S0 处理）</h3>
+<div class="box warn">
+  <strong>⚠ 坑 7：base_host.service 因舵机 CH340 未插 crash-loop <span class="en-i">— serial open before ZMQ bind</span></strong>
+  <code>base_host.service</code> 在<strong>舵机 CH340 未插</strong>时一直 crash-loop —— <code>serial open</code> 排在 <code>ZMQ bind</code> <strong>之前</strong>，串口打不开就没走到 bind，于是 GUI 连不上 <code>tcp:5555</code>。这不是自启没配。<br>
+  <strong style="display:inline;margin:0">修法：</strong>S0 的 <code>base_host</code> v2 重构时把 <code>bind</code> 提前（先 bind 再 open serial）。
+</div>
+
+<h2>6. S1 gate 清单<span class="en">Status summary</span></h2>
+<table>
+  <tr><th>gate</th><th>状态</th><th>说明</th></tr>
+  <tr><td>音频回环</td><td class="yes">✅</td><td>MCP01 录/放跑通，plughw:MCP01 寻址；AEC 特性已知</td></tr>
+  <tr><td>Hermes 装 + pin</td><td class="yes">✅</td><td>v0.18.2 (2026.7.7.2) commit e598cef8，git 方式</td></tr>
+  <tr><td>DeepSeek 配置</td><td class="pend">✅ 差有效 key</td><td>路由正确（DeepSeek 格式 401），待填有效 DEEPSEEK_API_KEY</td></tr>
+  <tr><td>API SSE</td><td class="yes">✅</td><td>Bearer 401/JSON 正确，run.started→…→done 完整</td></tr>
+  <tr><td>whisper 中文</td><td class="yes">✅</td><td>faster-whisper 1.2.1 small int8，逐字正确</td></tr>
+  <tr><td>edge-tts</td><td class="yes">✅</td><td>zh-CN-XiaoxiaoNeural 直连成功（S2 提前验证）</td></tr>
+  <tr><td>nvpmodel -m 2</td><td class="no">未做</td><td>需 sudo，待用户执行</td></tr>
+</table>
+
+<h2>7. 参考<span class="en">References</span></h2>
+<ul>
+  <li>方案文档：<a href="hermes-lekiwi-voice-agent-plan.html">Hermes Agent 上车方案 · LeKiwi 语音大脑 + 端侧 VLM</a></li>
+  <li>同目录：<code>ros2-humble-install.html</code> —— ROS 2 Humble 安装记录</li>
+  <li>同目录：<code>orin-nano-super-install.html</code> —— 刷机（JetPack 6.2.2 / NVMe）记录</li>
+</ul>
+
+<footer>
+  Hermes 语音大脑 · S1 落地记录 · 2026-07-19 · Jetson Orin Nano <code>vitor-desktop</code><br>
+  <span style="opacity:.8">机密：<code>DEEPSEEK_API_KEY</code> 与 <code>API_SERVER_KEY</code> 只存板上 <code>~/.hermes/profiles/robot/.env</code>（600 权限），永不进 git。</span>
+</footer>
+
+</div>
+</body>
+</html>

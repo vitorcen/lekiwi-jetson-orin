@@ -12,7 +12,8 @@ metadata:
   不动系统 3.10），云端模型 **deepseek-v4-flash**（`deepseek-chat` 别名 2026-07-24 弃用；
   价 $0.14/M 未命中 · $0.0028/M 缓存命中 · $0.28/M 输出，2026-07-19 官网价）。
   **机器人用独立 profile**（`hermes profile create robot` + 显式裁剪 toolset 关 terminal），
-  版本必须 pin——它的 API/配置字段随版本漂移，配置以向导实际产物为准，不手写猜 YAML。
+  已装 **v0.18.2 (2026.7.7.2) commit e598cef8**（2026-07-19 装，git 方式，`~/.hermes/hermes-agent`；
+  profile 在 `~/.hermes/profiles/robot`，wrapper 命令 `robot`）。版本必须 pin——它的 API/配置字段随版本漂移，配置以向导实际产物为准，不手写猜 YAML。
 - **听说**：Hermes 的 Ctrl+B 只是 TUI 对讲，**常驻麦克风闭环要自研 voice-frontend**
   （ALSA→VAD/PTT→faster-whisper small int8 CPU→Hermes Sessions API SSE→edge-tts，
   熔断降级本地 piper zh_CN-huayan；半双工闭麦）。板子无板载音频，需 USB speakerphone。
@@ -38,5 +39,8 @@ metadata:
 教训——安全边界必须建在模型够不着的层（工具裁剪/schema/仲裁/物理急停），不是提示词。
 
 **How to apply:** 实施时按方案 S0-S6 阶段与 gate 走；改 base_host 前重读 §2.2。
+v2 时新增状态 PUB（tcp:5557，电池/臂状态/watchdog/ARM 租约，变化即推），替代
+/tmp 文件+ssh 转发；但主机指标（功耗/CPU/温度）保留 ssh 拉——独立于板上守护进程的
+诊断通道是刻意设计（2026-07-19 与用户定谳）。
 相关：[[lekiwi-gui-tauri]]、[[lekiwi-robot-target]]、[[rdk-gs130wi-camera]]、
 [[jetson-platform-baseline]]。
