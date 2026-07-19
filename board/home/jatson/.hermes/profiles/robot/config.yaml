@@ -1,0 +1,43 @@
+# LeKiwi robot profile — Hermes v0.18.2 (e598cef8), fields verified against source.
+# Security: toolset trimming is layer 1 of 4 (profile → MCP schema → base_host arbiter → e-stop).
+
+model:
+  provider: "custom:deepseek"
+  default: "deepseek-v4-flash"
+
+providers:
+  deepseek:
+    api: "https://api.deepseek.com"
+    key_env: "DEEPSEEK_API_KEY"
+    default_model: "deepseek-v4-flash"
+    transport: "openai_chat"
+
+agent:
+  max_turns: 40
+  api_max_retries: 3
+  # Kill-list applied last, overrides everything: no shell, no file writes,
+  # no browser, no self-scheduling, no skill installation.
+  disabled_toolsets: [terminal, file, browser, cronjob, skills_hub]
+
+platform_toolsets:
+  cli: [web, vision, todo, skills]
+
+skills:
+  creation_nudge_interval: 0
+
+# Read-only vision MCP (vlm_look / vlm_last_caption / vlm_health).
+# Captions are untrusted observations — never a motion trigger (plan §safety).
+mcp_servers:
+  vlm:
+    command: /home/jatson/work/lekiwi-jatson-orin/vlm/.venv/bin/python
+    args: ["/home/jatson/work/lekiwi-jatson-orin/vlm/mcp_server.py"]
+    timeout: 60
+    max_tool_calls: 50
+  # Drive: layer-2 schema hard-clamp (≤0.15 m/s, ≤2 s, 0.3 s cooldown); the
+  # base_host 0.5 s watchdog backstops a dead MCP. Mounted 2026-07-19 with the
+  # owner supervising; unattended operation still gated on base_host v2 arbiter.
+  drive:
+    command: /home/jatson/work/lekiwi-jatson-orin/vlm/.venv/bin/python
+    args: ["/home/jatson/work/lekiwi-jatson-orin/drive/mcp_server.py"]
+    timeout: 30
+    max_tool_calls: 30

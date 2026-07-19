@@ -12,3 +12,6 @@ __pycache__/
 voice/.venv/
 voice/models/
 voice/token
+
+# secrets: never commit env files anywhere (Hermes .env lives on-box only)
+**/.env
