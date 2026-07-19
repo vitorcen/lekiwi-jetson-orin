@@ -1,0 +1,9 @@
+[project]
+name = "lekiwi-vlm"
+version = "0.1.0"
+description = "LeKiwi VLM daemon + read-only MCP server (camera + llama.cpp caption)"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "mcp>=1.2",
+]
