@@ -18,7 +18,7 @@ function bar(fillId, pct, warnHi = 85, midHi = 65) {
 
 function offline() {
   $('sbDot').classList.remove('up');
-  for (const id of ['pwrTxt', 'battTxt', 'cpuTxt', 'gpuTxt', 'ramTxt', 'hdTxt', 'tempTxt'])
+  for (const id of ['pwrTxt', 'battTxt', 'armTxt', 'cpuTxt', 'gpuTxt', 'ramTxt', 'hdTxt', 'tempTxt'])
     $(id).textContent = '--';
   for (const id of ['battFill', 'cpuFill', 'gpuFill', 'ramFill', 'hdFill'])
     $(id).style.width = '0';
@@ -51,6 +51,22 @@ function paint(kv) {
     $('battTxt').textContent = '离线';
     $('battTxt').style.color = '#6b7394';
     $('battFill').style.width = '0';
+  }
+
+  // sarm: arm torque state from base_host ("limp"|"holding"|"none")
+  const arm = kv.sarm && kv.sarm[0];
+  if (arm === 'limp') {
+    $('armTxt').textContent = '松弛';
+    $('armTxt').style.color = '#7ee2a8';
+  } else if (arm === 'holding') {
+    $('armTxt').textContent = '锁定';
+    $('armTxt').style.color = '#f9e2af';
+  } else if (arm === 'none') {
+    $('armTxt').textContent = '未接';
+    $('armTxt').style.color = '#6b7394';
+  } else {
+    $('armTxt').textContent = '离线';
+    $('armTxt').style.color = '#6b7394';
   }
 
   // cpu: loadavg1 / nproc

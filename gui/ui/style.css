@@ -81,7 +81,15 @@ input[type=text] {
   background: #161a26; color: #cdd6f4; border: 1px solid #31344b;
   border-radius: 6px; padding: 5px 9px; font: 13px ui-monospace, monospace;
 }
-#ip { width: 130px; } #port { width: 66px; }
+#ip { width: 130px; } #port { width: 66px; } #vip { width: 118px; }
+/* Vision service controls: keep buttons + autostart checkbox on one row. */
+.svcbtns { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.svcbtns button {
+  background: #1c2233; color: #a9b4d8; border: 1px solid #31344b;
+  border-radius: 7px; padding: 5px 10px; font-size: 13px; cursor: pointer;
+}
+.svcbtns button:hover { background: #262e45; }
+.svcauto { white-space: nowrap; }
 button.primary {
   background: #2a4a7f; color: #cbe0ff; border: 1px solid #3a63a8;
   border-radius: 7px; padding: 6px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
@@ -188,6 +196,75 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .placeholder p { color: #a3abcc; }
 .placeholder ul { text-align: left; display: inline-block; color: #8b93b5; line-height: 1.9; }
 .placeholder .phnote { font-size: 12.5px; color: #6b7394; margin-top: 18px; }
+
+/* ===================== 视觉 Vision ===================== */
+#visionwrap { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1000px) { #visionwrap { grid-template-columns: 1fr; } }
+
+/* video panel */
+#vidbox {
+  position: relative; width: 100%; aspect-ratio: 4 / 3;
+  background: #05070c; border: 1px solid #1c2030; border-radius: 10px;
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+}
+#vlmImg { width: 100%; height: 100%; object-fit: contain; display: none; user-select: none; }
+#vlmImg.live { display: block; }
+#vidplaceholder { position: absolute; color: #4f5678; font-size: 13px; }
+#vidoverlay {
+  position: absolute; top: 8px; left: 8px; right: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  pointer-events: none;
+}
+.vbadge {
+  padding: 3px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: #31344b; backdrop-filter: blur(2px);
+}
+.vbadge.ok  { background: #1e3a2fcc; color: #7ee2a8; }
+.vbadge.bad { background: #3a1e1ecc; color: #f38ba8; }
+.vbadge.warn{ background: #3a331ecc; color: #f9e2af; }
+.vbadge.info{ background: #16233dcc; color: #89b4fa; }
+#vidbadges { display: flex; gap: 6px; align-items: center; }
+.vage {
+  font: 600 11px ui-monospace, monospace; color: #a6c8ff;
+  background: #0b0e14aa; padding: 3px 8px; border-radius: 999px;
+}
+.vage.stale { color: #f9e2af; }
+.pill.info { color: #89b4fa; }
+#vmeta { display: flex; gap: 18px; margin-top: 12px; font-size: 12.5px; flex-wrap: wrap; }
+#vmeta b { font-weight: 600; color: #a3abcc; font-variant-numeric: tabular-nums; }
+
+/* caption feed + controls */
+.watchrow { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+#vlmWatchBtn { border-radius: 7px; padding: 6px 18px; white-space: nowrap; }
+#vlmWatchBtn.live { background: #1e3a2f; color: #7ee2a8; border-color: #2f5e48; }
+#vlmWatchBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+#vWatchHint { margin: 0; }
+.askrow { display: flex; gap: 8px; margin-bottom: 4px; }
+#vlmAsk { flex: 1; font: 13px system-ui, "Noto Sans CJK SC", sans-serif; }
+#readPanel button.primary { border-radius: 7px; padding: 6px 18px; }
+#capfeed {
+  margin-top: 10px; max-height: 420px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.caprow {
+  background: #12162080; border: 1px solid #1c2030; border-left: 3px solid #2c3350;
+  border-radius: 8px; padding: 8px 12px;
+  display: flex; gap: 10px; align-items: flex-start;
+}
+.capthumb {
+  width: 160px; flex: 0 0 160px; border-radius: 6px; border: 1px solid #1c2030;
+  background: #05070c; object-fit: contain; display: block;
+}
+.captext { flex: 1; min-width: 0; }
+.capmeta { font: 11px ui-monospace, monospace; color: #6b7394; margin-bottom: 3px; }
+.capmsg { font-size: 13px; color: #cdd6f4; line-height: 1.5; word-break: break-word; }
+.cap-ask { border-left-color: #3a63a8; background: #12182a80; }
+.cap-ask .capmsg { color: #a6c8ff; }
+.cap-answer { border-left-color: #89b4fa; background: #16233dcc; }
+.cap-answer .capmsg { color: #cbe0ff; }
+.cap-error { border-left-color: #f38ba8; }
+.cap-error .capmsg { color: #f38ba8; }
+@media (max-width: 560px) { .caprow { flex-direction: column; } .capthumb { width: 100%; flex: none; } }
 
 /* ===================== 底部通用日志 ===================== */
 #logpanel {

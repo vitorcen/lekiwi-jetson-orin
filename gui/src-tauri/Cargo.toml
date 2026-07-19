@@ -17,6 +17,10 @@ zeromq = { version = "0.4", default-features = false, features = ["tokio-runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 # Leader-arm serial (Feetech STS3215 bus on a local USB CDC port).
 serialport = { version = "4", default-features = false }
+# Blocking HTTP for the VLM daemon (plain http:// only — no TLS, keeps the build
+# light on Jetson). Calls run on spawn_blocking so Tauri's async runtime is free.
+ureq = { version = "2", default-features = false }
+base64 = "0.22"
 
 [profile.release]
 strip = true

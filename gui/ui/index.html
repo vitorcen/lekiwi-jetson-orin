@@ -28,6 +28,11 @@
     <b id="battTxt">--</b>
   </span>
 
+  <span class="sbcell" title="机械臂扭矩状态：松弛=可用手摆动；锁定=舵机保持姿态。base_host 上报。">
+    <span class="sbico">🦾</span><span class="sblab">机械臂</span>
+    <b id="armTxt">--</b>
+  </span>
+
   <span class="sbcell" title="CPU 负载（loadavg1 / 核数）">
     <span class="sblab">CPU</span>
     <span class="sbgauge"><span id="cpuFill" class="sbfill"></span></span>
@@ -62,6 +67,10 @@
   <button class="tab on" data-page="zmq">
     <span class="tico">🔌</span>
     <span class="tlab">ZeroMQ 遥控<em>键盘开车</em></span>
+  </button>
+  <button class="tab" data-page="vision">
+    <span class="tico">📷</span>
+    <span class="tlab">视觉 Vision<em>相机 + VLM 解读</em></span>
   </button>
   <button class="tab" data-page="ros">
     <span class="tico">🤖</span>
@@ -126,7 +135,7 @@
       <h2>主臂遥操作 <span class="en">Leader arm</span></h2>
       <p class="tip">流程：① 连接主臂 → ② 点「从臂摆中位」（从臂自动立正：大臂竖直、小臂水平、腕伸直）→ ③ 把主臂也摆成同样中位 → ④ 对齐零位 → ⑤ 开始跟随。零位会存盘，下次连接自动加载，可随时重新对齐。</p>
       <div class="lrow">
-        <input id="lport" type="text" value="/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D041438-if00" title="主臂串口">
+        <input id="lport" type="text" value="" placeholder="留空自动扫描" title="主臂串口(留空则扫描 /dev/serial/by-id 自动识别)">
       </div>
       <div class="lrow">
         <button id="lconn" class="primary">连接主臂</button>
@@ -181,6 +190,66 @@
         <tr><td>theta.vel<span>旋转</span></td><td id="vt">0.0</td><td class="u">°/s</td></tr>
       </table>
       <div id="pressed" class="pressed">按键：<span>—</span></div>
+    </section>
+  </div>
+</div>
+
+<!-- ======================= 视觉 Vision ======================= -->
+<div id="page-vision" class="page">
+
+  <div class="connbar">
+    <label>VLM 服务 IP
+      <input id="vip" type="text" value="127.0.0.1">
+    </label>
+    <button id="vconnBtn" class="primary">断开</button>
+    <span class="svcbtns" title="视觉服务(vlm-daemon + llama-server)手动控制。只影响本次运行,不改开机自启;停止会释放显存。">
+      <button id="vsvcRestart">重启服务</button>
+      <button id="vsvcStop">停止服务</button>
+      <button id="vsvcStart">启动服务</button>
+      <label class="svcauto" title="开机自启(systemctl --user enable/disable 两个视觉服务)">
+        <input type="checkbox" id="vsvcAuto"> 开机自启
+      </label>
+    </span>
+    <span id="vState" class="pill bad">离线</span>
+    <span class="hint">相机 + VLM 守护进程（<code>vlm-daemon</code>，端口 8090，Bearer 鉴权）需先在 Orin 上运行。切到本页自动显示相机画面（仅 CPU）；GPU 解读须手动「开始解读」，离开本页自动停止省电。</span>
+  </div>
+
+  <div id="visionwrap">
+
+    <!-- 左：视频画面 -->
+    <section class="panel" id="vidPanel">
+      <h2>相机画面 <span class="en">Live camera</span></h2>
+      <div id="vidbox">
+        <img id="vlmImg" alt="camera" draggable="false">
+        <div id="vidoverlay">
+          <span id="vStateBadge" class="vbadge bad">离线</span>
+          <span id="vidbadges">
+            <span id="vFps" class="vage" title="相机实测帧率">— fps</span>
+            <span id="vFrameAge" class="vage">—</span>
+          </span>
+        </div>
+        <div id="vidplaceholder">等待画面…</div>
+      </div>
+      <div id="vmeta">
+        <span title="llama.cpp 推理后端状态"><b id="vLlama">llama —</b></span>
+        <span title="相机状态"><b id="vCam">相机 —</b></span>
+        <span title="守护进程运行时长"><b id="vUptime">运行 —</b></span>
+      </div>
+    </section>
+
+    <!-- 右：实时解读 + 提问 -->
+    <section class="panel" id="readPanel">
+      <h2>实时解读 <span class="en">Live captions</span></h2>
+      <div class="watchrow">
+        <button id="vlmWatchBtn" class="primary" disabled>开始解读</button>
+        <span id="vWatchHint" class="tip">「开始解读」后每秒对画面推理一次（占用 GPU）；「停止解读」或离开本页即停。</span>
+      </div>
+      <div class="askrow">
+        <input id="vlmAsk" type="text" placeholder="问一句（留空则用默认描述）… 例：桌上有什么？">
+        <button id="vlmAskBtn" class="primary">提问</button>
+      </div>
+      <p class="tip">每条解读/回答旁附上被解读的那一帧缩略图。提问即时对当前画面单次描述，回答高亮显示。</p>
+      <div id="capfeed"></div>
     </section>
   </div>
 </div>

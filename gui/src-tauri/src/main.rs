@@ -23,8 +23,10 @@
 // {"x.vel": m/s, "y.vel": m/s, "theta.vel": deg/s}; the host filters ".vel"
 // keys through _body_to_wheel_raw and stops the base if commands stop arriving.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::time::{Duration, Instant};
+
+use base64::Engine as _;
 
 use tauri::async_runtime::Mutex;
 use tauri::{Emitter, Manager, State};
@@ -252,26 +254,48 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
             // The command channel doubles as the ~30 Hz tick clock.
             match rx.recv_timeout(Duration::from_millis(33)) {
                 Ok(LReq::Connect(path, reply)) => {
-                    match serialport::new(&path, 1_000_000)
-                        .timeout(Duration::from_millis(10))
-                        .open()
-                    {
-                        Ok(mut p) => {
-                            // All six must answer or it's not a leader arm.
-                            let ok = (1..=6u8).all(|id| sts_read_pos(&mut p, id).is_some());
-                            if ok {
-                                port = Some(p);
-                                zero = load_zero();   // reuse last alignment
-                                following = false;
-                                let _ = reply.send(Ok(path));
-                            } else {
-                                let _ = reply.send(Err("主臂 1-6 号舵机未全部应答".into()));
+                    // Empty path = auto-discover: probe every /dev/serial/by-id
+                    // entry; the leader arm is whichever answers for all six
+                    // servo IDs at 1 Mbps (the base bus won't — different IDs).
+                    let candidates: Vec<String> = if path.trim().is_empty() {
+                        std::fs::read_dir("/dev/serial/by-id")
+                            .map(|rd| {
+                                rd.filter_map(|e| e.ok())
+                                    .map(|e| e.path().to_string_lossy().into_owned())
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        vec![path.clone()]
+                    };
+                    let mut result: Result<String, String> = Err(if path.trim().is_empty() {
+                        "自动扫描: /dev/serial/by-id 下没有可用串口".into()
+                    } else {
+                        String::new()
+                    });
+                    for cand in candidates {
+                        match serialport::new(&cand, 1_000_000)
+                            .timeout(Duration::from_millis(10))
+                            .open()
+                        {
+                            Ok(mut p) => {
+                                // All six must answer or it's not a leader arm.
+                                let ok = (1..=6u8).all(|id| sts_read_pos(&mut p, id).is_some());
+                                if ok {
+                                    port = Some(p);
+                                    zero = load_zero();   // reuse last alignment
+                                    following = false;
+                                    result = Ok(cand);
+                                    break;
+                                }
+                                result = Err(format!("{cand}: 主臂 1-6 号舵机未全部应答"));
+                            }
+                            Err(e) => {
+                                result = Err(format!("打开串口失败: {e}"));
                             }
                         }
-                        Err(e) => {
-                            let _ = reply.send(Err(format!("打开串口失败: {e}")));
-                        }
                     }
+                    let _ = reply.send(result);
                 }
                 Ok(LReq::Align(reply)) => {
                     let result = match port.as_mut() {
@@ -493,7 +517,8 @@ const SYSINFO_SH: &str = concat!(
     "df -m / | awk 'NR==2{print \"disk\",$3,$2}';",
     "for h in /sys/class/hwmon/hwmon*; do if [ \"$(cat $h/name 2>/dev/null)\" = ina3221 ]; then ",
     "printf 'pwr %s %s\\n' \"$(cat $h/in1_input)\" \"$(cat $h/curr1_input)\"; break; fi; done;",
-    "printf 'sbatt %s\\n' \"$(cat /tmp/lekiwi_batt 2>/dev/null)\"",
+    "printf 'sbatt %s\\n' \"$(cat /tmp/lekiwi_batt 2>/dev/null)\";",
+    "printf 'sarm %s\\n' \"$(cat /tmp/lekiwi_arm 2>/dev/null)\"",
 );
 
 /// SSH to the board and read its vitals. BatchMode=yes fails fast (no password
@@ -521,6 +546,191 @@ async fn sysinfo(ip: String) -> Result<String, String> {
     .map_err(|e| format!("sysinfo task failed: {e}"))?
 }
 
+/// Manual control of the vision services (vlm-daemon + llama-server), local or
+/// over ssh. Runtime-only: start/stop/restart never touch the systemd enable
+/// state, so boot autostart is unaffected. Stopping also frees llama's VRAM.
+#[tauri::command]
+async fn vlm_service(ip: String, action: String) -> Result<String, String> {
+    if !matches!(
+        action.as_str(),
+        "start" | "stop" | "restart" | "enable" | "disable" | "is-enabled"
+    ) {
+        return Err(format!("bad action: {action}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        // is-enabled exits non-zero for "disabled", so don't let it fail the sh.
+        let sc = format!(
+            "systemctl --user {action} vlm-daemon.service llama-server.service{}",
+            if action == "is-enabled" { " || true" } else { "" }
+        );
+        let out = if ip == "127.0.0.1" || ip == "localhost" {
+            std::process::Command::new("sh").args(["-c", &sc]).output()
+        } else {
+            std::process::Command::new("ssh")
+                .args([
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=6",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    &format!("jatson@{ip}"),
+                    &sc,
+                ])
+                .output()
+        }
+        .map_err(|e| format!("spawn failed: {e}"))?;
+        if out.status.success() {
+            if action == "is-enabled" {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                Ok(action)
+            }
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("vlm_service task failed: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// VLM daemon bridge. The camera + vision-language daemon (built separately)
+// serves a small HTTP API on tcp://<ip>:8090, every endpoint guarded by a
+// bearer token. The WebView must never see that token, so all HTTP lives here
+// (mirroring the ssh telemetry pattern): blocking `ureq` on a spawn_blocking
+// pool, token read fresh from a file the daemon writes. Any failure surfaces to
+// the frontend as an error string, which the UI renders as the offline state
+// and keeps probing health to reconnect.
+//
+// Endpoints (contract frozen):
+//   GET  /health   -> {state, llama_up, camera, last_caption_ts, uptime}
+//   GET  /frame.jpg-> latest JPEG bytes  (we return base64 for an <img> data URL)
+//   GET  /caption  -> {text, frame_ts, latency_ms, seq}
+//   POST /describe -> {text, frame_ts, latency_ms}   body {prompt?}
+//   POST /state    -> body {state}
+const VLM_PORT: u16 = 8090;
+
+/// Token path the daemon generates. Read fresh on every call so a daemon
+/// restart (new token) is picked up without relaunching the GUI. Missing/empty
+/// file -> None, which the commands turn into an error the UI shows as offline.
+fn vlm_token() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let p = std::path::PathBuf::from(home).join("work/lekiwi-jatson-orin/vlm/token");
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn vlm_agent(secs: u64) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(secs))
+        .build()
+}
+
+fn vlm_url(ip: &str, path: &str) -> String {
+    format!("http://{ip}:{VLM_PORT}{path}")
+}
+
+fn vlm_auth() -> Result<String, String> {
+    vlm_token()
+        .map(|t| format!("Bearer {t}"))
+        .ok_or_else(|| "no VLM token (daemon not running?)".to_string())
+}
+
+/// GET a text/JSON endpoint, returning the raw body for the frontend to parse.
+fn vlm_get_text(ip: &str, path: &str, secs: u64) -> Result<String, String> {
+    let auth = vlm_auth()?;
+    vlm_agent(secs)
+        .get(&vlm_url(ip, path))
+        .set("Authorization", &auth)
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_string()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn vlm_health(ip: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || vlm_get_text(&ip, "/health", 5))
+        .await
+        .map_err(|e| format!("vlm task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn vlm_caption(ip: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || vlm_get_text(&ip, "/caption", 8))
+        .await
+        .map_err(|e| format!("vlm task failed: {e}"))?
+}
+
+/// Fetch the latest frame plus its metadata headers (X-Fps measured capture
+/// rate, X-Frame-Ts capture wall time). Returns JSON {b64, fps, frame_ts}; the
+/// frontend drops b64 into `img.src = "data:image/jpeg;base64,<...>"` and shows
+/// the measured fps.
+#[tauri::command]
+async fn vlm_frame(ip: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let auth = vlm_auth()?;
+        let resp = vlm_agent(6)
+            .get(&vlm_url(&ip, "/frame.jpg"))
+            .set("Authorization", &auth)
+            .call()
+            .map_err(|e| e.to_string())?;
+        let fps: f64 = resp.header("X-Fps").and_then(|h| h.parse().ok()).unwrap_or(0.0);
+        let frame_ts: f64 = resp.header("X-Frame-Ts").and_then(|h| h.parse().ok()).unwrap_or(0.0);
+        let mut bytes = Vec::new();
+        resp.into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(serde_json::json!({ "b64": b64, "fps": fps, "frame_ts": frame_ts }).to_string())
+    })
+    .await
+    .map_err(|e| format!("vlm task failed: {e}"))?
+}
+
+/// One-shot describe. VLM inference can take several seconds, so the timeout is
+/// generous; the call still runs off the async runtime.
+#[tauri::command]
+async fn vlm_describe(ip: String, prompt: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let auth = vlm_auth()?;
+        let body = if prompt.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            serde_json::json!({ "prompt": prompt }).to_string()
+        };
+        vlm_agent(90)
+            .post(&vlm_url(&ip, "/describe"))
+            .set("Authorization", &auth)
+            .set("Content-Type", "application/json")
+            .send_string(&body)
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("vlm task failed: {e}"))?
+}
+
+/// Promote/demote the daemon between "idle" and "watch" (continuous captioning).
+#[tauri::command]
+async fn vlm_set_state(ip: String, state: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let auth = vlm_auth()?;
+        let body = serde_json::json!({ "state": state }).to_string();
+        vlm_agent(5)
+            .post(&vlm_url(&ip, "/state"))
+            .set("Authorization", &auth)
+            .set("Content-Type", "application/json")
+            .send_string(&body)
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("vlm task failed: {e}"))?
+}
+
 fn main() {
     let tx = spawn_worker();
     let zmq_tx_for_leader = tx.clone();
@@ -543,6 +753,12 @@ fn main() {
             zmq_arm_mid,
             zmq_arm_relax,
             log_connect,
+            vlm_health,
+            vlm_service,
+            vlm_frame,
+            vlm_caption,
+            vlm_describe,
+            vlm_set_state,
         ])
         .setup(move |app| {
             app.manage(spawn_leader(app.handle().clone(), zmq_tx_for_leader));
