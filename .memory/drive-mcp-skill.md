@@ -10,6 +10,9 @@ metadata:
 钳位(1.0→0.15 并注明)、冷却拒绝、busy 不排队、stop 抢断(40 帧只发 1 帧)、语音端到端
 ("往前走一小步再退回"→Hermes 自主 status+两次 move+逐步播报)。
 
+2026-07-19 起 MCP 帧带 `"src":"mcp"`,在 base_host 底盘 mux 里排最低——手柄/GUI
+活动的 0.5s HOLD 窗口内 MCP 底盘帧直接丢弃(见 [[lekiwi-pad-teleop]])。
+
 安全分层:本文件是第 2 层 schema 硬钳位(|v|≤0.15m/s、|ω|≤30°/s、0.1-2.0s、20Hz 重发
 +3 帧零刹停、互斥不排队、0.3s 冷却);第 3 层靠 base_host 0.5s watchdog 兜底(MCP 挂了
 车自停)。**已知弱点**:ZMQ PUSH 缓冲(SNDHWM=10),≤0.5s 短移动在 base_host 不在时

@@ -78,4 +78,14 @@ GUI 启动自动连 ZMQ + 主臂(主臂缺席静默)。
 线格式是 `{src,text}`,任何板端进程往 5556 丢就能显示;键盘开车/主臂动作也调
 `logLine()` 进同栏。用户定的方向「通用通道,后续其他日志按需」。
 
-相关：[[lekiwi-gui-tauri]]（GUI 键盘链路 + ZMQ 线协议详情）、[[lekiwi-robot-target]]。
+**底盘优先级仲裁（2026-07-19,移植 rdk-x5 cmd_vel_mux）**：消息加 `"src"` 标签,
+base_host 内 mux:**pad(0) > gui(1) > mcp(2)**,无标签按 gui 级(旧 GUI 二进制兼容,
+人不降级)。规则 = 高优先级源最后一条底盘帧后 **HOLD 0.5s** 内,低优先级底盘帧直接
+丢弃(手臂键不受仲裁);pad 松杆零帧同样续 HOLD → 按住手柄急停可压制 MCP。同时
+去掉 PULL 的 CONFLATE(多源时会把高优先级帧 conflate 掉)改为每 tick 排空队列,
+且 watchdog 改按最后一条**已执行底盘帧**计时——修掉「手臂消息流喂底盘 watchdog」
+旧缺陷。owner 切换打日志 `base owner -> pad|gui|mcp`。零速帧真机验证过五段切换。
+教训:**systemd `enable` ≠ `start`**——pad_teleop 2026-07-18 enable 后板子一直没
+重启,服务从没跑过,手柄"坏了"其实是服务没起+接收器没插。
+
+相关：[[lekiwi-gui-tauri]]（GUI 键盘链路 + ZMQ 线协议详情）、[[lekiwi-robot-target]]、[[drive-mcp-skill]]。

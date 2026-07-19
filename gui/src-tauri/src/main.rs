@@ -51,7 +51,8 @@ struct Zmq {
 
 fn base_json(x: f64, y: f64, theta: f64) -> String {
     // Keys must be exactly x.vel/y.vel/theta.vel; the host indexes all three.
-    format!("{{\"x.vel\": {x}, \"y.vel\": {y}, \"theta.vel\": {theta}}}")
+    // src feeds base_host's priority mux: pad > gui > mcp.
+    format!("{{\"src\": \"gui\", \"x.vel\": {x}, \"y.vel\": {y}, \"theta.vel\": {theta}}}")
 }
 
 /// The worker: one owned tokio runtime on its own thread, holding the socket.

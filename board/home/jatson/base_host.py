@@ -52,6 +52,15 @@ BIND = sys.argv[2] if len(sys.argv) > 2 else "tcp://*:5555"
 BAUD = 1000000
 WATCHDOG_S = 0.5
 
+# Base-velocity priority mux (ported from rdk-x5 cmd_vel_mux): the physical
+# gamepad ALWAYS outranks software senders; the human GUI outranks the LLM.
+# A source owns the base for BASE_HOLD_S after its last base frame — pad's
+# release-zero therefore also pins the bus, so holding the pad e-stop
+# suppresses MCP motion. Untagged messages rank as "gui" (legacy binaries).
+BASE_PRIO = {"pad": 0, "gui": 1, "mcp": 2}
+BASE_PRIO_NAME = {0: "pad", 1: "gui", 2: "mcp"}
+BASE_HOLD_S = 0.5
+
 # Servo-battery telemetry: the STS3215s run off the WitMotion 11.1 V (3S) pack,
 # so a wheel servo's Present-Voltage register is a stand-in for pack voltage
 # (the Orin cannot read it any other way — this daemon owns the only serial
@@ -383,7 +392,10 @@ def main():
 
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PULL)
-    sock.setsockopt(zmq.CONFLATE, 1)          # only ever act on the newest command
+    # No CONFLATE: with several PUSH peers (pad/GUI/MCP) conflation could drop
+    # a high-priority frame in favor of a low-priority one that arrived later.
+    # Instead every poll drains the whole queue and arbitrates per message.
+    sock.setsockopt(zmq.RCVHWM, 64)
     sock.bind(BIND)
     poller = zmq.Poller()
     poller.register(sock, zmq.POLLIN)
@@ -392,15 +404,28 @@ def main():
     last_cmd = time.time()
     last_batt = 0.0
     last_arm_cmd = time.time()
+    # Base-velocity priority mux (ported from rdk-x5 cmd_vel_mux): a source
+    # keeps the base bus for BASE_HOLD_S after its last base frame; lower
+    # priority base frames are dropped meanwhile (arm keys pass regardless).
+    # Untagged legacy senders rank as "gui" so an old GUI binary still
+    # outranks the LLM; only the physical pad outranks everything.
+    prio_last = {}                 # priority level -> last base frame time
+    base_owner = -1                # last announced owner (for log edges)
+    last_base = time.time()        # last APPLIED base command (watchdog feed;
+                                   # arm-only traffic must not refresh it)
     moving = False
     relaxing = False
     mid_seek = False
     try:
         while True:
             socks = dict(poller.poll(timeout=50))
-            if sock in socks:
+            while sock in socks:
                 try:
-                    data = json.loads(sock.recv_string())
+                    raw = sock.recv_string(zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                try:
+                    data = json.loads(raw)
                     base = ("x.vel" in data)
                     if base:
                         vx, vy, om = (float(data["x.vel"]), float(data["y.vel"]),
@@ -426,9 +451,21 @@ def main():
                 # restarts us against the stable /dev/serial/by-id path.
                 now = time.time()
                 if base:
+                    p = BASE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
+                    if any(now - prio_last.get(q, -1.0) < BASE_HOLD_S
+                           for q in range(p)):
+                        base = False          # a higher-priority source owns it
+                    else:
+                        prio_last[p] = now
+                        if p != base_owner:
+                            base_owner = p
+                            print(f"[base_host] base owner -> "
+                                  f"{BASE_PRIO_NAME.get(p, '?')}", flush=True)
+                if base:
                     speeds = solve(vx, vy, om)
                     drive(ser, speeds)
                     moving = any(abs(v) > 1 for v in speeds.values())
+                    last_base = now
                 if arm and dq is not None and len(dq) == 6:
                     relaxing = False
                     mid_seek = False
@@ -442,7 +479,7 @@ def main():
                 if data.get("arm.mid") or data.get("arm.relax"):
                     last_arm_cmd = now
                 last_cmd = now
-            elif moving and time.time() - last_cmd > WATCHDOG_S:
+            if moving and time.time() - last_base > WATCHDOG_S:
                 stop(ser)
                 moving = False
                 print("[base_host] watchdog: stopped (no command)", flush=True)

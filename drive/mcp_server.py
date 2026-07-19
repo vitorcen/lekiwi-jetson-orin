@@ -74,7 +74,8 @@ _last_move_end = 0.0                  # monotonic ts of last drive_move completi
 
 def _send(vx: float, vy: float, om: float) -> bool:
     """Send one base frame. Returns False if it couldn't be queued (unreachable)."""
-    msg = json.dumps({"x.vel": vx, "y.vel": vy, "theta.vel": om})
+    # src tag feeds base_host's priority mux: pad > gui > mcp (we are lowest).
+    msg = json.dumps({"src": "mcp", "x.vel": vx, "y.vel": vy, "theta.vel": om})
     with _send_lock:
         try:
             _sock.send_string(msg, flags=zmq.NOBLOCK)

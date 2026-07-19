@@ -136,7 +136,7 @@ def main():
     def send(x, y, theta, vf=0.0, vpan=0.0, vz=0.0, vroll=0.0, gv=0.0, relax=0):
         try:
             sock.send_string(
-                f'{{"x.vel": {x:.3f}, "y.vel": {y:.3f}, "theta.vel": {theta:.1f},'
+                f'{{"src": "pad", "x.vel": {x:.3f}, "y.vel": {y:.3f}, "theta.vel": {theta:.1f},'
                 f' "ee.vf": {vf:.2f}, "ee.vpan": {vpan:.2f}, "ee.vz": {vz:.2f},'
                 f' "ee.vroll": {vroll:.2f}, "grip.v": {gv:.1f}, "arm.relax": {relax}}}',
                 zmq.NOBLOCK,
