@@ -80,6 +80,12 @@ function handleEvent(ev) {
     case 'error':
       addRow('⚠ ' + (ev.message || '出错'), 'error');
       break;
+    case 'audio':                     // 设备缺失的对称提示:恢复也要看得见
+      addRow('✓ ' + (ev.message || '音频设备已恢复'), 'sys');
+      break;
+    case 'barge_in':
+      addRow('✋ 打断' + (ev.action === 'stop' ? '(停止)' : '') + ': ' + (ev.text || ''), 'sys');
+      break;
   }
 }
 

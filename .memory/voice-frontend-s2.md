@@ -29,6 +29,22 @@ token 鉴权,GUI 走 Rust 代理)。codex gpt-5.6-sol 调研后**推翻了 faste
 切点吸收尾随标点+引号,段首孤儿标点丢弃。Hermes SSE 的 tool.progress(_thinking)
 也带全文 delta,只有 assistant.delta 才能喂 TTS,否则重复播报。
 
+**无声故障(2026-07-19 二锅)**:MCP01 拔插后 `_capture_loop` 只翻 `audio_ok=True`
+不更新卡名 → `audio_ok=True` 但 `cap/play_card=None` 死角,watch loop 被短路,
+aplay 打 `plughw:CARD=None` 秒退,edge 断管全"失败"、melo 不查返回码报"成功"
+→ **无声且不报错**。修复:capture 重启走完整 `discover_audio()`;watch loop 检
+卡名失一致(故障期 5s 巡检);两通道都查 aplay 返回码,非零 → `audio_ok=False`
+上报重发现(被打断 kill 的非零码用 gen 区分,不算设备故障);`_synth_and_play`
+播前发现设备不 ok 当句重发现。原则:**播放子进程返回码必须检查,"成功"必须是真的**。
+
+**打断模式(barge-in,2026-07-19)**:实测 **MCP01 硬件 AEC 只有部分抑制**
+(1kHz 探测音在采集里仍清晰可检),纯 VAD 开麦必被自己播报误触发。方案 = SPEAKING
+不闭麦 + 三重门限:段时长≥0.55s → RMS≥0.02 能量门 → **SenseVoice 快解码后与近期
+播报句(_recent_tts 环形 8 条/20s 窗)做 difflib 相似度比对**,≥0.55 或互为子串判回声
+丢弃;命中停止词(停/别说了…,绕过 2 字下限)只打断不起轮;其余真插话 → 打断并把
+识别文本直接作为新一轮输入。`VOICE_BARGE_IN=0` 可退回半双工。长文本自回声压测:
+4 句完整播完 0 误触发。
+
 **实测延迟**:说完→首音 P50 ~2-4s,大头是 DeepSeek 云端首 token(1.8-6.8s 波动),
 板上环节(VAD 0.55+ASR 0.2+edge 1.4)已压实。相关:[[hermes-voice-agent-plan]]、
 [[vlm-stack-orin]]、[[drive-mcp-skill]]。

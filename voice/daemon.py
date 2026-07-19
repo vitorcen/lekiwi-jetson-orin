@@ -6,8 +6,11 @@
   - 状态机 IDLE → LISTENING → THINKING → SPEAKING → LISTENING,常开窗口 WINDOW_S。
   - 每轮 generation ID 单调递增;所有异步回调(SSE token / edge-tts 音频块 / ASR 结果)
     带 generation,过期即丢弃 —— 这是打断能"立即静音"的根基。
-  - 半双工:SPEAKING/THINKING 期间 arecord 数据直接丢弃并 reset VAD;播放结束 250ms
-    后才恢复喂 VAD,避免自己的声音把自己截句。
+  - 打断模式(barge-in,VOICE_BARGE_IN=0 可关):SPEAKING 不闭麦,VAD 段过
+    时长≥0.55s、RMS 能量门、ASR 文本与近期播报句相似度(回声判别)三重门限才算
+    真插话——MCP01 硬件 AEC 只有部分抑制,单靠 VAD 会被自己的播报误触发。
+    命中停止词(停/别说了…)只打断;其余作为新一轮输入直接起轮。
+    THINKING 期间仍闭麦丢弃并 reset VAD;播放结束 250ms 后恢复正常喂 VAD。
   - 所有音频子进程(arecord/aplay/ffmpeg)随状态机回收,绝不留僵尸。
   - ONNX 推理(ASR/Melo)一律丢 ThreadPoolExecutor,不阻塞事件循环。
   - 任一异常路径(edge-tts 超时、Hermes 5xx、音频卡拔掉)都降级/上报 /health,不让
@@ -18,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -50,6 +54,18 @@ TOKEN_FILE = os.path.expanduser(_env("VOICE_TOKEN_FILE", os.path.join(HERE, "tok
 WINDOW_S = float(_env("VOICE_WINDOW_S", "480"))          # 常开窗口(秒)
 HALF_DUPLEX_RESUME = 0.25                                 # 播放结束后恢复喂 VAD 的静默
 INTERRUPT_SETTLE = 0.20                                   # 打断后回 LISTENING 前的沉降
+
+# 语音打断(barge-in):SPEAKING 时不闭麦,VAD 段过三重门限才算真打断。
+# MCP01 的硬件 AEC 只有部分抑制(实测 1kHz 探测音仍泄漏),所以单靠能量/VAD
+# 会被自己的播报误触发——最后一道门是 ASR 文本与近期播报句的相似度比对:
+# 识别出的就是自己正在说的话 → 回声,丢弃;是别的内容 → 用户在插话。
+BARGE_IN = _env("VOICE_BARGE_IN", "1").lower() not in ("0", "false", "no")
+BARGE_MIN_S = 0.55            # 打断语音最短时长(太短多为回声碎片/杂音)
+BARGE_MIN_RMS = 0.020         # 能量门(归一化 RMS,残余回声底噪之上)
+BARGE_ECHO_SIM = 0.55         # 与近期播报句相似度 ≥ 此值 → 判回声
+BARGE_ECHO_WINDOW_S = 20.0    # 只与最近这段时间的播报句比对
+# 停止词:命中只打断不起轮(允许单字"停",绕过最短长度过滤)
+STOP_WORDS = {"停", "停停", "停一下", "停下", "别说了", "闭嘴", "安静", "等等", "先停"}
 
 # Hermes API server
 HERMES_BASE = _env("VOICE_HERMES_BASE", "http://127.0.0.1:8642").rstrip("/")
@@ -286,6 +302,14 @@ class Daemon:
         self.turn_task: asyncio.Task | None = None
         self.say_task: asyncio.Task | None = None
 
+        # barge-in:近期播报句(回声比对参照)+ 在途检测任务
+        self._recent_tts: deque[tuple[float, str]] = deque(maxlen=8)
+        self._barge_task: asyncio.Task | None = None
+
+        # 音频缺失去重 + 恢复提示配对
+        self._audio_err_ts = 0.0
+        self._audio_was_broken = False
+
         # 模型(启动时加载)
         self.rec = None                          # SenseVoice OfflineRecognizer
         self.vad = None                          # Silero VAD
@@ -354,8 +378,19 @@ class Daemon:
         self.play_card = await loop.run_in_executor(None, _discover_card, "playback")
         self.audio_ok = bool(self.cap_card and self.play_card)
         if not self.audio_ok:
-            self.emit("error", message="audio device missing")
+            # 缺失期去重:capture 重启每 0.3s 会走到这里,10s 至多报一次
+            if time.time() - self._audio_err_ts >= 10.0:
+                self._audio_err_ts = time.time()
+                self.emit("error", message="audio device missing")
+            self._audio_was_broken = True
         elif self.cap_card:
+            if self._audio_was_broken:
+                # 对称提示:之前报过缺失,恢复也要让用户看见;同时清掉挂着的旧错
+                self._audio_was_broken = False
+                self._audio_err_ts = 0.0
+                self.last_error = None
+                self.emit("audio", status="recovered", card=self.cap_card,
+                          message=f"音频设备已恢复({self.cap_card})")
             # 声卡上电默认音量只有 29%(-20dB):播报听不见、麦克风能量不够触发
             # VAD。ALSA 混音器设置不随重启保留(alsactl store 要 root),所以每次
             # 发现设备后由 daemon 自己拉到位。控件名对 MCP01 实测:PCM=播放,Mic=采集。
@@ -372,11 +407,20 @@ class Daemon:
                     pass
 
     async def audio_watch_loop(self) -> None:
-        """音频卡丢失时每 30s 重试发现(拔掉声卡不让 daemon 崩)。"""
+        """音频卡丢失/卡名失一致时重试发现(拔掉声卡不让 daemon 崩)。
+        故障期 5s 快速重试,正常期 30s 巡检。"""
         while True:
-            if not self.audio_ok:
+            broken = not self.audio_ok or not (self.cap_card and self.play_card)
+            if broken:
                 await self.discover_audio()
-            await asyncio.sleep(30)
+                broken = not self.audio_ok
+            await asyncio.sleep(5 if broken else 30)
+
+    def _playback_dead(self, rc) -> None:
+        """aplay 非零退出 = 播放设备已失效(拔插/卡名变了):置 audio_ok=False
+        让 watch loop 5s 内重新发现,并向 feed 上报,不再无声装成功。"""
+        self.audio_ok = False
+        self.emit("error", message=f"aplay exited rc={rc}: playback device lost, rediscovering")
 
     def cap_dev(self) -> str:
         return f"plughw:CARD={self.cap_card}"
@@ -452,14 +496,18 @@ class Daemon:
                 self._arecord = None
             if self.state == IDLE:
                 break
-            self.audio_ok = bool(_discover_card("capture"))   # 卡还在吗
+            # arecord 死了(多为设备拔插)→ 完整重发现:同时刷新 cap/play 卡名
+            # 和音量。绝不能只翻 audio_ok 不更新卡名——那会留下 audio_ok=True 但
+            # cap/play_card=None 的死角:watch loop 被短路,播放全落到
+            # plughw:CARD=None 上,无声且不报错(2026-07-19 实锅)。
+            await self.discover_audio()
             await asyncio.sleep(0.3)                            # 限速重启
 
     def _handle_chunk(self, data: bytes) -> None:
-        """一块 PCM。半双工门控 + VAD 喂入 + 截句触发。"""
-        # 只有 LISTENING 且过了播放尾静默,才把音频喂给 VAD
-        feed = (self.state == LISTENING and time.time() >= self.mic_resume_ts)
-        if not feed:
+        """一块 PCM。LISTENING 走正常截句;SPEAKING 开麦做打断检测;其余丢弃。"""
+        listening = (self.state == LISTENING and time.time() >= self.mic_resume_ts)
+        barge = (BARGE_IN and self.state == SPEAKING)
+        if not (listening or barge):
             # 丢弃期间保持 VAD 干净,避免把机器人自己的话截成段
             if self.vad is not None:
                 try:
@@ -477,12 +525,16 @@ class Daemon:
         while not self.vad.empty():
             seg = self.vad.front.samples
             self.vad.pop()
+            seg_arr = np.array(seg, dtype=np.float32)
             # 只在 LISTENING 起轮;拿到段立刻改 THINKING 停止再截句(单轮保证)
             if self.state == LISTENING and (self.turn_task is None or self.turn_task.done()):
-                seg_arr = np.array(seg, dtype=np.float32)
                 self.set_state(THINKING)
                 gen = self.generation
                 self.turn_task = asyncio.create_task(self._asr_then_turn(gen, seg_arr))
+            elif (self.state == SPEAKING and barge
+                    and (self._barge_task is None or self._barge_task.done())):
+                self._barge_task = asyncio.create_task(
+                    self._barge_check(self.generation, seg_arr))
 
     # ------------------------------------------------------------------ #
     # ASR → 校验 → 起轮
@@ -514,6 +566,67 @@ class Daemon:
             return
         self.emit("user_text", text=text)
         await self.run_turn(gen, text)
+
+    # ------------------------------------------------------------------ #
+    # barge-in:SPEAKING 中检出的语音段 → 能量门 → ASR → 回声/停止词判别
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _norm_text(t: str) -> str:
+        """去空白与中英标点,留下可比对的字符序列。"""
+        return re.sub(r"[\s,。!?、;:·~——…‘’“”\"'!?,.;:()()\-]+", "", t)
+
+    def _is_echo(self, text: str) -> bool:
+        """识别文本与近期播报句相似 → 判为自身回声(AEC 残余)。"""
+        cand = self._norm_text(text)
+        if not cand:
+            return True
+        now = time.time()
+        for ts, sent in list(self._recent_tts):
+            if now - ts > BARGE_ECHO_WINDOW_S:
+                continue
+            ref = self._norm_text(sent)
+            if not ref:
+                continue
+            if cand in ref or ref in cand:
+                return True
+            if difflib.SequenceMatcher(None, cand, ref).ratio() >= BARGE_ECHO_SIM:
+                return True
+        return False
+
+    async def _barge_check(self, gen: int, samples: np.ndarray) -> None:
+        if len(samples) < int(BARGE_MIN_S * 16000):
+            return
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        if rms < BARGE_MIN_RMS:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
+        except Exception:
+            return
+        if gen != self.generation or self.state != SPEAKING:
+            return                        # 这轮播报已结束/已被别的路径打断
+        nt = self._norm_text(text)
+        if not nt or self._is_echo(text):
+            return
+        if nt in STOP_WORDS:
+            self.emit("barge_in", text=text, action="stop")
+            await self.do_interrupt()
+            return
+        if len(nt) < 2 or nt in _FILLER:
+            return
+        # 真插话:打断当前播报,把这段话直接作为新一轮输入(不用重说)
+        self.emit("barge_in", text=text, action="turn")
+        await self._abort_playback()
+        await asyncio.sleep(INTERRUPT_SETTLE)
+        if self.vad is not None:
+            try:
+                self.vad.reset()
+            except Exception:
+                pass
+        self.refresh_deadline()
+        self.emit("user_text", text=text)
+        self.turn_task = asyncio.create_task(self.run_turn(self.generation, text))
 
     # ------------------------------------------------------------------ #
     # 一轮:Hermes 流式 → 句子累积器 → TTS 队列(pipeline + 背压)
@@ -647,6 +760,7 @@ class Daemon:
             return
         if self.state in (THINKING, LISTENING):
             self.set_state(SPEAKING)
+        self._recent_tts.append((time.time(), phrase))     # barge-in 回声参照
         await self._melo_play(gen, phrase)
         self.emit("tts", sentence=phrase, backend="melo")
 
@@ -654,6 +768,9 @@ class Daemon:
     # TTS 双通道:edge 主 / Melo 兜底 + 熔断
     # ------------------------------------------------------------------ #
     async def _synth_and_play(self, gen: int, sentence: str) -> None:
+        self._recent_tts.append((time.time(), sentence))   # barge-in 回声参照
+        if not self.audio_ok:
+            await self.discover_audio()     # 设备刚回来时当句即恢复,不等巡检
         backend = None
         breaker_open = time.time() < self.breaker_until
         if not breaker_open and FFMPEG:
@@ -686,6 +803,8 @@ class Daemon:
     async def _edge_play(self, gen: int, text: str) -> bool:
         """edge-tts 流式 mp3 → ffmpeg 解码 s16le@24k → aplay。首包 1s、整句 5s 超时。"""
         import edge_tts
+        if not (self.audio_ok and self.play_card):
+            return False
         ff = ap = None
         pump = None
         try:
@@ -745,6 +864,10 @@ class Daemon:
                 pass
             await pump
             await asyncio.wait_for(ap.wait(), timeout=8.0)
+            if ap.returncode != 0:
+                if gen == self.generation:      # 被打断 kill 的非零码不算设备故障
+                    self._playback_dead(ap.returncode)
+                return False
             return got_audio
         except Exception:
             # 超时/断管/gen 过期 → 失败,交给 Melo 兜底
@@ -786,7 +909,11 @@ class Daemon:
                 ap.stdin.close()
             except Exception:
                 pass
-            await asyncio.wait_for(ap.wait(), timeout=30.0)
+            rc = await asyncio.wait_for(ap.wait(), timeout=30.0)
+            if rc != 0:
+                if gen == self.generation:      # 被打断 kill 的非零码不算设备故障
+                    self._playback_dead(rc)
+                return False
             return True
         except Exception as exc:
             self._kill(ap)
@@ -966,6 +1093,7 @@ class Daemon:
             "edge_breaker": time.time() < self.breaker_until,
             "ffmpeg": bool(FFMPEG),
             "hermes_key": bool(HERMES_KEY),
+            "barge_in": BARGE_IN,
             "window_deadline": round(self.deadline, 1) if self.deadline else None,
             "generation": self.generation,
             "mem_rss_mb": _rss_mb(),
