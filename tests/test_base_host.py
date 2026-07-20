@@ -80,3 +80,21 @@ def test_base_blocked_any_higher_level_blocks():
     assert bh.base_blocked({1: 10.0}, 2, 10.2)
     # levels never seen default to "long ago" and must not block
     assert not bh.base_blocked({}, 3, 10.0)
+
+
+# ---- safety master switch latch ------------------------------------------
+
+def test_motion_latch_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(bh, "MOTION_FILE", str(tmp_path / "motion"))
+    assert bh.read_motion() is True          # missing file -> default ON
+    bh.write_motion(False)
+    assert bh.read_motion() is False         # latched across "restart"
+    bh.write_motion(True)
+    assert bh.read_motion() is True
+
+
+def test_motion_garbage_file_defaults_on(tmp_path, monkeypatch):
+    p = tmp_path / "motion"
+    p.write_text("wat\n")
+    monkeypatch.setattr(bh, "MOTION_FILE", str(p))
+    assert bh.read_motion() is True

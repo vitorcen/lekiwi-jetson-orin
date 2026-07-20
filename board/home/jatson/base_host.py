@@ -20,6 +20,10 @@ without any of that:
                   pose, ids 1..6]; target = ARM_REST_FULL + dq, clamped to
                   calibrated limits. Base keys may be omitted in such
                   messages (base is only driven when "x.vel" is present).
+        "safety.motion" 1/0 master switch (latched in MOTION_FILE): 0 freezes
+                  actuation — wheels stopped, arm goals dropped, holding
+                  torque kept — while recv/mux/telemetry run normally, so
+                  the command chain can be debugged with motors dead.
 
 Arm control (servos 1-6, optional — skipped if the arm doesn't answer):
 direct per-joint velocity teleop, no calibration and no cartesian IK. Left
@@ -69,6 +73,12 @@ BASE_HOLD_S = 0.5
 # measurable on-board; the GUI shows board power (VDD_IN) for the host instead.
 BATT_FILE = "/tmp/lekiwi_batt"
 ARM_FILE = "/tmp/lekiwi_arm"   # "limp" | "holding" | "none" for the GUI statusbar
+# Safety master switch, latched across service restarts (/tmp -> a full reboot
+# re-arms). "0" = FREEZE actuation: wheels zeroed, no new arm goals (holding
+# torque stays so a raised arm doesn't drop). Everything upstream — recv,
+# priority mux, owner logs, battery telemetry — keeps running, so the whole
+# command chain can be exercised with the motors safely dead.
+MOTION_FILE = "/tmp/lekiwi_motion"
 BATT_PERIOD_S = 5.0
 
 ADDR_MODE, ADDR_TORQUE, ADDR_ACCEL, ADDR_SPEED, ADDR_LOCK = 33, 40, 41, 46, 55
@@ -193,6 +203,26 @@ def write_batt(v):
         os.replace(tmp, BATT_FILE)
     except OSError:
         pass
+
+
+def write_motion(on):
+    """Latch the safety switch state atomically to MOTION_FILE (best effort)."""
+    try:
+        tmp = MOTION_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(("1" if on else "0") + "\n")
+        os.replace(tmp, MOTION_FILE)
+    except OSError:
+        pass
+
+
+def read_motion():
+    """Boot state of the safety switch: default ON, missing/garbage file = ON."""
+    try:
+        with open(MOTION_FILE) as f:
+            return f.read().strip() != "0"
+    except OSError:
+        return True
 
 
 def write_arm_state(s):
@@ -423,6 +453,9 @@ def main():
     moving = False
     relaxing = False
     mid_seek = False
+    motion_on = read_motion()
+    if not motion_on:
+        print("[base_host] SAFETY: motion output DISABLED (latched)", flush=True)
     try:
         while True:
             socks = dict(poller.poll(timeout=50))
@@ -449,6 +482,7 @@ def main():
                         mid_seek = True
                         relaxing = False
                         print("[base_host] arm middle-pose requested", flush=True)
+                    motion_req = data.get("safety.motion")
                 except Exception as e:
                     print(f"[base_host] bad command: {e}", flush=True)
                     continue
@@ -457,6 +491,18 @@ def main():
                 # is dead forever. Let OSError escape -> exit(1) -> systemd
                 # restarts us against the stable /dev/serial/by-id path.
                 now = time.time()
+                if motion_req is not None and bool(motion_req) != motion_on:
+                    motion_on = bool(motion_req)
+                    write_motion(motion_on)
+                    if not motion_on:
+                        stop(ser)
+                        moving = False
+                    print(f"[base_host] SAFETY: motion output "
+                          f"{'ENABLED' if motion_on else 'DISABLED'}", flush=True)
+                if not motion_on:
+                    # Freeze latched glides too, or re-enabling would replay a
+                    # relax/mid request queued while the switch was off.
+                    relaxing = mid_seek = False
                 if base:
                     p = BASE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
                     if base_blocked(prio_last, p, now):
@@ -467,17 +513,17 @@ def main():
                             base_owner = p
                             print(f"[base_host] base owner -> "
                                   f"{BASE_PRIO_NAME.get(p, '?')}", flush=True)
-                if base:
+                if base and motion_on:
                     speeds = solve(vx, vy, om)
                     drive(ser, speeds)
                     moving = any(abs(v) > 1 for v in speeds.values())
                     last_base = now
-                if arm and dq is not None and len(dq) == 6:
+                if arm and motion_on and dq is not None and len(dq) == 6:
                     relaxing = False
                     mid_seek = False
                     arm.follow(dq)
                     last_arm_cmd = now
-                if arm and any(ee):
+                if arm and motion_on and any(ee):
                     relaxing = False          # any arm input cancels/wakes
                     mid_seek = False
                     arm.step(*ee, dt=min(0.1, now - last_cmd))
@@ -491,15 +537,16 @@ def main():
                 print("[base_host] watchdog: stopped (no command)", flush=True)
             # Idle auto-relax: torque holding costs power/heat for nothing, so
             # after ARM_IDLE_RELAX_S without arm input, glide to REST and limp.
-            if (arm and not arm.relaxed and not relaxing and not mid_seek
+            if (arm and motion_on and not arm.relaxed and not relaxing
+                    and not mid_seek
                     and time.time() - last_arm_cmd > ARM_IDLE_RELAX_S):
                 relaxing = True
                 print("[base_host] arm idle -> auto relax", flush=True)
-            if arm and relaxing:
+            if arm and motion_on and relaxing:
                 arm.relax_tick(0.05)
                 if arm.relaxed:
                     relaxing = False
-            if arm and mid_seek and arm.mid_tick(0.05):
+            if arm and motion_on and mid_seek and arm.mid_tick(0.05):
                 mid_seek = False
             # Battery telemetry: one wheel-servo voltage read every few seconds.
             # Cheap (~4 ms) and rare, so it never disturbs the 20 Hz drive loop;
