@@ -1,3 +1,0 @@
-[submodule "dependencies/RDK-GS130WI-Jatson-Driver"]
-	path = dependencies/RDK-GS130WI-Jatson-Driver
-	url = git@github.com:vitorcen/RDK-GS130WI-Jatson-Driver.git
