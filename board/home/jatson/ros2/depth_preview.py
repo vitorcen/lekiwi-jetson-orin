@@ -65,6 +65,9 @@ class DepthPreview(Node):
         self.depth.set_video_mode(c_api.OniVideoMode(
             pixelFormat=c_api.OniPixelFormat.ONI_PIXEL_FORMAT_DEPTH_1_MM,
             resolutionX=320, resolutionY=240, fps=30))
+        # OpenNI2 defaults to selfie-mirror output (Kinect heritage) — real
+        # world orientation wants it OFF, matching the front camera.
+        self.depth.set_mirroring_enabled(False)
         self.depth.start()
 
         threading.Thread(target=self._depth_loop, daemon=True).start()
