@@ -11,20 +11,23 @@
 //
 //  - GPU CAPTIONING (解读): runs ONLY between an explicit 开始解读 press
 //    (vlm_set_state "watch") and 停止解读 (vlm_set_state "idle"). Tab enter does
-//    NOT auto-promote. Leaving / blurring / hiding the tab forces "idle" AND
-//    flips the button back to stopped (dead-man). While 解读中 we poll /caption
+//    NOT auto-promote. Leaving the tab or hiding the page forces "idle" AND
+//    flips the button back to stopped. While 解读中 we poll /caption
 //    at 1 Hz; each caption/answer carries a thumbnail of the exact interpreted
 //    frame, rendered beside the text. The one-shot ask box stays always usable.
 //
-// Defensive: any command error means the daemon is unreachable — we flip to the
-// 离线 state, stop the feeds, and keep probing health at 0.5 Hz until it answers
-// again, then resume automatically.
+// Defensive but not twitchy: 离线 needs HEALTH_FAILS consecutive failed health
+// polls, not one — a lone timeout or a daemon restart shows 重连中… and rides
+// through. Once offline we probe at 0.5 Hz and resume automatically. A
+// deliberate stand-down (page hidden, 断开) reads 已暂停/已断开, never 离线:
+// that distinction is what tells you whether to go debug the board.
 import { $, S, invoke } from './state.js';
 
 const FRAME_MIN_MS = 33;   // cap the frame pump at ~30 fps (native-ish)
 const CAPTION_MS = 1000;   // 1 Hz caption pull, only while 解读中
 const HEALTH_MS  = 1000;   // 1 Hz health while online
 const PROBE_MS   = 2000;   // 0.5 Hz health while offline (reconnect probe)
+const HEALTH_FAILS = 3;    // consecutive failed polls before declaring 离线
 
 let wantActive = true;     // user intent: false only after an explicit 断开
 let active     = false;    // tab is the visible foreground AND wantActive
@@ -34,6 +37,8 @@ let lastSeq    = -1;       // dedupe repeated captions
 let lastFrameAt = 0;       // client clock of the last decoded frame (for age)
 let curFps     = 0;        // daemon-measured capture fps (X-Fps)
 let framePumping = false;  // a frame pump loop is running (never stack two)
+let healthErrs = 0;        // consecutive failed health polls
+let lastHealthErr = '';    // why the last poll failed (shown on the 离线 badge)
 
 let healthTimer = null, capTimer = null, ageTimer = null;
 
@@ -143,12 +148,23 @@ async function pollHealth() {
   if (!active || !invoke) return;
   try {
     const h = JSON.parse(await invoke('vlm_health', { ip: curIp() }));
+    healthErrs = 0;
     if (!online) goOnline();
     else framePump();          // 兜底:在线但泵已死(有 framePumping 防重入)
     paintHealth(h);
-  } catch {
-    if (online) goOffline();
-    else setBadge('离线', 'bad');   // stay offline; probe keeps running
+  } catch (e) {
+    // Tolerate a hiccup. One failed poll used to drop us straight to 离线,
+    // which the frame pump right below explicitly refuses to do for the same
+    // class of error (daemon restarting, a single timeout). Only a sustained
+    // outage — HEALTH_FAILS consecutive misses — counts as offline.
+    healthErrs++;
+    lastHealthErr = String(e);
+    if (online) {
+      if (healthErrs >= HEALTH_FAILS) goOffline();
+      else setBadge('重连中…', 'warn');
+    } else {
+      setBadge('离线', 'bad');   // stay offline; probe keeps running
+    }
   }
 }
 
@@ -230,6 +246,10 @@ function goOffline() {
   healthTimer = setInterval(pollHealth, PROBE_MS);   // slow reconnect probe
   curFps = 0; paintFps();
   setBadge('离线', 'bad');
+  // Put the cause where it can be seen: a bare 离线 is unfalsifiable, and this
+  // badge is the only place the operator ever looks.
+  for (const el of [$('vState'), $('vStateBadge')])
+    if (el && lastHealthErr) el.title = '最后一次失败: ' + lastHealthErr;
   metaOffline();
   const btn = $('vlmWatchBtn'); if (btn) btn.disabled = true;
   $('vlmImg').classList.remove('live');
@@ -248,14 +268,15 @@ function startActive() {
   if (active || !wantActive || S.page !== 'vision' || document.hidden) return;
   active = true;
   online = false;
+  healthErrs = 0;
   if (!ageTimer) ageTimer = setInterval(tickAge, 500);
   healthTimer = setInterval(pollHealth, PROBE_MS);   // probe until first success
   setBadge('连接中…', 'warn');
   pollHealth();
 }
 
-// Tab leave / blur / hide: dead-man. Force the daemon to idle (stop GPU) and
-// flip the button back to stopped.
+// Tab leave / page hidden / 断开: stand down. Force the daemon to idle (stop
+// GPU) and flip the 解读 button back to stopped.
 function stopActive() {
   if (!active) return;
   active = false;
@@ -264,8 +285,11 @@ function stopActive() {
   clearTimers();
   if (ageTimer) { clearInterval(ageTimer); ageTimer = null; }
   online = false;
+  healthErrs = 0;
   curFps = 0; paintFps();
-  setBadge('离线', 'bad');
+  // We stood the feed down on purpose (hidden page / 断开 button) — the daemon
+  // is fine. Calling that 离线 is a lie that sent people debugging the board.
+  setBadge(wantActive ? '已暂停' : '已断开', 'warn');
   metaOffline();
 }
 
@@ -377,9 +401,13 @@ $('vlmAskBtn').onclick = async () => {
 };
 $('vlmAsk').addEventListener('keydown', e => { if (e.key === 'Enter') $('vlmAskBtn').click(); });
 
-// Self-contained dead-man: window blur / page hidden both stand the daemon down,
-// visibility returning re-arms the CAMERA feed (only if on Vision tab + wanted).
-window.addEventListener('blur', () => { if (S.page === 'vision') stopActive(); });
+// Stand down only when the page is actually HIDDEN (minimised / other tab).
+// NOT on window blur: clicking another app leaves the console fully visible,
+// and tearing the feed down there made Vision look like it dropped offline
+// every time focus moved. Voice and ROS have always behaved this way; Vision
+// inherited the blur rule from the ZMQ tab, where it is a safety requirement
+// (never drive a robot nobody is watching) that simply does not apply to a
+// read-only camera view.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopActive();
   else if (S.page === 'vision') startActive();

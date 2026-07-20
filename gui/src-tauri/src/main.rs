@@ -283,7 +283,13 @@ fn save_config(text: String) -> Result<(), String> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&p, text).map_err(|e| e.to_string())
+    // Write-then-rename, never truncate in place: this file is re-read by every
+    // vlm/voice request to resolve tokenDir, so a reader landing inside a
+    // truncate window would parse "" -> lose tokenDir -> "no VLM token" -> the
+    // GUI flips 离线 for no reason. rename(2) is atomic on the same filesystem.
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
 fn load_zero() -> Option<[i32; 6]> {
@@ -310,22 +316,37 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
             // The command channel doubles as the ~30 Hz tick clock.
             match rx.recv_timeout(Duration::from_millis(33)) {
                 Ok(LReq::Connect(path, reply)) => {
-                    // Empty path = auto-discover: probe every /dev/serial/by-id
-                    // entry; the leader arm is whichever answers for all six
-                    // servo IDs at 1 Mbps (the base bus won't — different IDs).
+                    // Empty path = auto-discover; the leader arm is whichever
+                    // port answers for all six servo IDs at 1 Mbps (the base
+                    // bus won't — different IDs). The GUI runs on the operator's
+                    // desktop, which is NOT necessarily Linux: /dev/serial/by-id
+                    // exists only there, so ask serialport for the real list and
+                    // keep by-id paths first on Linux (stable across replug).
                     let candidates: Vec<String> = if path.trim().is_empty() {
-                        std::fs::read_dir("/dev/serial/by-id")
+                        let mut v: Vec<String> = std::fs::read_dir("/dev/serial/by-id")
                             .map(|rd| {
                                 rd.filter_map(|e| e.ok())
                                     .map(|e| e.path().to_string_lossy().into_owned())
                                     .collect()
                             })
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        v.extend(
+                            serialport::available_ports()
+                                .unwrap_or_default()
+                                .into_iter()
+                                // USB only: skip Bluetooth-Incoming-Port and the
+                                // debug console, which open fine and time out.
+                                .filter(|p| {
+                                    matches!(p.port_type, serialport::SerialPortType::UsbPort(_))
+                                })
+                                .map(|p| p.port_name),
+                        );
+                        v
                     } else {
                         vec![path.clone()]
                     };
                     let mut result: Result<String, String> = Err(if path.trim().is_empty() {
-                        "自动扫描: /dev/serial/by-id 下没有可用串口".into()
+                        "自动扫描: 没有发现任何 USB 串口（主臂没插这台电脑？换个口/线试试）".into()
                     } else {
                         String::new()
                     });
@@ -694,10 +715,19 @@ fn vlm_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn vlm_agent(secs: u64) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(secs))
-        .build()
+/// ONE shared agent for every daemon call. The connection pool lives on the
+/// Agent, so building a fresh one per request (as this used to) meant a new TCP
+/// handshake for every frame — 30/s from the vision pump, with the matching
+/// TIME_WAIT pile-up. Per-request timeouts are set on the request instead.
+fn vlm_agent(_secs: u64) -> ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(4))
+                .build()
+        })
+        .clone()
 }
 
 fn vlm_url(ip: &str, path: &str) -> String {
@@ -715,6 +745,7 @@ fn vlm_get_text(ip: &str, path: &str, secs: u64) -> Result<String, String> {
     let auth = vlm_auth()?;
     vlm_agent(secs)
         .get(&vlm_url(ip, path))
+        .timeout(Duration::from_secs(secs))
         .set("Authorization", &auth)
         .call()
         .map_err(|e| e.to_string())?
@@ -746,6 +777,7 @@ async fn vlm_frame(ip: String) -> Result<String, String> {
         let auth = vlm_auth()?;
         let resp = vlm_agent(6)
             .get(&vlm_url(&ip, "/frame.jpg"))
+            .timeout(Duration::from_secs(6))
             .set("Authorization", &auth)
             .call()
             .map_err(|e| e.to_string())?;
@@ -775,6 +807,7 @@ async fn vlm_describe(ip: String, prompt: String) -> Result<String, String> {
         };
         vlm_agent(90)
             .post(&vlm_url(&ip, "/describe"))
+            .timeout(Duration::from_secs(90))
             .set("Authorization", &auth)
             .set("Content-Type", "application/json")
             .send_string(&body)
@@ -844,6 +877,7 @@ async fn voice_get(ip: String, path: String) -> Result<String, String> {
         let auth = voice_auth()?;
         vlm_agent(6)
             .get(&format!("http://{ip}:{VOICE_PORT}{path}"))
+            .timeout(Duration::from_secs(6))
             .set("Authorization", &auth)
             .call()
             .map_err(|e| e.to_string())?
@@ -865,6 +899,7 @@ async fn voice_post(ip: String, path: String, body: String) -> Result<String, St
         let auth = voice_auth()?;
         vlm_agent(15)
             .post(&format!("http://{ip}:{VOICE_PORT}{path}"))
+            .timeout(Duration::from_secs(15))
             .set("Authorization", &auth)
             .set("Content-Type", "application/json")
             .send_string(if body.trim().is_empty() { "{}" } else { &body })
