@@ -51,8 +51,9 @@ HTTP_HOST = _env("VOICE_HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(_env("VOICE_HTTP_PORT", "8092"))
 TOKEN_FILE = os.path.expanduser(_env("VOICE_TOKEN_FILE", os.path.join(HERE, "token")))
 
-WINDOW_S = float(_env("VOICE_WINDOW_S", "480"))          # 常开窗口(秒)
+WINDOW_S = float(_env("VOICE_WINDOW_S", "1800"))          # 常开窗口(秒)
 HALF_DUPLEX_RESUME = 0.25                                 # 播放结束后恢复喂 VAD 的静默
+LEVEL_PEAK_S = 3.0        # 麦克风峰值电平的保持窗口(秒)
 INTERRUPT_SETTLE = 0.20                                   # 打断后回 LISTENING 前的沉降
 
 # 语音打断(barge-in):SPEAKING 时不闭麦,VAD 段过三重门限才算真打断。
@@ -163,16 +164,26 @@ def _rss_mb() -> float:
     return 0.0
 
 
+class ProbeFailed(Exception):
+    """探测命令本身没跑成(超时/fork 失败)。这**不代表**声卡不在——板子内存吃紧
+    换页时,一个自身部分被换出的进程 fork+exec 一个小命令也能拖过超时。把这种
+    情况当成"设备缺失"会把好好的音频通路拆掉,曾经就是这么误报的。"""
+
+
+PROBE_TIMEOUT_S = float(_env("VOICE_PROBE_TIMEOUT_S", "15"))
+
+
 def _discover_card(which: str) -> str | None:
     """解析 `arecord -l` / `aplay -l`,返回 card 名(含 MCP01 或 USB Audio)。
-    which ∈ {"capture","playback"} → arecord/aplay。不写死编号。"""
+    which ∈ {"capture","playback"} → arecord/aplay。不写死编号。
+    命中不到返回 None(真的没这张卡);跑不动抛 ProbeFailed(信息不足)。"""
     tool = "arecord" if which == "capture" else "aplay"
     try:
         out = subprocess.run(
-            [tool, "-l"], capture_output=True, text=True, timeout=5
+            [tool, "-l"], capture_output=True, text=True, timeout=PROBE_TIMEOUT_S
         ).stdout
-    except Exception:
-        return None
+    except Exception as e:                       # noqa: BLE001
+        raise ProbeFailed(f"{tool} -l: {e!r}") from e
     # 行形如: card 0: MCP01 [MCP01], device 0: USB Audio [USB Audio]
     best = None
     for m in re.finditer(r"card \d+: (\S+) \[([^\]]*)\], device \d+: ([^\[]*)", out):
@@ -286,6 +297,9 @@ class Daemon:
         self.generation = 0                      # 每轮单调递增;打断即 +1
         self.deadline = 0.0                      # LISTENING 窗口到期时刻
         self.mic_resume_ts = 0.0                 # 半双工:此刻前不喂 VAD
+        self.mic_dbfs = -99.0                    # 最近一块 PCM 的 RMS 电平
+        self.mic_peak_dbfs = -99.0               # LEVEL_PEAK_S 窗口内的峰值
+        self.mic_peak_ts = 0.0
 
         # 音频设备(按名发现,失败置 None → /health audio:missing)
         self.cap_card: str | None = None
@@ -309,6 +323,7 @@ class Daemon:
         # 音频缺失去重 + 恢复提示配对
         self._audio_err_ts = 0.0
         self._audio_was_broken = False
+        self._probe_warn_ts = 0.0
 
         # 模型(启动时加载)
         self.rec = None                          # SenseVoice OfflineRecognizer
@@ -372,10 +387,30 @@ class Daemon:
     # ------------------------------------------------------------------ #
     # 音频设备发现
     # ------------------------------------------------------------------ #
+    def _warn_probe(self, e: Exception) -> None:
+        """探测跑不动时的提示,60s 至多一条。故意不是 error:音频还在用,这只是
+        "板子忙得连 fork 都慢了"的信号——多半是内存吃紧在换页。"""
+        if time.time() - self._probe_warn_ts < 60.0:
+            return
+        self._probe_warn_ts = time.time()
+        print(f"[voice-daemon] audio probe slow/failed, keeping current cards: {e}",
+              flush=True)
+
     async def discover_audio(self) -> None:
         loop = asyncio.get_running_loop()
-        self.cap_card = await loop.run_in_executor(None, _discover_card, "capture")
-        self.play_card = await loop.run_in_executor(None, _discover_card, "playback")
+        try:
+            cap = await loop.run_in_executor(None, _discover_card, "capture")
+            play = await loop.run_in_executor(None, _discover_card, "playback")
+        except ProbeFailed as e:
+            # 探测跑不动 ≠ 声卡没了。已经握着可用卡就原样留着,别把好通路拆了;
+            # watch loop 5s 后自然再试一次。从没发现过卡则维持缺失态。
+            if self.audio_ok:
+                self._warn_probe(e)
+                return
+            cap = play = None
+        else:
+            self._probe_warn_ts = 0.0
+        self.cap_card, self.play_card = cap, play
         self.audio_ok = bool(self.cap_card and self.play_card)
         if not self.audio_ok:
             # 缺失期去重:capture 重启每 0.3s 会走到这里,10s 至多报一次
@@ -503,8 +538,25 @@ class Daemon:
             await self.discover_audio()
             await asyncio.sleep(0.3)                            # 限速重启
 
+    def _note_level(self, pcm) -> None:
+        """本块 RMS -> dBFS,并保留最近 LEVEL_PEAK_S 秒的最大值。峰值才是有用的
+        那个数:说话是断续的,平均会被静音段拉平。"""
+        if pcm.size == 0:
+            return
+        x = pcm.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(x * x)))
+        self.mic_dbfs = float(20.0 * np.log10(max(rms, 1e-9)))
+        now = time.time()
+        if self.mic_dbfs >= self.mic_peak_dbfs or now - self.mic_peak_ts > LEVEL_PEAK_S:
+            self.mic_peak_dbfs = self.mic_dbfs
+            self.mic_peak_ts = now
+
     def _handle_chunk(self, data: bytes) -> None:
         """一块 PCM。LISTENING 走正常截句;SPEAKING 开麦做打断检测;其余丢弃。"""
+        # 电平遥测:在闸门之前算,丢弃期也照报——"麦克风到底听没听见我"是排查
+        # ASR 不出字的第一个问题,而这台 MCP01 带硬件降噪门(静时输出近似静音,
+        # ALSA 增益调了没用),光看波形本底判断不了,必须有说话时的实测值。
+        self._note_level(np.frombuffer(data, dtype=np.int16))
         listening = (self.state == LISTENING and time.time() >= self.mic_resume_ts)
         barge = (BARGE_IN and self.state == SPEAKING)
         if not (listening or barge):
@@ -1005,7 +1057,17 @@ class Daemon:
             return
         finally:
             if gen == self.generation:
-                self.set_state(prev if prev in (LISTENING,) else IDLE)
+                # 回落目标看"麦克风窗口现在还开着吗",不是播报前的旧快照:播报
+                # 期间按开麦时 do_listen 只刷新 deadline(故意不打断播报),旧
+                # 快照会把这次请求丢掉 —— 播完回 IDLE、采集循环随即退出,麦克风
+                # 再也不开。这也正是 SPEAKING → LISTENING 的半双工约定。
+                live = prev == LISTENING or (self.deadline
+                                             and time.time() < self.deadline)
+                if live:
+                    self.set_state(LISTENING)
+                    await self.start_capture()   # 幂等:活着就直接返回
+                else:
+                    self.set_state(IDLE)
 
     # ------------------------------------------------------------------ #
     # 窗口到期
@@ -1095,6 +1157,8 @@ class Daemon:
             "hermes_key": bool(HERMES_KEY),
             "barge_in": BARGE_IN,
             "window_deadline": round(self.deadline, 1) if self.deadline else None,
+            "mic_dbfs": round(self.mic_dbfs, 1),
+            "mic_peak_dbfs": round(self.mic_peak_dbfs, 1),
             "generation": self.generation,
             "mem_rss_mb": _rss_mb(),
             "last_error": self.last_error,
