@@ -24,6 +24,7 @@ import serial
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
+from fps_diag import FpsDiag
 
 PORT = os.environ.get(
     'LD19_PORT',
@@ -78,6 +79,7 @@ class LD19(Node):
     def __init__(self):
         super().__init__('ld19_lidar')
         self.pub = self.create_publisher(LaserScan, TOPIC, 1)
+        self.diag = FpsDiag(self, 'ld19_lidar')
         self.ser = serial.Serial(PORT, BAUD, timeout=1.0)
         self.points = []           # (angle_deg_lidar, dist_m, conf) of current rev
         self.prev_start = None
@@ -152,6 +154,7 @@ class LD19(Node):
         m.ranges = ranges
         m.intensities = intens
         self.pub.publish(m)
+        self.diag.bump()
 
     # -- lifecycle ------------------------------------------------------
     def _watchdog(self):

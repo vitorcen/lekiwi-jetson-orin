@@ -21,6 +21,11 @@
 | 🎙 **语音 Voice** | ✅ | voice-daemon(:8092)麦克风对话流;半双工,播报中可打断 |
 | 🤖 **ROS 2** | ✅ | 前端直连 rosbridge(:9090,只读订阅):雷达 /scan 极坐标图 + 深度/前视/腕部三路 JPEG 预览;控制仍走 ZeroMQ。整体计划见 `docs/ros2-integration-plan.html` |
 
+ROS Tab 角标三级帧率全为实测:「采集」= 相机/传感器真实交付率、「发布」= 板端节点
+ROS 输出率(两者由节点自数、1Hz 报 `/diagnostics`,节流污染不到),「预览」= rosbridge
+订阅端节流后到达率(`ros.js` `IMG_THROTTLE_MS=100` → ~10fps)。预览走
+JSON+base64+WebSocket,10fps 是带宽/流畅甜点;录数据集是 lerobot 30fps 直录另一条路。
+
 视觉/语音两个 Tab 的 Bearer token 由板端 daemon 生成,需同步到本机(`scp
 jatson@<board-ip>:work/lekiwi-jatson-orin/{vlm,voice}/token` 到本机 repo 对应目录),
 GUI 读取位置由 `config.json` 的 `tokenDir` 指定(缺省 `~/work/lekiwi-jatson-orin`)。

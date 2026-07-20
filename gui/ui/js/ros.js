@@ -44,6 +44,34 @@ for (const f of IMG_FEEDS) feed[f.key] = { at: 0, hz: 0 };
 
 function topicOf(f) { return $(f.topicEl).value.trim() || f.def; }
 
+// Source-side truth: each board node self-reports its real publish fps on
+// /diagnostics (1 Hz) — the only rate rosbridge throttling cannot distort.
+const DIAG_KEY = { depth_preview: 'depth', front_cam: 'front',
+                   wrist_cam: 'wrist', ld19_lidar: 'scan' };
+const DIAG_STALE_MS = 3000;
+
+function handleDiag(msg) {
+  for (const st of msg.status || []) {
+    const key = DIAG_KEY[st.name];
+    if (!key) continue;
+    const f = feed[key];
+    for (const v of st.values || []) {
+      if (v.key === 'fps') f.src = parseFloat(v.value);
+      else if (v.key === 'cap_fps') f.cap = parseFloat(v.value);
+    }
+    f.srcAt = Date.now();
+  }
+}
+
+// 采集 = sensor/camera real delivery rate, 发布 = node's ROS output rate —
+// both self-measured on the board, both go stale (hidden) if diag stops.
+function srcLabel(key) {
+  const f = feed[key];
+  if (!f.srcAt || Date.now() - f.srcAt >= DIAG_STALE_MS) return '';
+  const cap = f.cap != null ? `采集 ${f.cap.toFixed(1)} · ` : '';
+  return `${cap}发布 ${f.src.toFixed(1)} · `;
+}
+
 function curUrl() {
   const ip = ($('rosip') && $('rosip').value.trim()) || '';
   const port = ($('rosport') && $('rosport').value.trim()) || '9090';
@@ -85,6 +113,7 @@ function resubscribeAll() {
   for (const f of IMG_FEEDS)
     subscribe('sub:' + f.key, topicOf(f),
               'sensor_msgs/msg/CompressedImage', IMG_THROTTLE_MS);
+  subscribe('sub:diag', '/diagnostics', 'diagnostic_msgs/msg/DiagnosticArray', 0);
 }
 
 function connect() {
@@ -106,6 +135,7 @@ function connect() {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
     if (m.op !== 'publish') return;
+    if (m.topic === '/diagnostics') { handleDiag(m.msg); return; }
     if (m.topic === ($('scanTopic').value.trim() || '/scan')) { paintScan(m.msg); return; }
     const f = IMG_FEEDS.find(x => m.topic === topicOf(x));
     if (f) paintImage(f, m.msg);
@@ -184,6 +214,7 @@ function paintScan(msg) {
   ctx.lineTo(cx + 5 * dpr, cy + 5 * dpr);
   ctx.closePath(); ctx.fill();
 
+  // scan is NOT throttled below its native 10 Hz, so this one is the real rate
   $('scanMeta').textContent =
     `${n} 点 · ${feed.scan.hz.toFixed(1)} Hz · 最近 ${isFinite(nearest) ? nearest.toFixed(2) + 'm' : '—'}`;
 }
@@ -198,7 +229,10 @@ function paintImage(f, msg) {
   img.src = `data:image/${fmt};base64,` + msg.data;
   img.classList.add('live');
   $(f.key + 'Ph').style.display = 'none';
-  $(f.key + 'Meta').textContent = `${feed[f.key].hz.toFixed(1)} fps`;
+  // 源 = board node's self-reported publish rate (/diagnostics, real);
+  // 预览 = throttled rosbridge delivery rate here (~10 fps by IMG_THROTTLE_MS)
+  $(f.key + 'Meta').textContent =
+    `${srcLabel(f.key)}预览 ${feed[f.key].hz.toFixed(1)} fps`;
 }
 
 // ---- freshness badges (one authority, ticked at 2 Hz) --------------------

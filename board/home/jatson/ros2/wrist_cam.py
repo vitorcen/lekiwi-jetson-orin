@@ -15,6 +15,7 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
+from fps_diag import FpsDiag
 
 DEV = os.environ.get(
     'WRIST_CAM_DEV', '/dev/v4l/by-id/usb-XHH-260128-A_2M-video-index0')
@@ -28,6 +29,7 @@ class WristCam(Node):
     def __init__(self):
         super().__init__('wrist_cam')
         self.pub = self.create_publisher(CompressedImage, TOPIC, 1)
+        self.diag = FpsDiag(self, 'wrist_cam')
         self.want = False            # demand flag, flipped by the timer
         self.latest = None
         self.seq = 0
@@ -69,6 +71,7 @@ class WristCam(Node):
                 continue
             self.latest = frame
             self.seq += 1
+            self.diag.bump('cap_fps')          # true camera delivery rate
 
     def _tick(self):
         self.want = self.pub.get_subscription_count() > 0
@@ -84,6 +87,7 @@ class WristCam(Node):
         m.format = 'jpeg'
         m.data = jpg.tobytes()
         self.pub.publish(m)
+        self.diag.bump()
 
 
 def main():

@@ -33,6 +33,9 @@ rclpy = _stub('rclpy')
 rclpy.node = _stub('rclpy.node', Node=_Node)
 _stub('sensor_msgs')
 _stub('sensor_msgs.msg', LaserScan=MagicMock(), CompressedImage=MagicMock())
+_stub('diagnostic_msgs')
+_stub('diagnostic_msgs.msg', DiagnosticArray=MagicMock(),
+      DiagnosticStatus=MagicMock(), KeyValue=MagicMock())
 _stub('serial', Serial=MagicMock())
 _stub('zmq', PULL=7, RCVHWM=23, POLLIN=1, NOBLOCK=1,
       Context=MagicMock(), Poller=MagicMock(), Again=Exception)

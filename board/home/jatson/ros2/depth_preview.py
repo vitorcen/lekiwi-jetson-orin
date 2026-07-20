@@ -27,6 +27,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 from primesense import openni2
 from primesense import _openni2 as c_api
+from fps_diag import FpsDiag
 
 OPENNI_LIB = os.environ.get('ASTRA_OPENNI_LIB',
                             os.path.expanduser('~/openni2_redist'))
@@ -49,6 +50,7 @@ class DepthPreview(Node):
     def __init__(self):
         super().__init__('depth_preview')
         self.pub = self.create_publisher(CompressedImage, TOPIC, 1)
+        self.diag = FpsDiag(self, 'depth_preview')
         self.run = True
         self.latest = None
         self.seq = 0
@@ -82,6 +84,7 @@ class DepthPreview(Node):
                 self.latest = a.reshape(f.height, f.width).copy()
                 self.seq += 1
                 self.last_mono = time.monotonic()
+                self.diag.bump('cap_fps')      # true sensor delivery rate
             except Exception as e:                       # noqa: BLE001
                 self.get_logger().error(f'depth read failed: {e}')
                 self.fatal = True
@@ -117,6 +120,7 @@ class DepthPreview(Node):
         m.format = 'jpeg'
         m.data = jpg.tobytes()
         self.pub.publish(m)
+        self.diag.bump()
 
     def shutdown(self):
         self.run = False
