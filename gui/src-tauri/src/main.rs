@@ -494,6 +494,19 @@ fn zmq_arm_relax(state: State<'_, Zmq>) -> Result<(), String> {
         .map_err(|_| "zmq worker is gone".to_string())
 }
 
+/// Latch base_host's safety master switch. on=false freezes actuation (wheels
+/// zeroed, arm goals dropped, holding torque kept) while the whole command
+/// chain — recv, priority mux, telemetry — keeps running for debugging.
+/// Actual state is echoed back via sysinfo's `motion` line, not assumed here.
+#[tauri::command]
+fn zmq_set_motion(on: bool, state: State<'_, Zmq>) -> Result<(), String> {
+    let v = if on { 1 } else { 0 };
+    state
+        .tx
+        .send(Req::SendJson(format!("{{\"safety.motion\": {v}}}")))
+        .map_err(|_| "zmq worker is gone".to_string())
+}
+
 /// Point the log SUB at the board's PUB bus (same IP as the command socket,
 /// fixed port 5556). Idempotent: re-issuing on reconnect just re-subscribes.
 #[tauri::command]
@@ -565,6 +578,7 @@ async fn zmq_status(state: State<'_, Zmq>) -> Result<Option<String>, String> {
 // - disk  <used_MB> <total_MB>   of /
 // - pwr   <VDD_IN mV> <VDD_IN mA> from the INA3221   (board draw = host power)
 // - sbatt <servo pack volts>  (base_host publishes it; empty when base is down)
+// - motion <1|0 safety master switch; empty = never toggled (defaults on)>
 const SYSINFO_SH: &str = concat!(
     "printf 'temp %s\\n' \"$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -rn | head -1)\";",
     "printf 'cpu %s %s\\n' \"$(cut -d' ' -f1 /proc/loadavg)\" \"$(nproc)\";",
@@ -574,7 +588,8 @@ const SYSINFO_SH: &str = concat!(
     "for h in /sys/class/hwmon/hwmon*; do if [ \"$(cat $h/name 2>/dev/null)\" = ina3221 ]; then ",
     "printf 'pwr %s %s\\n' \"$(cat $h/in1_input)\" \"$(cat $h/curr1_input)\"; break; fi; done;",
     "printf 'sbatt %s\\n' \"$(cat /tmp/lekiwi_batt 2>/dev/null)\";",
-    "printf 'sarm %s\\n' \"$(cat /tmp/lekiwi_arm 2>/dev/null)\"",
+    "printf 'sarm %s\\n' \"$(cat /tmp/lekiwi_arm 2>/dev/null)\";",
+    "printf 'motion %s\\n' \"$(cat /tmp/lekiwi_motion 2>/dev/null)\"",
 );
 
 /// SSH to the board and read its vitals. BatchMode=yes fails fast (no password
@@ -773,12 +788,26 @@ async fn vlm_describe(ip: String, prompt: String) -> Result<String, String> {
 
 /// Promote/demote the daemon between "idle" and "watch" (continuous captioning).
 #[tauri::command]
-async fn vlm_set_state(ip: String, state: String) -> Result<String, String> {
+async fn vlm_set_state(
+    ip: String,
+    state: Option<String>,
+    interval: Option<f64>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let auth = vlm_auth()?;
-        let body = serde_json::json!({ "state": state }).to_string();
+        // Both fields optional: state alone starts/stops 解读, interval alone
+        // retunes the cadence without disturbing the current state.
+        let mut b = serde_json::Map::new();
+        if let Some(s) = state {
+            b.insert("state".into(), serde_json::Value::from(s));
+        }
+        if let Some(i) = interval {
+            b.insert("interval".into(), serde_json::Value::from(i));
+        }
+        let body = serde_json::Value::Object(b).to_string();
         vlm_agent(5)
             .post(&vlm_url(&ip, "/state"))
+            .timeout(Duration::from_secs(5))
             .set("Authorization", &auth)
             .set("Content-Type", "application/json")
             .send_string(&body)
@@ -913,6 +942,7 @@ fn main() {
             leader_disconnect,
             zmq_arm_mid,
             zmq_arm_relax,
+            zmq_set_motion,
             log_connect,
             vlm_health,
             vlm_service,

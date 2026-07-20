@@ -78,8 +78,33 @@ function logDrive() {
 }
 
 function setState(text, cls) {
-  const a = $('zmqState'), b = $('connPill');
-  for (const el of [a, b]) { el.textContent = text; el.className = 'pill ' + cls; }
+  const el = $('zmqState');
+  el.textContent = text;
+  el.className = 'pill ' + cls;
+}
+
+// ---- safety master switch ------------------------------------------------
+// The switch is LATCHED in base_host (/tmp/lekiwi_motion): off = actuation
+// frozen, command chain still runs — for debugging the pipeline motor-free.
+// This paints from the board-reported state (health.js sysinfo `motion` line);
+// a click sends the toggle and paints optimistically until the next report.
+
+export function paintMotion(v) {   // '1' on | '0' off | null unknown/offline
+  const b = $('motionBtn');
+  if (!b) return;
+  b.dataset.state = v == null ? '' : v;
+  b.disabled = v == null;
+  const off = v === '0';
+  b.textContent = off ? '▶ 恢复电机输出' : '🛑 切断电机输出';
+  b.classList.toggle('cut', off);
+}
+
+function toggleMotion() {
+  if (!invoke) return;
+  const on = $('motionBtn').dataset.state === '0';   // currently off -> enable
+  invoke('zmq_set_motion', { on }).catch(() => {});
+  paintMotion(on ? '1' : '0');
+  logLine('系统', on ? '恢复电机输出' : '已切断电机输出（安全调试）');
 }
 
 // ---- command stream ------------------------------------------------------
@@ -217,6 +242,8 @@ export function onLeaveZmq() { dropFocus(); }
 // ---- wiring --------------------------------------------------------------
 
 $('connBtn').onclick = connect;
+$('motionBtn').onclick = toggleMotion;
+paintMotion(null);        // unknown until the first sysinfo report lands
 document.querySelectorAll('.spd').forEach(b => b.onclick = () => setSpeed(+b.dataset.i));
 
 // The whole teleop panel is the focus/keyboard target — clicking the keypad OR

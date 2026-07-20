@@ -7,6 +7,7 @@
 //   🔋 舵机  — servo pack voltage (WitMotion 11.1 V 3S) via base_host, turned
 //             into a rough %. Offline when base_host isn't publishing.
 import { $, invoke } from './state.js';
+import { paintMotion } from './zmq.js';
 
 // Paint one mini gauge: width = pct, colour ramps blue→amber→red past warnHi.
 function bar(fillId, pct, warnHi = 85, midHi = 65) {
@@ -24,6 +25,7 @@ function offline() {
   }
   for (const id of ['battFill', 'cpuFill', 'gpuFill', 'ramFill', 'hdFill'])
     $(id).style.width = '0';
+  paintMotion(null);        // board unreachable -> switch state unknown
 }
 
 // Servo pack: 3S Li-Po, 12.6 V full .. 9.9 V empty (3.3 V/cell). Rough — sags
@@ -103,6 +105,10 @@ function paint(kv) {
     $('tempTxt').textContent = t.toFixed(0) + '°C';
     $('tempTxt').style.color = t > 80 ? '#f38ba8' : t > 65 ? '#f9e2af' : '#cdd6f4';
   }
+
+  // motion: safety master switch as base_host latched it ("" = never toggled,
+  // which means the default: enabled).
+  paintMotion(kv.motion && kv.motion[0] === '0' ? '0' : '1');
 
   $('sbDot').classList.add('up');
 }

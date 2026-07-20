@@ -201,7 +201,7 @@ $('aListenBtn').onclick = async () => {
   if (!invoke || !online) return;
   try {
     if (vstate === 'idle') {
-      const mins = Math.max(1, Math.min(60, +$('aWin').value || 8));
+      const mins = Math.max(1, Math.min(60, +$('aWin').value || 30));
       await invoke('voice_post', {
         ip: curIp(), path: '/listen',
         body: JSON.stringify({ window_s: mins * 60 }),
@@ -287,3 +287,12 @@ $('asvcAuto') && ($('asvcAuto').onchange = async e => {
     cb.disabled = false;
   }
 });
+
+// 清空: local display only — the daemon's own feed/history is untouched, and
+// lastSeq stays put so we don't re-fetch what was just cleared. curAnswer must
+// be dropped too: it points at a row that is about to leave the DOM, and a
+// streaming answer would otherwise append into a detached element forever.
+$('voClear').onclick = () => {
+  $('vofeed').innerHTML = '';
+  curAnswer = null;
+};

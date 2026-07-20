@@ -68,6 +68,11 @@ function paintHealth(h) {
   // Reconcile with the daemon: if it auto-demoted (safety net) while we thought
   // we were 解读中, reflect that and flip the button back.
   if (watching && h && h.state !== 'watch') setWatching(false);
+  // The daemon is the authority on the cadence (it clamps); mirror it back
+  // unless the user is mid-edit in that field.
+  const iv = $('vlmInterval');
+  if (h && h.watch_interval != null && document.activeElement !== iv)
+    iv.value = String(h.watch_interval);
   $('vLlama').textContent = 'llama ' + (h && h.llama_up ? '✓' : '✕');
   $('vLlama').style.color = h && h.llama_up ? '#7ee2a8' : '#f38ba8';
   $('vCam').textContent = '相机 ' + (h && h.camera ? '✓' : '✕');
@@ -332,9 +337,27 @@ $('vconnBtn').onclick = () => {
 $('vlmWatchBtn').onclick = () => {
   if (!invoke || !online) return;
   const want = !watching;
-  invoke('vlm_set_state', { ip: curIp(), state: want ? 'watch' : 'idle' }).catch(() => {});
+  invoke('vlm_set_state', {
+    ip: curIp(), state: want ? 'watch' : 'idle', interval: curInterval(),
+  }).catch(() => {});
   setWatching(want);
 };
+
+// 解读周期 (s). The daemon owns the real value and clamps it; this input is
+// pushed on change and on every 开始解读, and reconciled from /health.
+function curInterval() {
+  const v = parseFloat($('vlmInterval').value);
+  return Number.isFinite(v) ? v : 10;
+}
+$('vlmInterval').addEventListener('change', () => {
+  if (!invoke) return;
+  // interval only — retunes a running watch loop without stopping it.
+  invoke('vlm_set_state', { ip: curIp(), interval: curInterval() }).catch(() => {});
+});
+
+// 清空: local display only. The daemon's caption ring is untouched, so lastSeq
+// must stay as-is or the next poll would re-add the caption we just cleared.
+$('capClear').onclick = () => { $('capfeed').innerHTML = ''; };
 
 $('vlmAskBtn').onclick = async () => {
   if (!invoke) return;

@@ -17,14 +17,21 @@
 | Tab | 状态 | 做什么 |
 |---|---|---|
 | 🔌 **ZeroMQ 遥控** | ✅ | 键盘 WASD/QE 开车 + 主臂遥操作,走原生 lerobot ZMQ 通道;底部日志栏(手柄/键盘/主臂回传)只在本 Tab 显示 |
-| 👁 **视觉 Vision** | ✅ | vlm-daemon(:8090)相机画面 + Qwen-VL 本地解读;进 Tab 自动出画面,解读手动开 |
-| 🎙 **语音 Voice** | ✅ | voice-daemon(:8092)麦克风对话流;半双工,播报中可打断 |
+| 👁 **视觉 Vision** | ✅ | vlm-daemon(:8090)相机画面 + Qwen-VL 本地解读;进 Tab 自动出画面,解读手动开,周期可调(默认 10s) |
+| 🎙 **语音 Voice** | ✅ | voice-daemon(:8092)麦克风对话流;半双工,播报中可打断;麦克风常开窗口默认 30 分钟 |
 | 🤖 **ROS 2** | ✅ | 前端直连 rosbridge(:9090,只读订阅):雷达 /scan 极坐标图 + 深度/前视/腕部三路 JPEG 预览;控制仍走 ZeroMQ。整体计划见 `docs/ros2-integration-plan.html` |
 
 ROS Tab 角标三级帧率全为实测:「采集」= 相机/传感器真实交付率、「发布」= 板端节点
 ROS 输出率(两者由节点自数、1Hz 报 `/diagnostics`,节流污染不到),「预览」= rosbridge
 订阅端节流后到达率(`ros.js` `IMG_THROTTLE_MS=100` → ~10fps)。预览走
 JSON+base64+WebSocket,10fps 是带宽/流畅甜点;录数据集是 lerobot 30fps 直录另一条路。
+
+Vision 的「每 N 秒一次」是**自动解读流的周期,含推理耗时**——10s 周期下推理花 4s 就
+歇 6s,你设多少就是多少,不随模型延迟漂移;推理慢过周期则连着跑。板端 `POST /state`
+的 `interval` 是唯一真相,GUI 输入框由 `/health` 回读校正。这只管这条自动流:**提问、
+以及 LLM/MCP 走 `/look` 的实时查询都是按需推理,不受此设置影响**(周期调长只是让
+`/look` 更常命中"缓存已过期"从而自己刷一帧)。两个 Tab 的「清空」只清本机显示,
+板端 caption ring / 对话历史不动。
 
 视觉/语音两个 Tab 的 Bearer token 由板端 daemon 生成,需同步到本机(`scp
 jatson@<board-ip>:work/lekiwi-jatson-orin/{vlm,voice}/token` 到本机 repo 对应目录),
@@ -63,6 +70,12 @@ GUI 读取位置由 `config.json` 的 `tokenDir` 指定(缺省 `~/work/lekiwi-ja
    | 空格 | 急停 | | | |
 
 4. 松手即停；切走 Tab、窗口失焦、页面隐藏都会自动停车（dead-man）。
+
+**安全总开关**：连接行的「🛑 切断电机输出」把 base_host 闩锁进冻结态（`safety.motion`
+线协议键，状态存板端 `/tmp/lekiwi_motion`，服务重启不丢、整机重启复位为开）——轮子
+清零、机械臂不写新目标（保持力矩不泄，抬着的臂不会砸下），但收包、优先级仲裁、
+日志、电池遥测全部照常，用于**不动电机地调试整条业务链路**。按钮显示的是板端经
+sysinfo 回报的真实状态（≤4s 刷新），不是本地假设。
 
 **先把底盘架空再试。**
 

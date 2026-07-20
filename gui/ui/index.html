@@ -9,8 +9,6 @@
 
 <header>
   <h1>🥝 LeKiwi 控制台<span class="hsub">Orin · lerobot ZMQ</span></h1>
-  <span class="sep"></span>
-  <span id="connPill" class="pill bad">未连接</span>
 </header>
 
 <!-- ===================== 顶部状态栏 System status bar ===================== -->
@@ -95,6 +93,8 @@
     </label>
     <button id="connBtn" class="primary">连接</button>
     <span id="zmqState" class="pill bad">未连接</span>
+    <button id="motionBtn" data-state=""
+            title="安全总开关:切断后 base_host 不再输出电机指令(轮停、臂冻结保持力矩),收包/仲裁/日志照常,用于安全调试业务链路。状态由板端回报。">🛑 切断电机输出</button>
     <span class="hint">板端 <code>base_host</code> 已随 systemd 开机自启（车通电即可连）；
       没装过先跑一次 <code>scripts/setup_board.sh &lt;board-ip&gt;</code></span>
   </div>
@@ -245,7 +245,12 @@
       <h2>实时解读 <span class="en">Live captions</span></h2>
       <div class="watchrow">
         <button id="vlmWatchBtn" class="primary" disabled>开始解读</button>
-        <span id="vWatchHint" class="tip">「开始解读」后每秒对画面推理一次（占用 GPU）；「停止解读」或离开本页即停。</span>
+        <label class="ivlabel">每
+          <input id="vlmInterval" type="number" min="1" max="300" step="1" value="10">
+          秒一次</label>
+        <button id="capClear" class="minibtn" title="清空下方解读记录（仅本机显示，不影响板端）">清空</button>
+        <span id="vWatchHint" class="tip">周期<b>含推理耗时</b>，推理慢过周期就连着跑。<br>
+          只管自动解读流，不影响提问和 LLM 查询。</span>
       </div>
       <div class="askrow">
         <input id="vlmAsk" type="text" placeholder="问一句（留空则用默认描述）… 例：桌上有什么？">
@@ -282,8 +287,9 @@
       <button id="aListenBtn" class="primary" disabled>开始对话</button>
       <button id="aIntBtn" disabled>打断</button>
       <label class="svcauto" title="按「开始对话」后麦克风常开的时长，期间免按键连续对话；每轮对话自动续期，到期自动关麦。">
-        常开 <input id="aWin" type="number" min="1" max="60" value="8" style="width:52px"> 分钟
+        常开 <input id="aWin" type="number" min="1" max="60" value="30" style="width:52px"> 分钟
       </label>
+      <button id="voClear" class="minibtn" title="清空下方对话记录（仅本机显示，不影响板端）">清空</button>
       <span id="aStage" class="tip">待机</span>
     </div>
     <div class="askrow">
