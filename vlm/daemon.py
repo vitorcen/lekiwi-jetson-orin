@@ -45,7 +45,13 @@ CAMERA_DEV = _env(
 )
 FFMPEG = os.path.expanduser(_env("VLM_FFMPEG", "~/.local/bin/ffmpeg"))
 VIDEO_SIZE = _env("VLM_VIDEO_SIZE", "1280x720")
-WATCH_INTERVAL = float(_env("VLM_WATCH_INTERVAL", "3.0"))
+# Watch cadence: PERIOD between caption starts, inference time INCLUDED — a
+# 10 s period with 4 s inference sleeps 6 s, so the rate the user picks is the
+# rate they get instead of drifting with model latency. Runtime-settable via
+# POST /state; this is only the boot default.
+WATCH_INTERVAL = float(_env("VLM_WATCH_INTERVAL", "10.0"))
+WATCH_INTERVAL_MIN = 1.0
+WATCH_INTERVAL_MAX = 300.0
 DEMOTE_SECONDS = float(_env("VLM_DEMOTE_SECONDS", "90"))
 LLAMA_TIMEOUT = float(_env("VLM_LLAMA_TIMEOUT", "30"))
 GRAB_TIMEOUT = float(_env("VLM_GRAB_TIMEOUT", "10"))
@@ -125,6 +131,7 @@ class Daemon:
 
         # watch loop wakeup
         self._watch_wakeup = asyncio.Event()
+        self.watch_interval = WATCH_INTERVAL   # live, settable via POST /state
 
     # -- activity -------------------------------------------------------- #
     def touch(self) -> None:
@@ -140,6 +147,14 @@ class Daemon:
     def demote_idle(self) -> None:
         if self.state != "idle":
             self.state = "idle"
+
+    def set_watch_interval(self, secs: float) -> float:
+        """Clamp and apply a new watch period. Waking the loop makes it take
+        effect on the current sleep, not only after the next caption."""
+        self.watch_interval = max(WATCH_INTERVAL_MIN,
+                                  min(WATCH_INTERVAL_MAX, float(secs)))
+        self._watch_wakeup.set()
+        return self.watch_interval
 
     # -- fault bookkeeping + staleness diagnosis ------------------------- #
     def _note_camera_error(self, detail: str) -> None:
@@ -168,11 +183,11 @@ class Daemon:
         cap_ts = cap.get("frame_ts") if cap else None
         age = (now - cap_ts) if isinstance(cap_ts, (int, float)) else None
         if self.state == "watch":
-            if age is not None and age > 3 * WATCH_INTERVAL:
+            if age is not None and age > 3 * self.watch_interval:
                 return "watch-stalled"
             return None
         # idle
-        if age is not None and age > 2 * WATCH_INTERVAL:
+        if age is not None and age > 2 * self.watch_interval:
             return "idle"
         return None
 
@@ -555,16 +570,26 @@ class Daemon:
                 self._watch_wakeup.clear()
                 await self._watch_wakeup.wait()
                 continue
+            t0 = time.monotonic()
             res = await self.caption_once(DEFAULT_PROMPT)
             self._store_caption(res)
-            # sleep the interval but wake early on state change
-            try:
-                await asyncio.wait_for(
-                    self._watch_wakeup.wait(), timeout=WATCH_INTERVAL
-                )
-                self._watch_wakeup.clear()
-            except asyncio.TimeoutError:
-                pass
+            # PERIOD, not gap: subtract the inference time just spent, so the
+            # configured interval is the caption-to-caption rate. Inference
+            # slower than the period -> back-to-back, never negative sleep.
+            while True:
+                left = self.watch_interval - (time.monotonic() - t0)
+                if left <= 0:
+                    break
+                try:
+                    # Wake early on state change; also on an interval change,
+                    # which re-enters and re-measures against the NEW period
+                    # (shortening it can end the sleep immediately).
+                    await asyncio.wait_for(self._watch_wakeup.wait(), timeout=left)
+                    self._watch_wakeup.clear()
+                    if self.state != "watch":
+                        break
+                except asyncio.TimeoutError:
+                    break
 
     async def demote_loop(self) -> None:
         while True:
@@ -612,6 +637,7 @@ async def h_health(request: web.Request) -> web.Response:
     d = DAEMON
     return web.json_response({
         "state": d.state,
+        "watch_interval": d.watch_interval,
         "llama_up": await d.llama_up(),
         "camera": {"device": CAMERA_DEV, "last_ok": d.last_grab_ok},
         "camera_fps": d.current_fps(),      # measured; 0 when capture off
@@ -770,15 +796,24 @@ async def h_state(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, ValueError):
         return web.json_response({"error": "invalid json"}, status=400)
     want = body.get("state")
-    if want not in ("idle", "watch"):
+    if want is not None and want not in ("idle", "watch"):
         return web.json_response(
             {"error": "state must be 'idle' or 'watch'"}, status=400
         )
+    # "interval" may come alone (retune while watching) or with a state change.
+    iv = body.get("interval")
+    if iv is not None:
+        try:
+            DAEMON.set_watch_interval(float(iv))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "interval must be a number"},
+                                     status=400)
     if want == "watch":
         DAEMON.promote_watch()
-    else:
+    elif want == "idle":
         DAEMON.demote_idle()
-    return web.json_response({"state": DAEMON.state})
+    return web.json_response({"state": DAEMON.state,
+                              "interval": DAEMON.watch_interval})
 
 
 def make_app() -> web.Application:
@@ -813,7 +848,7 @@ def main() -> None:
     print(
         f"[vlm-daemon] listening on {HTTP_HOST}:{HTTP_PORT} "
         f"llama={LLAMA_URL} camera={CAMERA_DEV} "
-        f"watch_interval={WATCH_INTERVAL}s demote={DEMOTE_SECONDS}s",
+        f"watch_interval={DAEMON.watch_interval}s demote={DEMOTE_SECONDS}s",
         flush=True,
     )
     web.run_app(app, host=HTTP_HOST, port=HTTP_PORT, print=None)

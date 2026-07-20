@@ -38,7 +38,7 @@ Jetson Orin Nano 8GB 上的三层视觉守护栈，为 Hermes 语音大脑提供
 | 状态 | GPU 推理 | 说明 |
 |------|------|-----|
 | `idle`  | 无（llama-server 仍驻留显存，首响快） | 默认态；相机画面仍可轮询 |
-| `watch` | 每 `interval`（默认 3s）→caption | 由 `POST /state {"watch"}` 显式进入（GUI「开始解读」按钮） |
+| `watch` | 每 `interval`（默认 10s，**周期含推理耗时**）→caption | 由 `POST /state {"watch"}` 显式进入（GUI「开始解读」按钮） |
 | `burst` | 单次 `describe` | `/describe` 的瞬时操作，不改变常驻态 |
 
 - **升级到 watch**：现在**只有** `POST /state {"state":"watch"}`（GUI 按钮）。
@@ -90,7 +90,7 @@ Jetson Orin Nano 8GB 上的三层视觉守护栈，为 Hermes 语音大脑提供
 | GET  | `/events` | SSE，每条新**共享槽** caption 推送（含 `frame_b64`）；**连接不再升 `watch`**；断开（末个）启动降级计时 |
 | POST | `/look` | body `{prompt?, max_age_s?}`；get-or-refresh，返回 `{…caption…, cached, stale_reason}`（见上节语义） |
 | POST | `/describe` | body `{prompt?}`；隔离 VQA，返回 `{text, frame_ts, latency_ms, frame_b64, stale_reason}`（失败带 `error`）。**不写共享槽**。有界 latest-wins 队列 |
-| POST | `/state` | body `{state:"idle"\|"watch"}` 手动覆盖，返回 `{state}` |
+| POST | `/state` | body `{state?:"idle"\|"watch", interval?:秒}`，两字段皆可单独给；`interval` 单独发即在线改解读周期（不打断当前状态），钳到 1–300s。返回 `{state, interval}` |
 
 - `camera_fps`：近 2s 实测抓帧帧率，连续抓帧关闭时为 `0`。`capture_on`：连续抓帧是否常驻。
 - `frame_b64`：**被解读那一帧**的缩略图（ffmpeg 缩到 ~320px 宽的 JPEG，base64），供 GUI
@@ -116,7 +116,7 @@ CUDA 版 llama.cpp 编好后：`systemctl --user enable --now llama-server.servi
 
 `VLM_HTTP_HOST`(0.0.0.0) `VLM_HTTP_PORT`(8090) `VLM_LLAMA_URL`(http://127.0.0.1:8091)
 `VLM_CAMERA`(by-id 路径) `VLM_FFMPEG`(~/.local/bin/ffmpeg) `VLM_VIDEO_SIZE`(1280x720)
-`VLM_WATCH_INTERVAL`(3.0) `VLM_DEMOTE_SECONDS`(90) `VLM_LLAMA_TIMEOUT`(30)
+`VLM_WATCH_INTERVAL`(10.0，仅开机缺省，运行期以 `/state` 为准) `VLM_DEMOTE_SECONDS`(90) `VLM_LLAMA_TIMEOUT`(30)
 `VLM_CAPTURE_IDLE_STOP`(10) `VLM_FPS_WINDOW`(2.0) `VLM_THUMB_WIDTH`(320)
 `VLM_LOOK_MAX_AGE`(5.0) `VLM_CAPTION_RING`(16)
 `VLM_DEFAULT_PROMPT` `VLM_TOKEN_FILE`（默认 `vlm/token`）。
