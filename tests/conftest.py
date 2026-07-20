@@ -11,7 +11,7 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-BOARD = pathlib.Path(__file__).resolve().parents[1] / 'board' / 'home' / 'jatson'
+BOARD = pathlib.Path(__file__).resolve().parents[1] / 'board' / 'home' / 'jetson'
 sys.path[:0] = [str(BOARD), str(BOARD / 'ros2')]
 
 

@@ -329,7 +329,7 @@ systemd 启动顺序：<code>base_host → bridge/TF → sensors → safety → 
 <pre>
 本仓库现状：ROS 2「只装未用」。docs/ros2-humble-install.html（安装记录）；
   docs/lekiwi-orin-teleop-plan.html 明确「遥操作不引入 ROS」；GUI 占位在 gui/ui/index.html #page-ros；
-  base_host mux 在 board/home/jatson/base_host.py（BASE_PRIO / BASE_HOLD_S / watchdog）。
+  base_host mux 在 board/home/jetson/base_host.py（BASE_PRIO / BASE_HOLD_S / watchdog）。
 参考项目：/Users/david/work_ai/yahboom-rdk-x5/
   可搬中间件：board/home/sunrise/nav_config/{cmd_vel_mux,joy_teleop,episode_recorder,dog_walk}.py、
   ros2_ws/src/safety_stop/、scripts/replay.sh、.memory/ 13 篇踩坑笔记（nav2-plan / safety-stop /

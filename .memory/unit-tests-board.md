@@ -10,7 +10,7 @@ metadata:
 mock 自己);JS(ros.js)不测(为三行坐标变换引入 JS 测试链是负资产)。
 
 - `tests/conftest.py`:stub rclpy/serial/zmq/cv2/primesense(rclpy.node.Node
-  必须是真 class,MagicMock 实例不能当基类),sys.path 指向 board/home/jatson。
+  必须是真 class,MagicMock 实例不能当基类),sys.path 指向 board/home/jetson。
   **Mac 跑法:`uv run --with pytest --with numpy pytest tests/ -q`**(系统 python
   无 numpy;board 端 Python 3.10,Mac 3.14,被测代码两边兼容)。
 - `test_base_host.py`:solve 运动学(前进/横移/自转对称性 + 超速整体缩放不变量 +

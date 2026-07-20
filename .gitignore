@@ -8,6 +8,7 @@ Linux_for_Tegra/
 flash.log
 __pycache__/
 temp/
+.DS_Store
 
 # voice frontend: venv + downloaded ASR/TTS/VAD models (re-fetch via voice/setup.sh)
 voice/.venv/

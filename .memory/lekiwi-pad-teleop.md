@@ -14,11 +14,11 @@ metadata:
 （ROS 2 Tab 留给建图导航）。读手柄用 evdev 而非浏览器 Gamepad API
 （Linux WebKitGTK 的 Gamepad API 不可靠，且 daemon 本就无 GUI）。
 
-**开机自启**：`/etc/systemd/system/{base_host,pad_teleop}.service`（User=jatson，
+**开机自启**：`/etc/systemd/system/{base_host,pad_teleop}.service`（User=jetson，
 Restart=always）。板端源码在项目 **`board/`**（1:1 镜像板子文件系统：
-`board/home/jatson/*.py` + `board/etc/systemd/system/*.service`），用
+`board/home/jetson/*.py` + `board/etc/systemd/system/*.service`），用
 部署脚本：首次 **`scripts/setup_board.sh <ip>`**（装单元 + 一条范围极小的
-`/etc/sudoers.d/lekiwi-deploy` NOPASSWD 规则，仅允许 jatson 免密 restart/stop/start/
+`/etc/sudoers.d/lekiwi-deploy` NOPASSWD 规则，仅允许 jetson 免密 restart/stop/start/
 daemon-reload 这两个服务，无密码可入库），之后 **`scripts/deploy_board.sh <ip>`** 全程
 免密 rsync + `sudo systemctl restart`。SSH 公钥认证本机早已配好（`ssh-copy-id` 已生效）。
 板子 sudo 密码只在那**一次** setup 时手动输入，绝不写进任何文件/记忆。

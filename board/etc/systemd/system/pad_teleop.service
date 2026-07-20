@@ -9,8 +9,8 @@ Wants=base_host.service
 StartLimitIntervalSec=0
 
 [Service]
-User=jatson
-ExecStart=/home/jatson/miniconda3/envs/lerobot/bin/python /home/jatson/pad_teleop.py
+User=jetson
+ExecStart=/home/jetson/miniconda3/envs/lerobot/bin/python /home/jetson/pad_teleop.py
 Restart=always
 RestartSec=3
 

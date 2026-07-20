@@ -64,7 +64,7 @@
   <h1>LeKiwi 移植到 Orin Nano：手柄操控底盘与机械臂
     <span class="en">Porting LeKiwi to Jetson Orin Nano — gamepad teleop for the mobile base &amp; SO-101 arm</span>
   </h1>
-  <p class="sub">2026-07-16 · 依据维特智能（WitMotion）语雀教程 4 篇 + 本项目已完成的舵机总线 bring-up 整理 · 板子 jatson@192.168.3.189</p>
+  <p class="sub">2026-07-16 · 依据维特智能（WitMotion）语雀教程 4 篇 + 本项目已完成的舵机总线 bring-up 整理 · 板子 jetson@192.168.3.189</p>
 </header>
 
 <div class="tldr">
@@ -165,7 +165,7 @@
 <tr><td>pip/conda 换清华源</td><td>原样执行；apt 层面板子已换 TUNA + ForceIPv4</td></tr>
 <tr><td>lerobot 固定 commit <code>26ff40ddd784…</code>（huggingface 上游）</td><td>原样执行。树莓派篇用的是 JoyandAI fork + python 3.10，<strong>不采用</strong>——跟 RDK 篇走上游仓库，一套代码少一个变量</td></tr>
 <tr><td><code>pip install -e ".[lekiwi]"</code></td><td>原样执行。遥操作阶段 CPU 版 torch 即可；<strong>别在这个 conda 环境里折腾 CUDA torch</strong>，Jetson 的 GPU 推理用 NVIDIA 官方 wheel，是后续「跑策略」阶段的事，与本篇无关</td></tr>
-<tr><td>串口设备 <code>/dev/ttyACM0</code> + <code>chmod 666</code></td><td>设备名以 <code>lerobot-find-port</code> 实测为准（CDC 板出 ttyACM，CH340 板出 ttyUSB——后者驱动本项目已自编装好）。权限用 dialout 组（jatson 已在组内），<strong>不需要 chmod 666</strong></td></tr>
+<tr><td>串口设备 <code>/dev/ttyACM0</code> + <code>chmod 666</code></td><td>设备名以 <code>lerobot-find-port</code> 实测为准（CDC 板出 ttyACM，CH340 板出 ttyUSB——后者驱动本项目已自编装好）。权限用 dialout 组（jetson 已在组内），<strong>不需要 chmod 666</strong></td></tr>
 <tr><td>树莓派跑 <code>lekiwi_host</code>，PC 跑 teleoperate，中间过 Wi-Fi</td><td><strong>两者都跑在 Orin</strong>，<code>remote_ip=127.0.0.1</code>。Orin 8GB 远强于树莓派，没必要拆两台机器；以后想用 PC 大屏看相机流，再把客户端挪出去，架构不用改</td></tr>
 <tr><td>键盘 WASD 控底盘 + Leader 臂示教</td><td>先用键盘验证链路（§3 第 3 步），再换手柄（§4）</td></tr>
 </table>
@@ -291,7 +291,7 @@ while True:
 <strong>CUDA 12.6</strong> → <code>torch.cuda.is_available()</code> 返回 <strong>False</strong>（"NVIDIA driver is too old, found 12060"）。
 遥操作/标定纯 CPU，<strong>本篇不受影响</strong>；等到 §6 跑策略推理时必须换 <strong>NVIDIA 官方 Jetson torch wheel</strong>
 （JetPack 6.x / CUDA 12），并开 Super 模式。别指望 PyPI 的 torch 能用上 Orin 的 GPU。</div>
-<div class="box ok"><strong>⑥ 手柄设备权限</strong><code>/dev/input/js*</code>、<code>event*</code> 通常 input 组可读；若 pygame 找不到手柄，先 <code>jstest /dev/input/js0</code>（apt: joystick 包）确认内核层，再查 <code>usermod -aG input jatson</code>。</div>
+<div class="box ok"><strong>⑥ 手柄设备权限</strong><code>/dev/input/js*</code>、<code>event*</code> 通常 input 组可读；若 pygame 找不到手柄，先 <code>jstest /dev/input/js0</code>（apt: joystick 包）确认内核层，再查 <code>usermod -aG input jetson</code>。</div>
 
 <h2>6. 后续路线（本篇不做）<span class="en-h">Later</span></h2>
 <ul>

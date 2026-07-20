@@ -8,8 +8,8 @@ Wants=network-online.target
 Type=simple
 # %h = the user's home; the repo lives under it. Adjust WorkingDirectory if the
 # checkout moves (installer rewrites ExecStart/WorkingDirectory to the real path).
-WorkingDirectory=%h/work/lekiwi-jatson-orin/voice
-ExecStart=%h/work/lekiwi-jatson-orin/voice/.venv/bin/python %h/work/lekiwi-jatson-orin/voice/daemon.py
+WorkingDirectory=%h/work/lekiwi-jetson-orin/voice
+ExecStart=%h/work/lekiwi-jetson-orin/voice/.venv/bin/python %h/work/lekiwi-jetson-orin/voice/daemon.py
 Restart=on-failure
 RestartSec=3
 StartLimitBurst=5

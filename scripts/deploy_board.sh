@@ -9,7 +9,7 @@
 set -euo pipefail
 
 IP=${1:-192.168.3.189}
-USER=jatson
+USER=jetson
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 
 echo "== sync code -> $USER@$IP:/home/$USER =="

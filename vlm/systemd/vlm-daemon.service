@@ -5,11 +5,11 @@ Wants=llama-server.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/work/lekiwi-jatson-orin/vlm
+WorkingDirectory=%h/work/lekiwi-jetson-orin/vlm
 # Runs even when llama-server is down (captions degrade gracefully; /frame.jpg
 # stays up since the camera is independent of the VLM backend).
-ExecStart=%h/work/lekiwi-jatson-orin/vlm/.venv/bin/python \
-    %h/work/lekiwi-jatson-orin/vlm/daemon.py
+ExecStart=%h/work/lekiwi-jetson-orin/vlm/.venv/bin/python \
+    %h/work/lekiwi-jetson-orin/vlm/daemon.py
 Restart=on-failure
 RestartSec=3
 # Make sure ~/.local/bin/ffmpeg is resolvable.

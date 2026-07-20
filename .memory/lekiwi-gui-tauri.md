@@ -72,7 +72,7 @@ PUSH 卡死前端。速度三档严格对齐 lerobot：`0.1/0.25/0.4 m/s`、`30/
 `lerobot-calibrate --robot.type=lekiwi --robot.port=/dev/ttyACM0 --robot.id=orin_kiwi`
 （手摆姿势），之后 host 才起得来。
 
-**解法 — 免标定底盘 host `board/home/jatson/base_host.py`**（2026-07-18）：轮子本就不用
+**解法 — 免标定底盘 host `board/home/jetson/base_host.py`**（2026-07-18）：轮子本就不用
 标定（官方明说），所以写了个只驱动 7/8/9 的 ZMQ host，**同样的线协议**（PULL 5555 收
 `{"x.vel","y.vel","theta.vel"}`），GUI 一行不用改。运动学复用 `base_move.py`（与 lerobot
 零误差）。现由 systemd 管（`scripts/deploy_board.sh` 部署重启，手工 start/stop 脚本已废弃）。
@@ -84,11 +84,11 @@ crate ↔ pyzmq 互通（ZMTP 标准应通），要 GUI 连上架空开车才最
 base_host 只管底盘，不涉及臂/录数据；要完整 lerobot 流程仍走原版+标定。
 
 **顶部状态栏（2026-07-19）**：`index.html` header 下加 `#statusbar`，`ui/js/health.js`
-每 4s 调 Rust `sysinfo(ip)` 命令 → 后端 `ssh -o BatchMode=yes jatson@<ip>` 跑一条
+每 4s 调 Rust `sysinfo(ip)` 命令 → 后端 `ssh -o BatchMode=yes jetson@<ip>` 跑一条
 oneliner 读 `/proc`+sysfs，返回 `key value` 行前端解析。显示：**主机功耗 W**（VDD_IN，
 真实）、**舵机电池 %/V**（来自 base_host 写的 `/tmp/lekiwi_batt`，base_host 没跑时显
 「离线」）、CPU/GPU/统一内存/硬盘/温度。**主机电池不可测**（DC-DC 隔离，见
 [[lekiwi-robot-target]]）故显功耗替代。ssh 走 `std::process::Command` +
 `spawn_blocking`（不占 Tauri async runtime，无新依赖）。base_host 读舵机 reg 62 的
-改动随本功能进 `board/home/jatson/base_host.py`，`scripts/deploy_board.sh` 部署。
+改动随本功能进 `board/home/jetson/base_host.py`，`scripts/deploy_board.sh` 部署。
 浏览器模式（无 invoke）状态栏显示 `--`。

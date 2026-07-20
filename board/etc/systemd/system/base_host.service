@@ -5,9 +5,9 @@ Description=LeKiwi base ZMQ host (wheels 7/8/9)
 After=multi-user.target
 
 [Service]
-User=jatson
+User=jetson
 # by-id path survives USB re-enumeration (ttyACM0 -> ttyACM1 after a bus drop)
-ExecStart=/home/jatson/miniconda3/envs/lerobot/bin/python /home/jatson/base_host.py /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61036495-if00
+ExecStart=/home/jetson/miniconda3/envs/lerobot/bin/python /home/jetson/base_host.py /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61036495-if00
 Restart=always
 RestartSec=3
 

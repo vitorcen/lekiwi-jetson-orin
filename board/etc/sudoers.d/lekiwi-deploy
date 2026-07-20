@@ -3,7 +3,7 @@
 # exact systemctl invocations for these two units only — this grants no root
 # shell and contains no secret, so it is safe to keep in the repo. Installed to
 # /etc/sudoers.d/lekiwi-deploy (mode 0440) by scripts/setup_board.sh.
-jatson ALL=(root) NOPASSWD: /usr/bin/systemctl restart base_host pad_teleop, \
+jetson ALL=(root) NOPASSWD: /usr/bin/systemctl restart base_host pad_teleop, \
                             /usr/bin/systemctl restart base_host, \
                             /usr/bin/systemctl restart pad_teleop, \
                             /usr/bin/systemctl stop base_host, \

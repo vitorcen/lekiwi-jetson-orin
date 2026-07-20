@@ -20,7 +20,7 @@ from fps_diag import FpsDiag
 
 VLM_URL = os.environ.get('VLM_URL', 'http://127.0.0.1:8090')
 TOKEN_FILE = os.environ.get(
-    'VLM_TOKEN_FILE', '/home/jatson/work/lekiwi-jatson-orin/vlm/token')
+    'VLM_TOKEN_FILE', '/home/jetson/work/lekiwi-jetson-orin/vlm/token')
 TOPIC = '/front_cam/compressed'
 PUB_HZ = 10.0
 HTTP_TIMEOUT = 2.0

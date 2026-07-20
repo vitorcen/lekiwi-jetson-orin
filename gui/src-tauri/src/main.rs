@@ -255,7 +255,7 @@ fn load_config() -> String {
 
 /// Directory holding the daemon token files (vlm/token, voice/token, synced
 /// from the board). Config key "tokenDir" points at the repo checkout; the
-/// legacy ~/work/lekiwi-jatson-orin default kept as fallback.
+/// legacy ~/work/lekiwi-jetson-orin default kept as fallback.
 fn token_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let cfg: serde_json::Value =
@@ -266,7 +266,7 @@ fn token_dir() -> std::path::PathBuf {
             .unwrap_or_else(|| d.to_string());
         return std::path::PathBuf::from(d);
     }
-    std::path::PathBuf::from(home).join("work/lekiwi-jatson-orin")
+    std::path::PathBuf::from(home).join("work/lekiwi-jetson-orin")
 }
 
 /// The config file is the ONLY store for connection params — GUI edits write
@@ -628,7 +628,7 @@ async fn sysinfo(ip: String) -> Result<String, String> {
                 "-o", "ControlMaster=auto",
                 "-o", "ControlPath=/tmp/lekiwi-ssh-%r@%h",
                 "-o", "ControlPersist=60s",
-                &format!("jatson@{ip}"),
+                &format!("jetson@{ip}"),
                 SYSINFO_SH,
             ])
             .output()
@@ -668,7 +668,7 @@ async fn vlm_service(ip: String, action: String) -> Result<String, String> {
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=6",
                     "-o", "StrictHostKeyChecking=accept-new",
-                    &format!("jatson@{ip}"),
+                    &format!("jetson@{ip}"),
                     &sc,
                 ])
                 .output()
@@ -934,7 +934,7 @@ async fn voice_service(ip: String, action: String) -> Result<String, String> {
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=6",
                     "-o", "StrictHostKeyChecking=accept-new",
-                    &format!("jatson@{ip}"),
+                    &format!("jetson@{ip}"),
                     &sc,
                 ])
                 .output()

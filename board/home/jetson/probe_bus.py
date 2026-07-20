@@ -6,7 +6,7 @@ crash-looping base_host can't corrupt the scan. All silent = no servo power or
 the data trunk to the first servo is unplugged; a single id silent = that node.
 
   sudo systemctl stop base_host
-  /home/jatson/miniconda3/envs/lerobot/bin/python ~/probe_bus.py
+  /home/jetson/miniconda3/envs/lerobot/bin/python ~/probe_bus.py
   sudo systemctl start base_host
 """
 import sys

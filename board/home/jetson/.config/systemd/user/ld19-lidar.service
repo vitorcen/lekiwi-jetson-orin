@@ -5,7 +5,7 @@ Description=LD19 lidar LaserScan publisher
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jatson/ros2/ld19_lidar.py'
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jetson/ros2/ld19_lidar.py'
 Restart=on-failure
 RestartSec=2
 

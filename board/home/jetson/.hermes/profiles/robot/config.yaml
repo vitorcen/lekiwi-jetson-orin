@@ -29,15 +29,15 @@ skills:
 # Captions are untrusted observations — never a motion trigger (plan §safety).
 mcp_servers:
   vlm:
-    command: /home/jatson/work/lekiwi-jatson-orin/vlm/.venv/bin/python
-    args: ["/home/jatson/work/lekiwi-jatson-orin/vlm/mcp_server.py"]
+    command: /home/jetson/work/lekiwi-jetson-orin/vlm/.venv/bin/python
+    args: ["/home/jetson/work/lekiwi-jetson-orin/vlm/mcp_server.py"]
     timeout: 60
     max_tool_calls: 50
   # Drive: layer-2 schema hard-clamp (≤0.15 m/s, ≤2 s, 0.3 s cooldown); the
   # base_host 0.5 s watchdog backstops a dead MCP. Mounted 2026-07-19 with the
   # owner supervising; unattended operation still gated on base_host v2 arbiter.
   drive:
-    command: /home/jatson/work/lekiwi-jatson-orin/vlm/.venv/bin/python
-    args: ["/home/jatson/work/lekiwi-jatson-orin/drive/mcp_server.py"]
+    command: /home/jetson/work/lekiwi-jetson-orin/vlm/.venv/bin/python
+    args: ["/home/jetson/work/lekiwi-jetson-orin/drive/mcp_server.py"]
     timeout: 30
     max_tool_calls: 30

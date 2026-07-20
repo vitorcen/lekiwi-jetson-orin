@@ -50,7 +50,7 @@ USB 芯片但生不成 `/dev/ttyUSB0`（内核只带 cp210x/ftdi_sio，没 ch341
 认同款 `1a86:7523`）抢走踢掉（dmesg: `interface 0 claimed by ch341 while 'brltty' sets config`）。
 Ubuntu 22.04 CH340 经典坑。解法：`apt remove brltty`（机器人板子无盲文设备，安全）。
 
-**坑 3 — 串口权限**：`jatson` 原不在 `dialout` 组 → `usermod -aG dialout jatson`（需重新登录生效）。
+**坑 3 — 串口权限**：`jetson` 原不在 `dialout` 组 → `usermod -aG dialout jetson`（需重新登录生效）。
 
 **How to apply:** 换舵机 SDK 时优先 Feetech `scservo_sdk` 或 lerobot，波特率 1000000。
 裸协议扫描/控制脚本在板子 `~/scan_servos.py`（ping ID + 读位置/电压/温度）、

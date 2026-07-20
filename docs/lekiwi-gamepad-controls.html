@@ -196,20 +196,20 @@
 手柄  ABS_HAT0X -1.00  底盘转向</code></pre>
 <div class="box ok">
   <strong>键位不对怎么办</strong>
-  按一下那个键，看底部日志打出的真实 <code>BTN_xxx</code> / <code>ABS_xxx</code>，去 <code>board/home/jatson/pad_teleop.py</code> 的 <code>BTN_LABELS</code> / 映射处改，跑 <code>scripts/deploy_board.sh</code> 重新部署即可。无需 ssh 翻 journal。
+  按一下那个键，看底部日志打出的真实 <code>BTN_xxx</code> / <code>ABS_xxx</code>，去 <code>board/home/jetson/pad_teleop.py</code> 的 <code>BTN_LABELS</code> / 映射处改，跑 <code>scripts/deploy_board.sh</code> 重新部署即可。无需 ssh 翻 journal。
 </div>
 
 <h2>部署 <span class="en-h">Deploy</span></h2>
 <pre><code># 首次一次性：ssh 免密 + 装单元 + NOPASSWD 规则（唯一要 sudo 的一次）
-ssh-copy-id jatson@192.168.3.189        # ssh/scp/rsync 从此免密，密码不入库
+ssh-copy-id jetson@192.168.3.189        # ssh/scp/rsync 从此免密，密码不入库
 scripts/setup_board.sh 192.168.3.189    # 只跑一次
 
 # 之后改完 board/ 里的程序，一条命令 rsync + 重启，全程免密
 scripts/deploy_board.sh 192.168.3.189
 
 # 看日志
-ssh jatson@192.168.3.189 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'</code></pre>
-<p class="sub">板端源码在项目 <code>board/</code>(1:1 镜像板子文件系统)：<code>board/home/jatson/pad_teleop.py</code> · <code>base_host.py</code> · <code>probe_bus.py</code>(总线诊断) · <code>board/etc/systemd/system/*.service</code>。</p>
+ssh jetson@192.168.3.189 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'</code></pre>
+<p class="sub">板端源码在项目 <code>board/</code>(1:1 镜像板子文件系统)：<code>board/home/jetson/pad_teleop.py</code> · <code>base_host.py</code> · <code>probe_bus.py</code>(总线诊断) · <code>board/etc/systemd/system/*.service</code>。</p>
 
 </div>
 </body>
