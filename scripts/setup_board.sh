@@ -3,11 +3,11 @@
 # Installs the systemd units + a scoped NOPASSWD sudoers rule, so from then on
 # scripts/deploy_board.sh restarts the services WITHOUT any password.
 #
-# Usage:  scripts/setup_board.sh [ip]        (default 192.168.3.188)
+# Usage:  scripts/setup_board.sh [ip]        (default 192.168.3.189)
 # Prereq: passwordless ssh (ssh-copy-id jatson@<ip>, or a key already in place).
 set -euo pipefail
 
-IP=${1:-192.168.3.188}
+IP=${1:-192.168.3.189}
 USER=jatson
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 

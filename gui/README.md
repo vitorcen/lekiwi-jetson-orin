@@ -17,7 +17,7 @@
 | Tab | 状态 | 做什么 |
 |---|---|---|
 | 🔌 **ZeroMQ 遥控** | ✅ 已实现 | 键盘 WASD/QE 开车，走原生 lerobot ZMQ 通道 |
-| 🤖 **ROS 2** | 占位 | 后续：把 LeKiwi 包成 ROS 2 节点、建图导航等 |
+| 🤖 **ROS 2** | 感知预览 | 前端直连 rosbridge(:9090,只读订阅):雷达 /scan 极坐标图、深度相机 JPEG 预览、前视相机预留框;控制仍走 ZeroMQ。整体计划见 `docs/ros2-integration-plan.html` |
 
 ## ZeroMQ Tab 怎么用
 
@@ -27,11 +27,11 @@
    已做成 **systemd 开机自启**，源码在项目 `board/`（1:1 镜像板子文件系统）。
    首次一次性安装（装单元 + NOPASSWD 规则，仅这次要板子 sudo）：
    ```bash
-   scripts/setup_board.sh 192.168.3.188    # 只跑一次
+   scripts/setup_board.sh <board-ip>    # 只跑一次
    ```
    之后改完代码，一条命令部署 + 重启，**全程免密**：
    ```bash
-   scripts/deploy_board.sh 192.168.3.188   # rsync board/ 到板 + 重启服务
+   scripts/deploy_board.sh <board-ip>   # rsync board/ 到板 + 重启服务
    ```
 
    **B. 原版 lerobot host（要先标定机械臂）** — 底盘+臂都能用，但 `connect()` 会强制
@@ -39,7 +39,10 @@
    `lerobot-calibrate --robot.type=lekiwi --robot.port=/dev/ttyACM0 --robot.id=orin_kiwi`，
    之后才能 `python -m lerobot.robots.lekiwi.lekiwi_host ...`。**SSH 非交互下直接跑 host 会 EOFError。**
 
-2. GUI 里填 Orin IP（默认 `192.168.3.188`）和命令端口（默认 `5555`），点**连接**。
+2. GUI 里填 Orin IP（板子局域网地址）和命令端口（默认 `5555`），点**连接**。
+   免手填：`cp gui/config.example.json ~/.config/lekiwi-console/config.json` 后改成实际 IP，
+   GUI 启动自动带入（release 版同样读这个路径，可随时手改）。
+   每字段优先级：GUI 里输入过的值（localStorage `lekiwi.conn`）> config.json > 空。
 3. **点键盘区**获取焦点（虚线框变实线高亮），然后：
 
    | 键 | 动作 | | 键 | 动作 |
@@ -61,9 +64,9 @@ PUSH 端）。串口始终只有 base_host 一个所有者。
 ```bash
 # 首次：scripts/setup_board.sh（装单元 + 免密规则，要 sudo 一次；板上先 pip install evdev）
 # 日常：改完免密部署
-scripts/deploy_board.sh 192.168.3.188
+scripts/deploy_board.sh <board-ip>
 # 看日志
-ssh jatson@192.168.3.188 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'
+ssh jatson@<board-ip> 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'
 ```
 
 板端源码目录布局（`board/` 镜像板子根，`scripts/deploy_board.sh` 用 rsync 同步）：

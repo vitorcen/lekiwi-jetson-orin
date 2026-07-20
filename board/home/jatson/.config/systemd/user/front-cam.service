@@ -1,0 +1,15 @@
+# Front camera republish: vlm-daemon /frame.jpg -> /front_cam/compressed.
+# vlm-daemon stays the single camera owner; this node only speaks HTTP.
+[Unit]
+Description=Front camera CompressedImage forwarder (via vlm-daemon)
+Wants=vlm-daemon.service
+After=vlm-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jatson/ros2/front_cam.py'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

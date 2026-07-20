@@ -6,7 +6,7 @@
 - [JetPack 版本选择](jetpack-version-choice.md) — 为何用 6.2.2 而非最新 7.2：生态成熟优先于版本新
 - [板子 apt 国内网络](jetson-apt-network-cn.md) — 装任何 apt 包前：换 TUNA 镜像 + 强制 IPv4 + hold nvidia 包
 - [板子 WiFi 6E AX210](jetson-wifi-ax210.md) — L4T 没编 iwlwifi，装 backport-iwlwifi DKMS；坑在 cfg80211 符号冲突，卸掉重载
-- [ROS 2 Humble 已装](ros2-humble-installed.md) — 板子已装 humble desktop，SSH 免密已配，直接 ssh jatson@192.168.3.188
+- [ROS 2 Humble 已装](ros2-humble-installed.md) — 板子已装 humble desktop，SSH 免密已配，直接 ssh jatson@192.168.3.189
 - [舵机总线 bring-up](servo-bus-ch341-bringup.md) — CH340 需自编 ch341.ko + 卸 brltty；舵机 Feetech STS3215 ID1@1Mbps，控制脚本在板子上
 - [目标机器人 LeKiwi](lekiwi-robot-target.md) — 3轮底盘+SO-101 从臂 9电机单总线；lerobot 锚定 26ff40d；语雀资料可走 API 匿名读
 - [板子已装 lerobot](lerobot-installed-orin.md) — conda env lerobot/py3.12；GitHub 必须走 ghfast.top 镜像；PyPI torch 是 cu130 用不了 GPU
@@ -19,3 +19,4 @@
 - [S2 语音前端已通](voice-frontend-s2.md) — SenseVoice+edge-tts/Melo,voice/ daemon+GUI 语音 Tab;MCP01 必须长按电源键开机否则麦克风全零
 - [ROS 2 集成计划](ros2-integration-plan.md) — 2026-07-20 定稿经 codex 评审:并行层+安全门下沉 base_host+slam_toolbox/AMCL/DWB;动 ROS 前必读 docs/ros2-integration-plan.html
 - [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
+- [板端单测](unit-tests-board.md) — tests/ 纯逻辑单测,Mac 上 uv run --with pytest --with numpy pytest tests/ -q;只测纯函数不测胶水,JS 不测

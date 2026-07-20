@@ -231,6 +231,31 @@ fn zero_path() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".config/lekiwi-console/leader_zero.json")
 }
 
+/// Hand-editable machine config (board IP, ports, topics). Lives next to
+/// leader_zero.json so all persisted state shares one dir; survives release
+/// builds where ui/ assets are baked into the binary. Missing file -> "{}"
+/// so the frontend seeds nothing and falls back to its own defaults.
+#[tauri::command]
+fn load_config() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let p = std::path::PathBuf::from(home).join(".config/lekiwi-console/config.json");
+    std::fs::read_to_string(p).unwrap_or_else(|_| "{}".into())
+}
+
+/// The config file is the ONLY store for connection params — GUI edits write
+/// back here (no localStorage second truth). The frontend sends the full merged
+/// JSON text; fs::write follows the symlink so a repo-side config.local.json
+/// stays the single hand-editable copy.
+#[tauri::command]
+fn save_config(text: String) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let p = std::path::PathBuf::from(home).join(".config/lekiwi-console/config.json");
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, text).map_err(|e| e.to_string())
+}
+
 fn load_zero() -> Option<[i32; 6]> {
     let text = std::fs::read_to_string(zero_path()).ok()?;
     let v: Vec<i32> = serde_json::from_str(&text).ok()?;
@@ -844,6 +869,8 @@ fn main() {
             endpoint: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
+            load_config,
+            save_config,
             zmq_connect,
             zmq_send_base,
             zmq_disconnect,

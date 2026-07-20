@@ -5,10 +5,10 @@
 # Run scripts/setup_board.sh ONCE first: it installs the systemd units and a
 # scoped NOPASSWD sudoers rule, after which the restart below needs no password.
 #
-# Usage:  scripts/deploy_board.sh [ip]        (default 192.168.3.188)
+# Usage:  scripts/deploy_board.sh [ip]        (default 192.168.3.189)
 set -euo pipefail
 
-IP=${1:-192.168.3.188}
+IP=${1:-192.168.3.189}
 USER=jatson
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 

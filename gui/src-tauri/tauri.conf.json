@@ -11,8 +11,8 @@
     "windows": [
       {
         "title": "LeKiwi 控制台 · Orin",
-        "width": 1280,
-        "height": 900,
+        "width": 1440,
+        "height": 1080,
         "minWidth": 820,
         "minHeight": 560
       }

@@ -14,7 +14,22 @@ Rust 后端 + vanilla JS 前端（`ui/js/` 按功能分模块，`state.js` 出 `
 - 🔌 **ZeroMQ 遥控** = 已实现，键盘 WASD 或**方向键**平移 / QE 旋转 / RF 调速 / 空格急停。
   **点遥控面板任意处**（左键盘区或右运动状态区）即激活键盘（`#telewrap` 为 focus 目标，
   加 `.armed` 高亮两个 panel）；失焦/切 Tab/隐藏自动停车。
-- 🤖 **ROS 2** = 占位，后续做建图导航等。
+- 🤖 **ROS 2** = 感知预览(2026-07-20 全部接通):`ui/js/ros.js` **前端直连 rosbridge
+  WebSocket :9090**(CSP 为 null 所以可行;只读订阅不算破坏铁律 1——ZMQ 没有 ws 桥,
+  rosbridge 有)。内置极简 rosbridge 客户端(subscribe/unsubscribe/publish 三个 op,
+  无 roslib 依赖)。四面板:雷达 /scan canvas 极坐标图(REP-103 车头朝上,板端
+  `ros2/ld19_lidar.py` LD19 串口直解 10Hz)+ 三路 CompressedImage JPEG 预览走同一张
+  IMG_FEEDS 表(零特殊分支):深度 `/depth_preview/compressed`、前视
+  `/front_cam/compressed`(板端 front_cam.py 从 vlm-daemon /frame.jpg HTTP 转发,
+  单属主不双开;命名按角色叫「前视」不叫 RGB——Astra 也有颗永不用的 RGB,会歧义)、
+  腕部 `/wrist_cam/compressed`(板端 wrist_cam.py 直开 Sunplus UVC,**有订阅才开设备**,
+  省共享 USB2 带宽)。底部日志框只在 ZeroMQ tab 显示(main.js 切 tab 时切换)。
+  **连接参数唯一存储 = `~/.config/lekiwi-console/config.json`**
+  （符号链接→仓库 `gui/config.local.json` 不入库；启动 load_config 灌值,GUI 改动
+  save_config 写回,无 localStorage 第二真相,浏览器模式不持久化）。
+  链路已验证(2026-07-20):板端 rosbridge + depth-preview 服务上线后,从 Mac 用
+  websocket 订阅 `/depth_preview/compressed` 收到 15fps JPEG 帧——GUI 用的就是同一协议
+  同一 topic。GUI 本体目验仍需用户 `./run.sh`(agent 起不了图形程序,见上)。
 
 **核心架构铁律 1：ZMQ 必须在 Rust 后端，不能在前端。**
 WebView 开不了 ZMQ socket（ZMQ 不是 WebSocket）。所以 `src-tauri/src/main.rs` 持有

@@ -152,6 +152,13 @@ def raw_speed(v):
     return (abs(int(v)) | 0x8000) if v < 0 else int(v)
 
 
+def base_blocked(prio_last, p, now):
+    """True while any strictly-higher-priority source still holds the base bus
+    (sent a base frame within BASE_HOLD_S). Safety-critical: this is what lets
+    the physical pad's stream — including its release-zero — mute the LLM."""
+    return any(now - prio_last.get(q, -1.0) < BASE_HOLD_S for q in range(p))
+
+
 def solve(vx, vy, omega_deg):
     """Body velocity -> per-wheel raw speed (counts/s). Matches lerobot exactly."""
     w = math.radians(omega_deg)
@@ -452,8 +459,7 @@ def main():
                 now = time.time()
                 if base:
                     p = BASE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
-                    if any(now - prio_last.get(q, -1.0) < BASE_HOLD_S
-                           for q in range(p)):
+                    if base_blocked(prio_last, p, now):
                         base = False          # a higher-priority source owns it
                     else:
                         prio_last[p] = now

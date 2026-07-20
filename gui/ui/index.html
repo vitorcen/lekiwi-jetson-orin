@@ -78,7 +78,7 @@
   </button>
   <button class="tab" data-page="ros">
     <span class="tico">🤖</span>
-    <span class="tlab">ROS 2<em>待建</em></span>
+    <span class="tlab">ROS 2<em>雷达 · 相机预览</em></span>
   </button>
 </nav>
 
@@ -88,7 +88,7 @@
 
   <div class="connbar">
     <label>Orin IP
-      <input id="ip" type="text" value="192.168.3.188">
+      <input id="ip" type="text" placeholder="板子IP">
     </label>
     <label>命令端口
       <input id="port" type="text" value="5555">
@@ -296,18 +296,85 @@
   </section>
 </div>
 
-<!-- ======================= ROS 2 (占位) ======================= -->
+<!-- ======================= ROS 2 感知预览 ======================= -->
 <div id="page-ros" class="page">
-  <div class="placeholder">
-    <div class="phicon">🤖</div>
-    <h2>ROS 2 Tab</h2>
-    <p>板子已装 ROS 2 Humble，这个 Tab 留给后续功能：</p>
-    <ul>
-      <li>把 LeKiwi 包成 ROS 2 节点，发 <code>/cmd_vel</code></li>
-      <li>接激光雷达 / 相机 topic，做建图导航</li>
-      <li>话题内省、节点状态、rosbag 录制</li>
-    </ul>
-    <p class="phnote">当前遥控走 ZeroMQ（原生 lerobot 通道），不依赖 ROS 2。</p>
+
+  <div class="connbar">
+    <label>rosbridge IP
+      <input id="rosip" type="text" placeholder="板子IP">
+    </label>
+    <label>端口
+      <input id="rosport" type="text" value="9090">
+    </label>
+    <button id="rosConnBtn" class="primary">断开</button>
+    <span id="rosState" class="pill bad">未连接</span>
+  </div>
+
+  <div id="roswrap">
+
+    <!-- 第一行:三相机 · 深度相机预览 -->
+    <section class="panel">
+      <h2>深度相机 <span class="en">Depth preview</span></h2>
+      <div class="rosbox">
+        <img id="depthImg" alt="depth" draggable="false">
+        <div class="rosoverlay">
+          <span id="depthBadge" class="vbadge bad">未接入</span>
+          <span id="depthMeta" class="vage">—</span>
+        </div>
+        <div class="rosph" id="depthPh">等待深度画面…<br><small>板端需跑深度驱动 + JPEG republish 节点</small></div>
+      </div>
+      <label class="rostopic">topic
+        <input id="depthTopic" type="text" value="/depth_preview/compressed">
+      </label>
+    </section>
+
+    <!-- 前视相机(vlm-daemon 单属主,板端 front_cam 节点经 HTTP 转发) -->
+    <section class="panel">
+      <h2>前视相机 <span class="en">Front camera</span></h2>
+      <div class="rosbox">
+        <img id="frontImg" alt="front" draggable="false">
+        <div class="rosoverlay">
+          <span id="frontBadge" class="vbadge bad">未接入</span>
+          <span id="frontMeta" class="vage">—</span>
+        </div>
+        <div class="rosph" id="frontPh">等待前视画面…<br><small>板端需跑 front-cam 转发节点（vlm-daemon 单属主）</small></div>
+      </div>
+      <label class="rostopic">topic
+        <input id="frontTopic" type="text" value="/front_cam/compressed">
+      </label>
+    </section>
+
+    <!-- 腕部相机(独立 UVC,板端 wrist_cam 节点按需开设备) -->
+    <section class="panel">
+      <h2>腕部相机 <span class="en">Wrist camera</span></h2>
+      <div class="rosbox">
+        <img id="wristImg" alt="wrist" draggable="false">
+        <div class="rosoverlay">
+          <span id="wristBadge" class="vbadge bad">未接入</span>
+          <span id="wristMeta" class="vage">—</span>
+        </div>
+        <div class="rosph" id="wristPh">等待腕部画面…<br><small>板端需跑 wrist-cam 节点（有订阅才开设备）</small></div>
+      </div>
+      <label class="rostopic">topic
+        <input id="wristTopic" type="text" value="/wrist_cam/compressed">
+      </label>
+    </section>
+
+    <!-- 第二行:大雷达框 /scan 极坐标图 -->
+    <section class="panel roswide">
+      <h2>激光雷达 <span class="en">LaserScan</span></h2>
+      <div class="rosbox rossq">
+        <canvas id="scanCanvas"></canvas>
+        <div class="rosoverlay">
+          <span id="scanBadge" class="vbadge bad">未接入</span>
+          <span id="scanMeta" class="vage">—</span>
+        </div>
+        <div class="rosph" id="scanPh">等待 /scan…<br><small>板端需跑 ld19-lidar 节点</small></div>
+      </div>
+      <label class="rostopic">topic
+        <input id="scanTopic" type="text" value="/scan">
+      </label>
+    </section>
   </div>
 </div>
 </main>

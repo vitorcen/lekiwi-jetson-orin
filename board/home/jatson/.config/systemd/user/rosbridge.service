@@ -1,0 +1,12 @@
+[Unit]
+Description=rosbridge websocket server :9090 (GUI ROS 2 tab, read-only telemetry)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec ros2 launch rosbridge_server rosbridge_websocket_launch.xml'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

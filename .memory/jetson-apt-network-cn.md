@@ -5,7 +5,7 @@ metadata:
   type: feedback
 ---
 
-Orin 板子（192.168.3.188）处于**国内网络**，装任何 apt 包前先处理两件事：
+Orin 板子（192.168.3.189）处于**国内网络**，装任何 apt 包前先处理两件事：
 
 1. **换源**：arm64 的 Ubuntu 包在 `ports.ubuntu.com`，该域名国内 IPv4 超时、IPv6 unreachable。
    把 `/etc/apt/sources.list` 里的 `ports.ubuntu.com/ubuntu-ports` 换成

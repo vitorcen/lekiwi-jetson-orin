@@ -4,6 +4,7 @@ import { S } from './state.js';
 import { onLeaveZmq } from './zmq.js';
 import { onEnterVision, onLeaveVision } from './vision.js';
 import { onEnterVoice, onLeaveVoice } from './voice.js';
+import { onEnterRos, onLeaveRos } from './ros.js';
 import './leader.js';
 import './log.js';
 import './health.js';
@@ -14,6 +15,8 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === b));
   document.querySelectorAll('.page').forEach(p =>
     p.classList.toggle('on', p.id === 'page-' + S.page));
+  // The bottom log strip echoes the pad/keyboard teleop bus — ZMQ tab only.
+  document.getElementById('logpanel').style.display = S.page === 'zmq' ? '' : 'none';
   // Leaving the ZMQ tab must halt the base — a held key would otherwise keep
   // streaming velocity from an unfocused tab.
   if (prev === 'zmq' && S.page !== 'zmq') onLeaveZmq();
@@ -25,4 +28,7 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   // and survives tab switches (no dead-man on purpose).
   if (prev === 'voice' && S.page !== 'voice') onLeaveVoice();
   if (S.page === 'voice' && prev !== 'voice') onEnterVoice();
+  // ROS preview: read-only rosbridge subscriptions, socket bound to visibility.
+  if (prev === 'ros' && S.page !== 'ros') onLeaveRos();
+  if (S.page === 'ros' && prev !== 'ros') onEnterRos();
 });

@@ -106,7 +106,8 @@ function paint(kv) {
 }
 
 async function poll() {
-  const ip = ($('ip') && $('ip').value.trim()) || '192.168.3.188';
+  const ip = ($('ip') && $('ip').value.trim()) || '';
+  if (!ip) { offline(); return; }   // no board configured yet
   try {
     const txt = await invoke('sysinfo', { ip });
     const kv = {};

@@ -1,0 +1,15 @@
+[Unit]
+Description=Astra Pro depth -> /depth_preview/compressed (OpenNI2 direct, no vendor driver)
+After=network.target
+
+[Service]
+Type=simple
+Environment=ASTRA_OPENNI_LIB=/home/jatson/openni2_redist
+ExecStart=/bin/bash -c 'source /opt/ros/humble/setup.bash && exec python3 /home/jatson/ros2/depth_preview.py'
+# Watchdog in the node exits non-zero on depth stall/death; restart recovers
+# hot-unplug too. Backoff so a missing camera doesn't spin the CPU.
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

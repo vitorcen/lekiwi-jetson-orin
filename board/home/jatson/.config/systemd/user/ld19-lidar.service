@@ -1,0 +1,13 @@
+# LDROBOT LD19 lidar -> /scan. Reads the by-id serial path (NOT ttyACM*: the
+# servo bus is the same 1a86 chip family and indexes can swap across boots).
+[Unit]
+Description=LD19 lidar LaserScan publisher
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jatson/ros2/ld19_lidar.py'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

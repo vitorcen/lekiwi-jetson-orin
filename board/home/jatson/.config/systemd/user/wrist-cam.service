@@ -1,0 +1,13 @@
+# Wrist camera (Sunplus 2M) -> /wrist_cam/compressed. Device opened on
+# demand only (USB2 bandwidth is shared with Astra depth + servo bus).
+[Unit]
+Description=Wrist camera CompressedImage publisher
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jatson/ros2/wrist_cam.py'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
