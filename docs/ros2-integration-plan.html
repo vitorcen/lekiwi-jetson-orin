@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>LeKiwi ROS 2 集成计划 — 深度相机 + 单线雷达 + Nav2</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+         max-width: 1080px; margin: 24px auto; padding: 0 24px; color: #222;
+         line-height: 1.55; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: 6px; }
+  h2 { margin-top: 32px; border-left: 4px solid #2a6; padding-left: 10px; }
+  h3 { margin-top: 22px; color: #444; }
+  code, pre { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  pre { background: #f5f5f5; padding: 10px 14px; border-radius: 6px;
+        overflow-x: auto; font-size: 13px; }
+  code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #fafafa; }
+  tr:nth-child(even) { background: #fbfbfb; }
+  .ok   { color: #2a8; font-weight: 600; }
+  .warn { color: #c80; font-weight: 600; }
+  .bad  { color: #c33; font-weight: 600; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px;
+         font-size: 11px; font-weight: 700; vertical-align: middle; }
+  .tag-h    { background: #fde; color: #a06; }
+  .tag-fix  { background: #dfe; color: #082; }
+  .tag-keep { background: #eef; color: #339; }
+  .tag-dead { background: #fdd; color: #a22; }
+  blockquote { border-left: 4px solid #888; margin-left: 0; padding: 8px 14px;
+               color: #555; background: #fafafa; }
+  .svgbox { background: #fafafa; border: 1px solid #ddd; padding: 10px;
+            border-radius: 6px; margin: 14px 0; overflow-x: auto; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; font-weight: 600; color: #06c; }
+</style>
+</head>
+<body>
+
+<h1>LeKiwi ROS 2 集成计划</h1>
+<p><strong>日期</strong>：2026-07-20 &nbsp;|&nbsp;
+   <strong>状态</strong>：<span class="tag tag-keep">PLAN</span> 经 codex&nbsp;gpt-5.6-sol 评审修订 &nbsp;|&nbsp;
+   <strong>触发</strong>：USB 深度相机已接（型号待上电确认），单线激光雷达在途</p>
+
+<h2>⏵ 一句话方案</h2>
+<blockquote>
+ROS 2 作为<strong>并行能力层</strong>接入，不替换现有 ZMQ 栈：<code>base_host</code> 仍是串口唯一属主 +
+唯一控制仲裁器，ROS 只是第 4 个控制源（<code>/cmd_vel</code>→ZMQ 5555）；安全门（雷达净空限速）下沉到
+base_host 仲裁之后、电机之前，<strong>对所有来源生效</strong>。导航栈走最保守的成熟组合：
+slam_toolbox 建图 → AMCL 定位 → Nav2 + DWB 先跑通，MPPI 后验 A/B。里程计可信之前不碰 SLAM。
+</blockquote>
+
+<table>
+  <tr><th>决策点</th><th>选择</th><th>理由</th></tr>
+  <tr><td>ROS vs 现有 ZMQ 栈</td><td><span class="ok">并行共存</span>，base_host 不动摇</td><td>生产链路（手柄/GUI/语音控车）零破坏；串口只能有一个属主</td></tr>
+  <tr><td>控制优先级</td><td><code>pad &gt; gui &gt; ros_nav &gt; mcp</code></td><td>人工现场 &gt; 人工远程 &gt; 本地自主 &gt; 云端 LLM（延迟与不确定性递增）</td></tr>
+  <tr><td>安全急刹位置</td><td><span class="ok">base_host 内、仲裁后</span></td><td>放 ROS 侧只拦 Nav2 = 手柄/GUI/MCP 全绕过，那不叫安全层</td></tr>
+  <tr><td>建图 / 定位</td><td>slam_toolbox（离线建图）+ AMCL（生产定位）</td><td>AMCL 不是 SLAM，本就是两阶段；Cartographer 双套维护 <span class="tag tag-dead">砍</span></td></tr>
+  <tr><td>Controller</td><td>DWB 先跑通 → MPPI A/B</td><td>DWB 配好 <code>vel_y</code> 也能全向；TEB Humble 维护状态差 <span class="tag tag-dead">砍</span></td></tr>
+  <tr><td>深度相机</td><td>一期只做预览 + rosbag，<strong>不进 costmap</strong></td><td>参考项目实证：避障 100% 靠单线雷达就够了；二期再 depthimage_to_laserscan</td></tr>
+  <tr><td>Isaac ROS / nvblox</td><td><span class="tag tag-dead">不碰</span></td><td>二维室内导航 + 8GB 已常驻 VLM，引入 CUDA 管线纯属找麻烦</td></tr>
+  <tr><td>rosbag vs lerobot 数据集</td><td>两条线独立，共享 run_uuid + 时间基准</td><td>硬统一格式是假需求，只会造一个没人敢改的中间格式</td></tr>
+</table>
+
+<h2>1. 现状盘点（2026-07-20 实地调研）</h2>
+
+<p>板上 ROS 2 Humble desktop <span class="ok">已装已验证</span>（Fast DDS、<code>ROS_DOMAIN_ID=0</code>、
+colcon/rosdep 齐，talker/listener 通），但<strong>只装未用</strong>——仓库无任何 ROS 包/launch/节点；
+GUI 的「ROS 2」Tab 是纯静态占位（<code>gui/ui/index.html</code> 无 JS 无 Rust 后端）。现有运行时全部非 ROS：</p>
+
+<table>
+  <tr><th>组件</th><th>通道</th><th>与 ROS 2 的关系</th></tr>
+  <tr><td><code>base_host.py</code>（串口唯一属主）</td><td>ZMQ PULL <code>:5555</code> 收 JSON 速度/臂键；内置 mux <code>pad(0)&gt;gui(1)&gt;mcp(2)</code>、0.5s hold、0.5s watchdog</td><td><strong>接入枢纽</strong>：加 <code>ros</code> 优先级档 + 安全门 + 轮反馈外发</td></tr>
+  <tr><td><code>pad_teleop.py</code></td><td>PUSH 5555；PUB <code>:5556</code> 日志总线</td><td>不动，天然最高优先级</td></tr>
+  <tr><td><code>vlm/</code> daemon</td><td>HTTP 8090，<strong>独占现有 UVC 相机</strong></td><td>相机属主冲突点：深度相机是新设备不冲突；彩色流二期再协调</td></tr>
+  <tr><td><code>voice/</code> + Hermes + <code>drive/</code> MCP</td><td>HTTP 8092/8642；MCP→PUSH 5555</td><td>不动；MCP 档位保持最低</td></tr>
+  <tr><td>lerobot 路线（ACT 数据集/训练）</td><td>不走 ROS</td><td>并行两条线，见 §6</td></tr>
+</table>
+
+<p>ZMQ 端口规划：<code>5555</code> 命令汇聚（已有）、<code>5556</code> pad 日志（已有）、
+<span class="tag tag-fix">新增</span> <code>5557</code> base_host 轮反馈 PUB、
+<span class="tag tag-fix">新增</span> <code>5558</code> 安全节点净空裁决 PUB。</p>
+
+<h2>2. 参考项目结论（yahboom-rdk-x5）</h2>
+
+<p>同用户另一台车：麦轮四轮全向 + RDK X5，与 LeKiwi 三轮全向<strong>运动学等价</strong>（vx/vy/wz 三自由度），
+导航选型与中间件经验可直接迁移；厂商包与 BPU 推理平台绑定，不可移植。</p>
+
+<table>
+  <tr><th>资产（平台无关，可搬）</th><th>要点</th></tr>
+  <tr><td><code>cmd_vel_mux.py</code> 仲裁范式</td><td>多级优先级 + 空闲零速流 + 方向感知护栏——我们已在 base_host 实现同构逻辑，补租约/TTL 即可</td></tr>
+  <tr><td><code>safety_stop</code>（rclcpp）</td><td>净空比例限速、360° 方向感知、fail-open、运行时开关——算法搬过来，但执行点改到 base_host（见 §3）</td></tr>
+  <tr><td><code>episode_recorder.py</code></td><td>rosbag2 一键录制：<code>.partial</code> 后缀、QoS override（transient_local）、磁盘护栏 &lt;4GB 拒录、1GiB 分片、meta.yaml 缺话题标记——直接抄，改 topic 列表</td></tr>
+  <tr><td><code>replay.sh</code> + RViz 隔离</td><td>独立 <code>ROS_DOMAIN_ID</code> + <code>use_sim_time</code> 回放，通用</td></tr>
+  <tr><td>systemd 编排范式</td><td>建图/导航 <code>Conflicts=</code> 互斥（都拥有 map→odom TF）、respawn、<code>reset-failed</code>、TF 交接窗</td></tr>
+  <tr><td>横移标定方法论</td><td>一键触发 vx/vy/wz 解耦测试回读 odom 增量（strafe_test.ipynb）——P2 验收就用它</td></tr>
+  <tr><td>调参起点</td><td>robot_radius 0.13、inflation 0.35、max_vel 0.6（麦轮车实测值，LeKiwi 要重标但是好起点）</td></tr>
+</table>
+
+<details>
+<summary>参考项目的反面教训（同样值钱）</summary>
+<pre>
+1. 深度相机(Astra Pro)从未进 costmap，只做 GUI 预览——避障 100% 靠单线雷达，够用。
+2. Astra 厂商 ROS 驱动会关 IR 激光致深度恒 0，最后弃用改裸 OpenNI2 直读——驱动选型要留 PlanB。
+3. USB2 带宽：深度(bulk)+彩色(UVC iso)同开互掐，深度掉到 1.5fps——lsusb -t 看根节点分布。
+4. DWB 没吃透全向横移（当近似差速用），想换 TEB 未遂——我们直接把 vel_y 配对，后验 MPPI。
+5. 单线雷达(MS200)在 ~0.1m 死区和吸光表面报 0.0——避障逻辑把「扇区无有效回波」判堵不判空。
+6. nav2 真实参数文件只在板上没进仓库——我们的参数文件必须进 repo（board/ 镜像范式已有）。
+7. 横移故障（vy 指令下原地旋转，后轮扭矩弱）——全向底盘先标定解耦再谈导航。
+8. ros2 topic pub 喂 /initialpose 必须 -w 1 等订阅者，否则丢包；nav2 停止必超时，重启前 reset-failed。
+</pre>
+</details>
+
+<h2>3. 目标架构</h2>
+
+<p>核心数据结构只有一条：<strong>多控制源 → 唯一仲裁器 → 最终安全门 → 电机</strong>。这个链只能有一套，全在 base_host 里。
+ROS 侧不做第二个 mux、不做第二个 watchdog。</p>
+
+<div class="svgbox">
+<svg width="1040" height="470" xmlns="http://www.w3.org/2000/svg"
+     style="font-family: -apple-system, sans-serif; font-size: 12px;">
+  <!-- control sources row -->
+  <rect x="20"  y="20" width="150" height="60" rx="6" fill="#eef" stroke="#339" stroke-width="2"/>
+  <text x="95"  y="44" text-anchor="middle" font-weight="bold">pad_teleop</text>
+  <text x="95"  y="62" text-anchor="middle">手柄 · prio 0</text>
+  <rect x="190" y="20" width="150" height="60" rx="6" fill="#eef" stroke="#339"/>
+  <text x="265" y="44" text-anchor="middle" font-weight="bold">GUI (Tauri)</text>
+  <text x="265" y="62" text-anchor="middle">ZMQ · prio 1</text>
+  <rect x="360" y="20" width="180" height="60" rx="6" fill="#fed" stroke="#c50" stroke-width="2"/>
+  <text x="450" y="44" text-anchor="middle" font-weight="bold">lekiwi_base_bridge ★新</text>
+  <text x="450" y="62" text-anchor="middle">/cmd_vel→JSON · prio 2 "ros"</text>
+  <rect x="560" y="20" width="150" height="60" rx="6" fill="#eef" stroke="#339"/>
+  <text x="635" y="44" text-anchor="middle" font-weight="bold">drive MCP</text>
+  <text x="635" y="62" text-anchor="middle">云 LLM · prio 3</text>
+
+  <!-- arrows to mux -->
+  <line x1="95"  y1="80" x2="330" y2="120" stroke="#888"/>
+  <line x1="265" y1="80" x2="360" y2="120" stroke="#888"/>
+  <line x1="450" y1="80" x2="420" y2="120" stroke="#2a8" stroke-width="2"/>
+  <line x1="635" y1="80" x2="470" y2="120" stroke="#888"/>
+
+  <!-- base_host mux -->
+  <rect x="230" y="120" width="360" height="60" rx="6" fill="#fde" stroke="#a06" stroke-width="2"/>
+  <text x="410" y="144" text-anchor="middle" font-weight="bold">base_host 仲裁器（ZMQ PULL :5555）</text>
+  <text x="410" y="162" text-anchor="middle">pad&gt;gui&gt;ros&gt;mcp · src+seq+ts+TTL · latest-only 排空</text>
+
+  <!-- safety gate -->
+  <rect x="230" y="210" width="360" height="60" rx="6" fill="#fdd" stroke="#a22" stroke-width="2"/>
+  <text x="410" y="234" text-anchor="middle" font-weight="bold">安全门（仲裁后 · 所有来源生效）</text>
+  <text x="410" y="252" text-anchor="middle">雷达净空限速(带有效期) + 0.5s watchdog + 钳位</text>
+  <line x1="410" y1="180" x2="410" y2="210" stroke="#2a8" stroke-width="2"/>
+
+  <!-- serial -->
+  <rect x="230" y="300" width="360" height="50" rx="6" fill="#dfe" stroke="#082" stroke-width="2"/>
+  <text x="410" y="322" text-anchor="middle" font-weight="bold">串口 1Mbps · STS3215 ×9</text>
+  <text x="410" y="340" text-anchor="middle">轮 7/8/9（高频闭环） + 臂 1-6（降频轮询）</text>
+  <line x1="410" y1="270" x2="410" y2="300" stroke="#2a8" stroke-width="2"/>
+
+  <!-- odom feedback path -->
+  <rect x="650" y="300" width="180" height="50" rx="6" fill="#fed" stroke="#c50"/>
+  <text x="740" y="322" text-anchor="middle" font-weight="bold">轮反馈 PUB :5557 ★新</text>
+  <text x="740" y="340" text-anchor="middle">pos/vel + 板端单调时钟</text>
+  <line x1="590" y1="325" x2="650" y2="325" stroke="#888"/>
+  <rect x="650" y="210" width="180" height="60" rx="6" fill="#fed" stroke="#c50"/>
+  <text x="740" y="234" text-anchor="middle" font-weight="bold">lekiwi_odom 节点 ★新</text>
+  <text x="740" y="252" text-anchor="middle">展开计数→正运动学→/odom+TF</text>
+  <line x1="740" y1="300" x2="740" y2="270" stroke="#888"/>
+
+  <!-- ROS nav stack -->
+  <rect x="860" y="120" width="160" height="150" rx="6" fill="#def" stroke="#06c"/>
+  <text x="940" y="144" text-anchor="middle" font-weight="bold">Nav2 栈</text>
+  <text x="940" y="164" text-anchor="middle">slam_toolbox / AMCL</text>
+  <text x="940" y="182" text-anchor="middle">NavFn + DWB→MPPI</text>
+  <text x="940" y="200" text-anchor="middle">costmap: /scan only</text>
+  <text x="940" y="218" text-anchor="middle">↑ /odom + TF</text>
+  <text x="940" y="236" text-anchor="middle">↓ /cmd_vel</text>
+  <line x1="860" y1="180" x2="830" y2="240" stroke="#888"/>
+  <line x1="880" y1="120" x2="540" y2="55" stroke="#888"/>
+
+  <!-- sensors row -->
+  <rect x="20"  y="390" width="200" height="60" rx="6" fill="#def" stroke="#06c" stroke-width="2"/>
+  <text x="120" y="414" text-anchor="middle" font-weight="bold">单线激光雷达（在途）</text>
+  <text x="120" y="432" text-anchor="middle">驱动→/scan 10Hz</text>
+  <rect x="240" y="390" width="200" height="60" rx="6" fill="#def" stroke="#06c"/>
+  <text x="340" y="414" text-anchor="middle" font-weight="bold">USB 深度相机（已接）</text>
+  <text x="340" y="432" text-anchor="middle">预览+rosbag（一期不进 costmap）</text>
+  <rect x="460" y="390" width="200" height="60" rx="6" fill="#fdd" stroke="#a22"/>
+  <text x="560" y="414" text-anchor="middle" font-weight="bold">lekiwi_safety 节点 ★新</text>
+  <text x="560" y="432" text-anchor="middle">/scan→净空裁决 PUB :5558</text>
+  <line x1="220" y1="410" x2="460" y2="418" stroke="#888"/>
+  <line x1="180" y1="390" x2="880" y2="270" stroke="#888"/>
+  <line x1="530" y1="390" x2="420" y2="270" stroke="#a22" stroke-width="2"/>
+</svg>
+</div>
+
+<h3>3.1 控制注入协议升级 <span class="tag tag-fix">必改</span></h3>
+<ul>
+  <li>命令帧增加 <code>src + seq + 单调时间戳 + TTL</code>，未知字段旧客户端可忽略（零破坏）。</li>
+  <li>base_host 每周期<strong>排空队列、按源取最新且未过期</strong>的命令——杜绝 ZMQ 积压导致旧速度复活（watchdog 只看「最近收到」时会把积压当新鲜）。</li>
+  <li><strong>控制租约与零速流分离</strong>：Nav2 idle 时 bridge 不许以 10Hz 零速流永久占住 <code>ros</code> 档；零速≠活跃。</li>
+  <li>角速度单位换算收口在 bridge：ROS <code>rad/s</code> → base_host <code>deg/s</code>。</li>
+</ul>
+
+<h3>3.2 安全门语义 <span class="tag tag-fix">必改</span></h3>
+<ul>
+  <li><code>lekiwi_safety</code>（ROS 侧，搬 yahboom 算法）从 <code>/scan</code> 算<strong>带有效期的方向净空限速/停止裁决</strong>，PUB :5558；base_host 对仲裁后的最终命令<strong>裁剪</strong>——手柄/GUI/Nav2/MCP 谁都绕不过。</li>
+  <li>模式区分：自主模式（ros/mcp 档在驱动）裁决过期→停；手柄模式→显式配置为低速爬行或停，<strong>不许偷偷 fail-open</strong>。</li>
+  <li>watchdog（命令源死亡）与雷达急刹（前方有障碍）是两回事，都保留。</li>
+  <li>每次限速/停车记录原因、最近扫描时间、触发扇区（进 5556 日志总线 + <code>/diagnostics</code>）。</li>
+  <li>软件急刹不冒充硬件安全：<span class="warn">物理急停（断舵机电）待补</span>，列入硬件采购。</li>
+</ul>
+
+<h3>3.3 里程计链路 <span class="tag tag-fix">必改</span></h3>
+<ul>
+  <li>base_host 串口循环<strong>只批量读轮 7/8/9</strong> 的位置/速度（臂 6 电机降频或按需读，不许拖垮底盘闭环），采样即打<strong>板端单调时钟</strong>，PUB :5557 原始数据 + 通信错误计数。</li>
+  <li>ROS 侧 <code>lekiwi_odom</code>：STS3215 是 12 位/圈 4096 步绝对编码器，多圈掉电不存——<strong>软件展开 int64 累计计数</strong>（取模差值选满足最大轮速约束的最近增量），检测舵机重启/跳变则丢样本重置基准；开机位置即里程零点。方向符号/每圈计数/轮径/三轮安装角全参数化。</li>
+  <li><span class="tag tag-dead">不加 EKF</span>：无第二观测源时 EKF 只是给轮里程计化妆。实测偏航漂移大→先加独立 IMU，再谈融合。</li>
+</ul>
+
+<h3>3.4 仓库布局</h3>
+<pre>
+ros2/                          # colcon 工作区源（deploy_board.sh rsync → 板上 ~/ros2_ws/src）
+├── lekiwi_base_bridge/        # /cmd_vel→ZMQ 5555；:5557→/odom + odom→base_footprint TF
+├── lekiwi_description/        # 最小 URDF：base_footprint / base_link / 3×wheel / laser / camera optical
+├── lekiwi_safety/             # /scan→净空裁决 PUB :5558（rclcpp，搬 yahboom safety_stop 算法）
+├── lekiwi_recorder/           # rosbag2 episode 录制（搬 episode_recorder.py）
+└── lekiwi_bringup/            # launch + nav2/slam 参数 yaml（参数必须进仓库！）+ systemd units
+board/etc/systemd/…            # ros-bridge / lidar / mapping⟂nav2(Conflicts=) 服务，沿用镜像范式
+scripts/replay.sh              # rosbag→RViz 回放（独立 ROS_DOMAIN_ID + sim_time）
+</pre>
+<p>URDF 必须有 <code>base_footprint</code>（不只 base_link），否则 Nav2 与二维传感器配置后患无穷。
+systemd 启动顺序：<code>base_host → bridge/TF → sensors → safety → localization → Nav2</code>。</p>
+
+<h2>4. 阶段计划（每阶段带验收门，不过门不进下一阶段）</h2>
+
+<table>
+  <tr><th>阶段</th><th>内容</th><th>验收门</th></tr>
+  <tr><td><strong>P0 硬件与总线确认</strong><br><span class="tag tag-keep">板子上电即做</span></td>
+      <td>lsusb 认深度相机型号定驱动；<code>lsusb -t</code> 看 USB 根节点分布（深度相机/UVC/雷达/舵机总线是否挤同一 USB2 根）；udev 稳定命名；雷达到货认型号</td>
+      <td>两相机+雷达+舵机总线同时工作无掉帧断连；<code>/dev/lekiwi_*</code> 稳定命名生效</td></tr>
+  <tr><td><strong>P1 最小控制桥</strong></td>
+      <td>协议升级（src/seq/ts/TTL + latest-only 排空，§3.1）；base_host 加 <code>ros</code> 档；<code>lekiwi_base_bridge</code> 订 /cmd_vel 注入</td>
+      <td>teleop_twist_keyboard 开车；pad 随时抢占；ros 档 idle 不占租约；旧 GUI/pad/MCP 客户端零改动仍工作</td></tr>
+  <tr><td><strong>P2 里程计与底盘标定</strong><br><span class="tag tag-h">杀错误路线的关卡</span></td>
+      <td>轮反馈 :5557 + <code>lekiwi_odom</code>（§3.3）；最小 URDF + TF；vx/vy/wz 解耦标定（搬 strafe_test 方法论）</td>
+      <td>轮反馈 ≥30Hz（目标 50）、p95 间隔 &lt;40ms、无 &gt;100ms 空洞、动臂时底盘频率不坍塌；直行 2m 回读误差、原地转 360° 漂移、横移解耦达标。<span class="bad">不过门就停，不准进 SLAM</span></td></tr>
+  <tr><td><strong>P3 雷达 + 基础录制</strong></td>
+      <td>雷达驱动→/scan、静态 TF、QoS；<code>lekiwi_recorder</code>（rosbag 示教录制）+ replay.sh；深度相机仅预览+录制；<code>/diagnostics</code> 上线</td>
+      <td>RViz 里 scan 稳定 10Hz 对齐 TF；录制→回放→RViz 复现全链路通；断电重启后服务自愈</td></tr>
+  <tr><td><strong>P4 全局安全门</strong></td>
+      <td><code>lekiwi_safety</code> :5558 + base_host 裁剪（§3.2）</td>
+      <td>手推车冲障碍：pad/GUI/ROS/MCP 四源逐一验证被限速/刹停；雷达拔线→自主模式停车、手柄模式按配置降速；日志能答「为什么刹了」</td></tr>
+  <tr><td><strong>P5 建图与定位</strong></td>
+      <td>slam_toolbox（async）建图→存图；AMCL 定位（宽协方差 /initialpose，<code>-w 1</code>）；mapping⟂nav2 systemd 互斥</td>
+      <td>房间地图闭环不撕裂；原地旋转/横移后定位不丢；重启后重定位收敛</td></tr>
+  <tr><td><strong>P6 Nav2</strong></td>
+      <td>NavFn + DWB（配好 min/max_vel_y 用上横移）跑通端到端；再 Qwen 满载条件下 A/B MPPI（controller 15-20Hz、p95 计算时间 &lt;50% 周期、RSS/温度/降频）</td>
+      <td>点到点导航成功率、贴桌腿不撞（inflation 从 0.35 起调）；MPPI 数据不达标就留 DWB</td></tr>
+  <tr><td><strong>P7 GUI 集成</strong></td>
+      <td>Tauri ROS Tab 走 rosbridge websocket：节点/话题状态、rosbag 开关、地图显示 + 导航点下发。<strong>白名单</strong>限制可调用 topic/service，不裸露整个 ROS 图</td>
+      <td>GUI 下发导航点→车到点；录制开关回显状态；断连自动重连</td></tr>
+</table>
+
+<blockquote>每次只调一层：不许同时调 SLAM、里程计和 controller，否则不知道哪层坏了。</blockquote>
+
+<h2>5. 砍掉与推迟清单</h2>
+
+<table>
+  <tr><th>处置</th><th>项目</th><th>理由</th></tr>
+  <tr><td rowspan="6"><span class="tag tag-dead">立即砍</span></td>
+      <td>Cartographer</td><td>slam_toolbox 单套够；双套建图纯维护负担</td></tr>
+  <tr><td>TEB</td><td>Humble 支持长期在分支/未合并状态，为假想问题引依赖</td></tr>
+  <tr><td>nvblox / Isaac ROS</td><td>二维导航用不上三维体素；8GB + 常驻 VLM 没余量</td></tr>
+  <tr><td>EKF（无 IMU 时）</td><td>单观测源融合是化妆</td></tr>
+  <tr><td>ROS 侧第二套 mux/watchdog</td><td>两个状态机迟早打架，仲裁只在 base_host</td></tr>
+  <tr><td>一期完整机械臂 URDF</td><td>目标是底盘导航，臂 frame 后补</td></tr>
+  <tr><td rowspan="5"><span class="tag tag-keep">推迟</span></td>
+      <td>深度相机进 costmap</td><td>lidar-only 被真实障碍（桌沿/悬空/矮障碍）证明不够再上 depthimage_to_laserscan / 轻量 PointCloud2</td></tr>
+  <tr><td>slam_toolbox localization 模式</td><td>AMCL 出现恢复定位问题再对比</td></tr>
+  <tr><td>rosbag↔lerobot 格式转换</td><td>真有离线联合分析需求再写单向转换器</td></tr>
+  <tr><td>rosbridge 通用话题内省器 / 地图编辑</td><td>GUI 高级能力，主链路通了再说</td></tr>
+  <tr><td>独立 IMU + 融合</td><td>P2 实测偏航漂移大才买；GS130WI 上的 ICM-42688 随相机移植暂缓</td></tr>
+</table>
+
+<h2>6. rosbag 与 lerobot 数据集的关系</h2>
+<ul>
+  <li>lerobot recorder 仍是模仿学习数据的<strong>唯一权威写入方</strong>；rosbag 管 ROS 调试、传感器回放、导航复现、标定。</li>
+  <li>两边共享 <code>run_uuid</code>、开始时间、机器人配置版本、操作者标签；base_host 统一遥测两边都能消费。</li>
+  <li>不做统一格式：相机编码、动作频率、episode 边界、训练 schema 都不同，硬统一 = 造没人敢改的中间格式。</li>
+</ul>
+
+<h2>7. 风险清单</h2>
+<table>
+  <tr><th>风险</th><th>等级</th><th>缓解</th></tr>
+  <tr><td>USB 带宽/供电：深度相机+UVC+雷达+舵机总线共挤</td><td class="bad">高</td><td>P0 用 <code>lsusb -t</code> 摸清根节点；必要时带供电 hub 分流；深度相机降分辨率/帧率</td></tr>
+  <tr><td>轮反馈频率不达标（串口被臂轮询拖垮）</td><td class="warn">中</td><td>P2 验收门硬卡；臂降频/按需读；不达标就停在遥控+录制，不上导航</td></tr>
+  <tr><td>三轮全向横移不解耦（参考项目 vy 翻车前科）</td><td class="warn">中</td><td>P2 标定关卡 + 轮径/安装角参数化；机械问题早暴露早修</td></tr>
+  <tr><td>8GB 内存：Nav2+SLAM 与 VLM/语音抢资源</td><td class="warn">中</td><td>slam 建图与 VLM 错峰跑；MPPI 上线前 Qwen 满载评测；必要时导航模式下降级 VLM</td></tr>
+  <tr><td>深度相机 ROS 驱动坑（参考项目 Astra 前科）</td><td class="warn">中</td><td>P0 认型号后选驱动留 PlanB（裸 SDK 直读）；一期只预览不入导航，坑不阻塞主线</td></tr>
+  <tr><td>无物理急停</td><td class="warn">中</td><td>采购断电开关；上线前软件四源急刹全验证（P4 验收门）</td></tr>
+</table>
+
+<details>
+<summary>附录 A — codex gpt-5.6-sol 评审意见原文摘要（2026-07-20）</summary>
+<pre>
+品味评分：🟡 凑合（初稿）。三个明显问题：
+1. safety_stop 只拦 /cmd_vel_nav = 手柄/GUI/MCP 全绕过，那不叫安全层——安全门必须在仲裁后、电机前。
+2. 里程计质量验证之前就讨论 SLAM/MPPI，顺序太乐观。
+3. slam_toolbox/AMCL/MPPI/TEB/深度避障/Isaac ROS 同时开选型大会 = 功能没跑起来先过度设计。
+
+核心洞察：系统真正的数据结构是「多控制源→唯一仲裁器→最终安全门→电机」，这个结构只能有一套。
+最大风险不是 Nav2 参数，而是轮速反馈频率、时间戳、编码器解包、全向轮打滑、ZMQ 命令积压。
+
+具体修正（已全部吸收进本计划）：
+- 控制租约与零速消息分离，禁止零速流永久占 mux。
+- ZMQ 命令加 seq/单调时间戳/TTL + latest-only 排空，旧命令不许复活。
+- 只轮询轮 7/8/9；STS3215 多圈掉电不存 → ROS 侧软件展开 int64 计数。
+- 无 IMU 不加 EKF；漂移大先加 IMU 再谈融合。
+- slam_toolbox 建图 + AMCL 定位（AMCL 不是 SLAM，两阶段本来就该分开）；不上 Cartographer。
+- DWB 先跑通（配好 vel_y 就支持全向）→ MPPI 在 Qwen 满载下 A/B；TEB 不碰。
+- 深度相机一期 lidar-only 正确；二期从 depthimage_to_laserscan 最便宜方案起步；nvblox/Isaac ROS 现在纯属找麻烦。
+- rosbag 与 lerobot 两线独立，共享 run_uuid/时间基准；「统一数据格式」是假需求。
+- URDF 要有 base_footprint；自主模式下雷达超时必须停；物理急停待补，软件急刹不冒充硬件安全。
+</pre>
+</details>
+
+<details>
+<summary>附录 B — 调研底稿指针</summary>
+<pre>
+本仓库现状：ROS 2「只装未用」。docs/ros2-humble-install.html（安装记录）；
+  docs/lekiwi-orin-teleop-plan.html 明确「遥操作不引入 ROS」；GUI 占位在 gui/ui/index.html #page-ros；
+  base_host mux 在 board/home/jatson/base_host.py（BASE_PRIO / BASE_HOLD_S / watchdog）。
+参考项目：/Users/david/work_ai/yahboom-rdk-x5/
+  可搬中间件：board/home/sunrise/nav_config/{cmd_vel_mux,joy_teleop,episode_recorder,dog_walk}.py、
+  ros2_ws/src/safety_stop/、scripts/replay.sh、.memory/ 13 篇踩坑笔记（nav2-plan / safety-stop /
+  episode-recorder / strafe-weak-rear 最有迁移价值）。
+  注意：其 nav2 真实参数文件不在仓库（只在板上）——我们的参数必须进 repo。
+</pre>
+</details>
+
+</body>
+</html>

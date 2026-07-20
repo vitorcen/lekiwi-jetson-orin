@@ -17,4 +17,5 @@
 - [板上视觉栈已通](vlm-stack-orin.md) — llama.cpp sm_87 + Qwen3-VL-2B Q4 + vlm/ 三态省电 daemon + MCP + GUI Tab,改视觉先读 vlm/README
 - [GS130WI 双目相机移植](rdk-gs130wi-camera.md) — CS130WI=GS130WI 双目模组（彩色 BGGR 非单色、无 IR-cut，X5 实测）；Jetson 无驱动，方案在 docs、实施在 dependencies submodule；EEPROM 出厂标定可复用
 - [S2 语音前端已通](voice-frontend-s2.md) — SenseVoice+edge-tts/Melo,voice/ daemon+GUI 语音 Tab;MCP01 必须长按电源键开机否则麦克风全零
+- [ROS 2 集成计划](ros2-integration-plan.md) — 2026-07-20 定稿经 codex 评审:并行层+安全门下沉 base_host+slam_toolbox/AMCL/DWB;动 ROS 前必读 docs/ros2-integration-plan.html
 - [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
