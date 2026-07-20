@@ -1,0 +1,14 @@
+# 10-DOF IMU (CH340 serial) -> /imu/data + /imu/mag + /imu/temp + /imu/pressure.
+# By-id path has no unique serial (bare CH340) — stable only while it is the
+# board's sole 1a86:7523 device; servo bus / lidar are CH9102, no collision.
+[Unit]
+Description=10-DOF IMU publisher
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jetson/ros2/imu_10dof.py'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

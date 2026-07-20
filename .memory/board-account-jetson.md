@@ -26,6 +26,11 @@ metadata:
    等长时用 `perl -0777 -pi -e` 按字节整块替换(`-0777` 不做行切分,二进制安全)。
    conda `envs/lerobot/lib/*.so` 同样带旧 RUNPATH。
 3. **`/etc/subuid`、`/etc/subgid`、GECOS 注释字段**:`usermod -l` 不动它们,要手工 sed。
+4. **仓库外的配置文件**:Mac 侧 `gui/config.local.json` 的 `tokenDir` 硬编码旧仓库
+   绝对路径,不在仓库 grep 范围里 → GUI 读不到 `vlm/token`,视觉 Tab 全程「离线」
+   (2026-07-20 已修)。同时发现 save_config 的 write-then-rename 会把
+   `~/.config/lekiwi-console/config.json` 符号链接本体换成普通文件,两份配置分叉——
+   rename 前必须 `fs::canonicalize` 解析到真实目标(已修进 main.rs)。
 
 **顺带挖出一个潜伏 bug(已修)**:`base_host.service` 同时写了 `WantedBy=multi-user.target`
 和 `After=multi-user.target`,构成环

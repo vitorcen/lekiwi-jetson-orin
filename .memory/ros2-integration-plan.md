@@ -45,6 +45,18 @@ user 服务:`ld19_lidar.py`(串口直解 → /scan 10Hz 450 bins,CW→CCW 转 RE
 热拔自愈)。踩坑存档:seq 哨兵值 init -1 + seq=0 首 tick 就 encode None 崩——初值
 对齐 last_pub_seq==seq 消除该特殊态(depth_preview 同模式但被 last_mono 检查偶然掩护)。
 
+**进展 2026-07-20 晚(10 维 IMU 上线)**:新接 IMU = CH340 串口(1a86:7523,
+by-id `usb-1a86_USB_Serial-if00-port0`,**无唯一序列号**——板上仅此一颗 CH340 才稳,
+舵机/雷达是 CH9102 不冲突)。协议自逆向:115200,帧 `7e 23 <总长> <type> <payload>
+<sum&0xFF>`,四型循环 ~25Hz:04=9轴 int16(accel /2048g 重力已验、gyro **量程假设
+±2000dps 未验**(静止全零,喂 EKF 前须实测)、mag 原始计数 scale 未知)、16=四元数
+wxyz float、26=欧拉 rpy 弧度(与四元数互算吻合,节点不转发)、32=高度/温度/气压/气压2
+float。板端 `ros2/imu_10dof.py` + `imu-10dof.service` → `/imu/data|mag|temp|pressure`
+四个标准 topic(mag 是原始计数非 Tesla,已注释)。GUI ROS2 页雷达行右侧 IMU 仪表盘
+(人工地平仪+罗盘卡+陀螺/加速度棒图+磁/温/压/高度,euler 由 GUI 从四元数算)。
+Mac 经 rosbridge 四 topic 实收验证通过。计划里「无 IMU 不上 EKF」的前提已变——
+odom EKF 可提上日程,但先补 gyro 量程实测。
+
 参考项目 `/Users/david/work_ai/yahboom-rdk-x5/` 的可搬资产与踩坑见其 `.memory/`
 （cmd_vel_mux、safety_stop、episode_recorder、strafe 标定方法论最有价值）。
 相关：[[ros2-humble-installed]]、[[lekiwi-robot-target]]、[[lekiwi-gui-tauri]]、[[drive-mcp-skill]]。

@@ -22,6 +22,7 @@ const RETRY_MS = 2000;     // reconnect probe while wanted but unreachable
 const STALE_S  = 2;        // badge flips to 停帧 when a feed goes quiet
 const SCAN_THROTTLE_MS  = 100;   // 10 Hz is the native rate of common lidars
 const IMG_THROTTLE_MS   = 100;
+const IMU_THROTTLE_MS   = 100;   // dashboard redraw rate; node runs ~25 Hz
 const SCAN_MAX_R = 6;      // clamp the plot radius (m) — indoor scale
 
 let wantActive = true;     // user intent: false only after an explicit 断开
@@ -39,15 +40,16 @@ const IMG_FEEDS = [
 ];
 
 // per-feed freshness: client clock of last message + EMA of intervals for hz
-const feed = { scan: { at: 0, hz: 0 } };
+const feed = { scan: { at: 0, hz: 0 }, imu: { at: 0, hz: 0 } };
 for (const f of IMG_FEEDS) feed[f.key] = { at: 0, hz: 0 };
 
 function topicOf(f) { return $(f.topicEl).value.trim() || f.def; }
+function imuPrefix() { return $('imuTopic').value.trim() || '/imu'; }
 
 // Source-side truth: each board node self-reports its real publish fps on
 // /diagnostics (1 Hz) — the only rate rosbridge throttling cannot distort.
 const DIAG_KEY = { depth_preview: 'depth', front_cam: 'front',
-                   wrist_cam: 'wrist', ld19_lidar: 'scan' };
+                   wrist_cam: 'wrist', ld19_lidar: 'scan', imu_10dof: 'imu' };
 const DIAG_STALE_MS = 3000;
 
 function handleDiag(msg) {
@@ -113,6 +115,11 @@ function resubscribeAll() {
   for (const f of IMG_FEEDS)
     subscribe('sub:' + f.key, topicOf(f),
               'sensor_msgs/msg/CompressedImage', IMG_THROTTLE_MS);
+  const ip = imuPrefix();
+  subscribe('sub:imu',   ip + '/data',     'sensor_msgs/msg/Imu',           IMU_THROTTLE_MS);
+  subscribe('sub:imag',  ip + '/mag',      'sensor_msgs/msg/MagneticField', 500);
+  subscribe('sub:itemp', ip + '/temp',     'sensor_msgs/msg/Temperature',   1000);
+  subscribe('sub:ipress', ip + '/pressure', 'sensor_msgs/msg/FluidPressure', 1000);
   subscribe('sub:diag', '/diagnostics', 'diagnostic_msgs/msg/DiagnosticArray', 0);
 }
 
@@ -137,6 +144,11 @@ function connect() {
     if (m.op !== 'publish') return;
     if (m.topic === '/diagnostics') { handleDiag(m.msg); return; }
     if (m.topic === ($('scanTopic').value.trim() || '/scan')) { paintScan(m.msg); return; }
+    const ipfx = imuPrefix();
+    if (m.topic === ipfx + '/data')     { paintImu(m.msg); return; }
+    if (m.topic === ipfx + '/mag')      { imuState.mag = m.msg.magnetic_field; return; }
+    if (m.topic === ipfx + '/temp')     { imuState.temp = m.msg.temperature; return; }
+    if (m.topic === ipfx + '/pressure') { imuState.press = m.msg.fluid_pressure; return; }
     const f = IMG_FEEDS.find(x => m.topic === topicOf(x));
     if (f) paintImage(f, m.msg);
   };
@@ -219,6 +231,158 @@ function paintScan(msg) {
     `${n} 点 · ${feed.scan.hz.toFixed(1)} Hz · 最近 ${isFinite(nearest) ? nearest.toFixed(2) + 'm' : '—'}`;
 }
 
+// ---- IMU dashboard -------------------------------------------------------
+// One square canvas: artificial horizon (roll/pitch) + compass card (yaw),
+// centered-zero bars for gyro/accel, text row for mag / temp / pressure.
+// Euler is derived here from the quaternion — /imu/data is the only truth.
+
+const imuState = { mag: null, temp: null, press: null };
+
+function eulerOf(q) {
+  const { w, x, y, z } = q;
+  return {
+    roll:  Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)),
+    pitch: Math.asin(Math.max(-1, Math.min(1, 2 * (w * y - z * x)))),
+    yaw:   Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)),
+  };
+}
+
+function dialHorizon(ctx, cx, cy, r, roll, pitch, dpr) {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.clip();
+  ctx.translate(cx, cy); ctx.rotate(-roll);
+  const py = Math.max(-r, Math.min(r, pitch / (Math.PI / 4) * r)); // 45° = r
+  ctx.fillStyle = '#2c4a7c';                      // sky
+  ctx.fillRect(-r * 2, -r * 2, r * 4, r * 4);
+  ctx.fillStyle = '#5c4326';                      // ground
+  ctx.fillRect(-r * 2, py, r * 4, r * 4);
+  ctx.strokeStyle = '#e6e9f5'; ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath(); ctx.moveTo(-r, py); ctx.lineTo(r, py); ctx.stroke();
+  // pitch ladder every 15°
+  ctx.strokeStyle = 'rgba(230,233,245,.5)'; ctx.lineWidth = dpr;
+  for (const d of [-30, -15, 15, 30]) {
+    const ly = py + d / 45 * r;
+    ctx.beginPath(); ctx.moveTo(-r * 0.35, ly); ctx.lineTo(r * 0.35, ly); ctx.stroke();
+  }
+  ctx.restore();
+  // fixed aircraft marker + bezel
+  ctx.strokeStyle = '#f9e2af'; ctx.lineWidth = 2 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(cx - r * 0.5, cy); ctx.lineTo(cx - r * 0.15, cy);
+  ctx.moveTo(cx + r * 0.15, cy); ctx.lineTo(cx + r * 0.5, cy);
+  ctx.stroke();
+  ctx.fillStyle = '#f9e2af';
+  ctx.fillRect(cx - 1.5 * dpr, cy - 1.5 * dpr, 3 * dpr, 3 * dpr);
+  ctx.strokeStyle = '#3d4460'; ctx.lineWidth = dpr;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+}
+
+function dialCompass(ctx, cx, cy, r, yaw, dpr) {
+  // REP-103 yaw is CCW-positive; a compass card turns so heading sits on top
+  const heading = ((-yaw * 180 / Math.PI) % 360 + 360) % 360;
+  ctx.strokeStyle = '#3d4460'; ctx.lineWidth = dpr;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(-heading * Math.PI / 180);
+  ctx.font = `${11 * dpr}px ui-monospace, monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let d = 0; d < 360; d += 30) {
+    ctx.save(); ctx.rotate(d * Math.PI / 180);
+    if (d % 90 === 0) {
+      ctx.fillStyle = d === 0 ? '#f38ba8' : '#a9b1d6';
+      ctx.fillText('北东南西'[d / 90], 0, -r * 0.78);
+    } else {
+      ctx.strokeStyle = '#4f5678'; ctx.lineWidth = dpr;
+      ctx.beginPath(); ctx.moveTo(0, -r * 0.92); ctx.lineTo(0, -r * 0.8); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+  // fixed lubber line + heading readout
+  ctx.strokeStyle = '#f9e2af'; ctx.lineWidth = 2 * dpr;
+  ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy - r * 0.62); ctx.stroke();
+  ctx.fillStyle = '#cdd6f4';
+  ctx.font = `${13 * dpr}px ui-monospace, monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(heading.toFixed(0) + '°', cx, cy);
+}
+
+// centered-zero horizontal bar: |label  ────█────  value|
+function imuBar(ctx, x, y, w, h, label, val, range, unit, color, dpr) {
+  ctx.font = `${11 * dpr}px ui-monospace, monospace`;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';  ctx.fillStyle = '#6b7394';
+  ctx.fillText(label, x, y + h / 2);
+  const bx = x + 26 * dpr, bw = w - 92 * dpr, mid = bx + bw / 2;
+  ctx.fillStyle = '#1c2030'; ctx.fillRect(bx, y, bw, h);
+  const frac = Math.max(-1, Math.min(1, val / range));
+  ctx.fillStyle = color;
+  if (frac >= 0) ctx.fillRect(mid, y, frac * bw / 2, h);
+  else ctx.fillRect(mid + frac * bw / 2, y, -frac * bw / 2, h);
+  ctx.fillStyle = '#3d4460'; ctx.fillRect(mid - dpr / 2, y - dpr, dpr, h + 2 * dpr);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#a9b1d6';
+  ctx.fillText(val.toFixed(1) + unit, x + w, y + h / 2);
+}
+
+function paintImu(msg) {
+  markFresh(feed.imu);
+  const cv = $('imuCanvas');
+  if (!cv || !msg || !msg.orientation) return;
+  $('imuPh').style.display = 'none';
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth * dpr, h = cv.clientHeight * dpr;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  // 4:3 wide canvas, laid out below the overlay row (badge + meta):
+  // two dials up top, gyro / accel bars in two columns, one baro line bottom
+  const e = eulerOf(msg.orientation);
+  const r = w * 0.155;
+  const dy = h * 0.34;
+  dialHorizon(ctx, w * 0.27, dy, r, e.roll, e.pitch, dpr);
+  dialCompass(ctx, w * 0.73, dy, r, e.yaw, dpr);
+
+  ctx.fillStyle = '#6b7394';
+  ctx.font = `${11 * dpr}px ui-monospace, monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(`横滚 ${(e.roll * 180 / Math.PI).toFixed(1)}°  俯仰 ${(e.pitch * 180 / Math.PI).toFixed(1)}°`,
+               w * 0.27, dy + r + 12 * dpr);
+  ctx.fillText('航向 Yaw', w * 0.73, dy + r + 12 * dpr);
+
+  const g = msg.angular_velocity, a = msg.linear_acceleration;
+  const deg = v => v * 180 / Math.PI, gee = v => v / 9.80665;
+  const bh = 9 * dpr, colw = w * 0.44;
+  const cols = [
+    [w * 0.04, [['ωX', deg(g.x), 300, '°', '#89b4fa'], ['ωY', deg(g.y), 300, '°', '#89b4fa'],
+                ['ωZ', deg(g.z), 300, '°', '#89b4fa']]],
+    [w * 0.52, [['aX', gee(a.x), 2, 'g', '#a6e3a1'], ['aY', gee(a.y), 2, 'g', '#a6e3a1'],
+                ['aZ', gee(a.z), 2, 'g', '#a6e3a1']]],
+  ];
+  for (const [cx0, rows] of cols) {
+    let y = h * 0.68;
+    for (const [lb, v, rg, un, c] of rows) {
+      imuBar(ctx, cx0, y, colw, bh, lb, v, rg, un, c, dpr);
+      y += h * 0.095;
+    }
+  }
+
+  // bottom line: mag raw + baro (alt derived from pressure, ISA formula)
+  const st = imuState;
+  const mg = st.mag ? `磁 ${st.mag.x.toFixed(0)}/${st.mag.y.toFixed(0)}/${st.mag.z.toFixed(0)}` : '磁 —';
+  const tp = st.temp != null ? `${st.temp.toFixed(1)}°C` : '—';
+  const pr = st.press != null ? `${(st.press / 100).toFixed(1)}hPa` : '—';
+  const alt = st.press != null
+    ? `高度 ${(44330 * (1 - Math.pow(st.press / 101325, 0.1903))).toFixed(1)}m` : '';
+  ctx.fillStyle = '#6b7394';
+  ctx.font = `${11 * dpr}px ui-monospace, monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText(`${mg}   ${tp}  ${pr}  ${alt}`, w / 2, h * 0.955);
+
+  $('imuMeta').textContent = `${srcLabel('imu')}预览 ${feed.imu.hz.toFixed(1)} Hz`;
+}
+
 // ---- image previews (depth / front / wrist) ------------------------------
 
 function paintImage(f, msg) {
@@ -245,6 +409,7 @@ function badge(id, text, cls) {
 function tickAge() {
   const connected = ws && ws.readyState === WebSocket.OPEN;
   const rows = [['scan', 'scanBadge', '/scan'],
+                ['imu', 'imuBadge', 'IMU'],
                 ...IMG_FEEDS.map(x => [x.key, x.key + 'Badge', x.label])];
   for (const [key, bid, label] of rows) {
     const f = feed[key];
@@ -259,6 +424,10 @@ function feedDown() {
   feed.scan.at = 0; feed.scan.hz = 0;
   $('scanPh').style.display = '';
   $('scanMeta').textContent = '—';
+  feed.imu.at = 0; feed.imu.hz = 0;
+  imuState.mag = imuState.temp = imuState.press = null;
+  $('imuPh').style.display = '';
+  $('imuMeta').textContent = '—';
   for (const f of IMG_FEEDS) {
     feed[f.key].at = 0; feed[f.key].hz = 0;
     $(f.key + 'Ph').style.display = '';
@@ -298,7 +467,7 @@ $('rosConnBtn').onclick = () => {
 };
 
 // topic edits take effect live on an open connection
-for (const id of ['scanTopic', 'depthTopic', 'frontTopic', 'wristTopic']) {
+for (const id of ['scanTopic', 'imuTopic', 'depthTopic', 'frontTopic', 'wristTopic']) {
   const el = $(id);
   if (el) el.addEventListener('change', () => {
     if (ws && ws.readyState === WebSocket.OPEN) resubscribeAll();

@@ -283,6 +283,10 @@ fn save_config(text: String) -> Result<(), String> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
+    // config.json is a symlink to the repo's config.local.json; rename onto the
+    // symlink itself would replace it with a regular file and fork the two
+    // copies, so resolve to the real target first.
+    let p = std::fs::canonicalize(&p).unwrap_or(p);
     // Write-then-rename, never truncate in place: this file is re-read by every
     // vlm/voice request to resolve tokenDir, so a reader landing inside a
     // truncate window would parse "" -> lose tokenDir -> "no VLM token" -> the

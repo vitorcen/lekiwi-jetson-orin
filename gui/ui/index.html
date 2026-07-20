@@ -317,35 +317,20 @@
 
   <div id="roswrap">
 
-    <!-- 第一行:三相机 · 深度相机预览 -->
+    <!-- 第一行:IMU 仪表盘 · 腕部 · 前视 -->
+    <!-- IMU 仪表盘(10维:姿态球+罗盘+角速度/加速度+磁/气压,板端 imu-10dof 节点) -->
     <section class="panel">
-      <h2>深度相机 <span class="en">Depth preview</span></h2>
+      <h2>IMU 仪表盘 <span class="en">IMU dashboard</span></h2>
       <div class="rosbox">
-        <img id="depthImg" alt="depth" draggable="false">
+        <canvas id="imuCanvas"></canvas>
         <div class="rosoverlay">
-          <span id="depthBadge" class="vbadge bad">未接入</span>
-          <span id="depthMeta" class="vage">—</span>
+          <span id="imuBadge" class="vbadge bad">未接入</span>
+          <span id="imuMeta" class="vage">—</span>
         </div>
-        <div class="rosph" id="depthPh">等待深度画面…<br><small>板端需跑深度驱动 + JPEG republish 节点</small></div>
+        <div class="rosph" id="imuPh">等待 /imu/data…<br><small>板端需跑 imu-10dof 节点</small></div>
       </div>
-      <label class="rostopic">topic
-        <input id="depthTopic" type="text" value="/depth_preview/compressed">
-      </label>
-    </section>
-
-    <!-- 前视相机(vlm-daemon 单属主,板端 front_cam 节点经 HTTP 转发) -->
-    <section class="panel">
-      <h2>前视相机 <span class="en">Front camera</span></h2>
-      <div class="rosbox">
-        <img id="frontImg" alt="front" draggable="false">
-        <div class="rosoverlay">
-          <span id="frontBadge" class="vbadge bad">未接入</span>
-          <span id="frontMeta" class="vage">—</span>
-        </div>
-        <div class="rosph" id="frontPh">等待前视画面…<br><small>板端需跑 front-cam 转发节点（vlm-daemon 单属主）</small></div>
-      </div>
-      <label class="rostopic">topic
-        <input id="frontTopic" type="text" value="/front_cam/compressed">
+      <label class="rostopic">topic 前缀
+        <input id="imuTopic" type="text" value="/imu">
       </label>
     </section>
 
@@ -365,7 +350,23 @@
       </label>
     </section>
 
-    <!-- 第二行:大雷达框 /scan 极坐标图 -->
+    <!-- 前视相机(vlm-daemon 单属主,板端 front_cam 节点经 HTTP 转发) -->
+    <section class="panel">
+      <h2>前视相机 <span class="en">Front camera</span></h2>
+      <div class="rosbox">
+        <img id="frontImg" alt="front" draggable="false">
+        <div class="rosoverlay">
+          <span id="frontBadge" class="vbadge bad">未接入</span>
+          <span id="frontMeta" class="vage">—</span>
+        </div>
+        <div class="rosph" id="frontPh">等待前视画面…<br><small>板端需跑 front-cam 转发节点（vlm-daemon 单属主）</small></div>
+      </div>
+      <label class="rostopic">topic
+        <input id="frontTopic" type="text" value="/front_cam/compressed">
+      </label>
+    </section>
+
+    <!-- 第二行:大雷达框 /scan 极坐标图 · 深度相机 -->
     <section class="panel roswide">
       <h2>激光雷达 <span class="en">LaserScan</span></h2>
       <div class="rosbox rossq">
@@ -378,6 +379,21 @@
       </div>
       <label class="rostopic">topic
         <input id="scanTopic" type="text" value="/scan">
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>深度相机 <span class="en">Depth preview</span></h2>
+      <div class="rosbox">
+        <img id="depthImg" alt="depth" draggable="false">
+        <div class="rosoverlay">
+          <span id="depthBadge" class="vbadge bad">未接入</span>
+          <span id="depthMeta" class="vage">—</span>
+        </div>
+        <div class="rosph" id="depthPh">等待深度画面…<br><small>板端需跑深度驱动 + JPEG republish 节点</small></div>
+      </div>
+      <label class="rostopic">topic
+        <input id="depthTopic" type="text" value="/depth_preview/compressed">
       </label>
     </section>
   </div>
