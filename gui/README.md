@@ -16,8 +16,14 @@
 
 | Tab | 状态 | 做什么 |
 |---|---|---|
-| 🔌 **ZeroMQ 遥控** | ✅ 已实现 | 键盘 WASD/QE 开车，走原生 lerobot ZMQ 通道 |
-| 🤖 **ROS 2** | 感知预览 | 前端直连 rosbridge(:9090,只读订阅):雷达 /scan 极坐标图、深度相机 JPEG 预览、前视相机预留框;控制仍走 ZeroMQ。整体计划见 `docs/ros2-integration-plan.html` |
+| 🔌 **ZeroMQ 遥控** | ✅ | 键盘 WASD/QE 开车 + 主臂遥操作,走原生 lerobot ZMQ 通道;底部日志栏(手柄/键盘/主臂回传)只在本 Tab 显示 |
+| 👁 **视觉 Vision** | ✅ | vlm-daemon(:8090)相机画面 + Qwen-VL 本地解读;进 Tab 自动出画面,解读手动开 |
+| 🎙 **语音 Voice** | ✅ | voice-daemon(:8092)麦克风对话流;半双工,播报中可打断 |
+| 🤖 **ROS 2** | ✅ | 前端直连 rosbridge(:9090,只读订阅):雷达 /scan 极坐标图 + 深度/前视/腕部三路 JPEG 预览;控制仍走 ZeroMQ。整体计划见 `docs/ros2-integration-plan.html` |
+
+视觉/语音两个 Tab 的 Bearer token 由板端 daemon 生成,需同步到本机(`scp
+jatson@<board-ip>:work/lekiwi-jatson-orin/{vlm,voice}/token` 到本机 repo 对应目录),
+GUI 读取位置由 `config.json` 的 `tokenDir` 指定(缺省 `~/work/lekiwi-jatson-orin`)。
 
 ## ZeroMQ Tab 怎么用
 
@@ -40,9 +46,9 @@
    之后才能 `python -m lerobot.robots.lekiwi.lekiwi_host ...`。**SSH 非交互下直接跑 host 会 EOFError。**
 
 2. GUI 里填 Orin IP（板子局域网地址）和命令端口（默认 `5555`），点**连接**。
-   免手填：`cp gui/config.example.json ~/.config/lekiwi-console/config.json` 后改成实际 IP，
-   GUI 启动自动带入（release 版同样读这个路径，可随时手改）。
-   每字段优先级：GUI 里输入过的值（localStorage `lekiwi.conn`）> config.json > 空。
+   免手填：`cp gui/config.example.json gui/config.local.json` 改成实际 IP,再
+   `ln -sfn $PWD/gui/config.local.json ~/.config/lekiwi-console/config.json`。
+   该文件是**唯一真相源**:GUI 里改连接参数会直接写回,无 localStorage,可随时手改。
 3. **点键盘区**获取焦点（虚线框变实线高亮），然后：
 
    | 键 | 动作 | | 键 | 动作 |
@@ -132,15 +138,23 @@ Rust 端串口 worker 与 ZMQ worker 同一铁律：独立线程，不进 Tauri 
 ```
 gui/
 ├── run.sh                    # 编译并启动
+├── config.example.json       # 连接参数样例(复制为 config.local.json,不入库)
 ├── src-tauri/
-│   ├── Cargo.toml            # + zeromq (纯 Rust) + tokio(time)
-│   ├── src/main.rs           # zmq_connect / zmq_send_base / zmq_disconnect / zmq_status
+│   ├── Cargo.toml            # + zeromq (纯 Rust) + tokio(time) + ureq
+│   ├── src/main.rs           # ZMQ/串口 worker、vlm/voice HTTP 代理(token 不出后端)、
+│   │                         # sysinfo ssh、config 读写、日志总线 SUB(2s 自愈)
 │   └── tauri.conf.json
 └── ui/
-    ├── index.html            # 两个 tab + ZeroMQ 遥控界面
-    ├── style.css             # 醒目 tab + 键盘/速度/可视化样式
+    ├── index.html            # 四个 tab + 顶部状态栏 + 底部日志栏
+    ├── style.css
     └── js/
-        ├── state.js          # $ / S / invoke
-        ├── main.js           # tab 切换
-        └── zmq.js            # 连接 + 键盘遥控 + 方向可视化
+        ├── state.js          # $ / S / invoke + config 灌值/写回(唯一真相源)
+        ├── main.js           # tab 切换(含日志栏仅 ZMQ tab 可见)
+        ├── zmq.js            # 连接 + 键盘遥控 + 方向可视化(dead-man)
+        ├── leader.js         # 主臂遥操作(连接/对齐零位/跟随)
+        ├── vision.js         # 视觉 tab(帧泵 + 解读)
+        ├── voice.js          # 语音 tab(对话流)
+        ├── ros.js            # ROS tab(rosbridge 订阅:雷达极坐标 + 三路相机)
+        ├── health.js         # 顶部状态栏(4s sysinfo 轮询,隐藏时暂停)
+        └── log.js            # 底部日志栏渲染
 ```

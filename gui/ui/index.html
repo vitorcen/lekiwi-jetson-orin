@@ -95,9 +95,8 @@
     </label>
     <button id="connBtn" class="primary">连接</button>
     <span id="zmqState" class="pill bad">未连接</span>
-    <span class="hint">连接前，先在 Orin 上跑
-      <code>python -m lerobot.robots.lekiwi.lekiwi_host --robot.port=/dev/ttyACM0 --robot.id=orin_kiwi</code>
-    </span>
+    <span class="hint">板端 <code>base_host</code> 已随 systemd 开机自启（车通电即可连）；
+      没装过先跑一次 <code>scripts/setup_board.sh &lt;board-ip&gt;</code></span>
   </div>
 
   <div id="telewrap">

@@ -18,11 +18,7 @@
       }
     ],
     "security": {
-      "csp": null,
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["$HOME/**"]
-      }
+      "csp": null
     }
   },
   "bundle": {

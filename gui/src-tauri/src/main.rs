@@ -135,15 +135,11 @@ fn spawn_log_worker(app: tauri::AppHandle) -> mpsc::UnboundedSender<LogReq> {
         let rt = tokio::runtime::Runtime::new().expect("log worker runtime");
         rt.block_on(async move {
             let mut sock: Option<SubSocket> = None;
+            let mut ep: Option<String> = None;
             loop {
                 tokio::select! {
                     cmd = rx.recv() => match cmd {
-                        Some(LogReq::Connect(ep)) => {
-                            let mut s = SubSocket::new();
-                            if s.connect(&ep).await.is_ok() && s.subscribe("").await.is_ok() {
-                                sock = Some(s);
-                            }
-                        }
+                        Some(LogReq::Connect(e)) => { ep = Some(e); sock = None; }
                         None => break,   // app shutting down
                     },
                     msg = async { sock.as_mut().unwrap().recv().await }, if sock.is_some() => {
@@ -155,7 +151,19 @@ fn spawn_log_worker(app: tauri::AppHandle) -> mpsc::UnboundedSender<LogReq> {
                                     }
                                 }
                             }
-                            Err(_) => sock = None,   // link died; a reconnect re-subscribes
+                            Err(_) => sock = None,   // link died; retried below
+                        }
+                    },
+                    // self-heal: a board reboot must not leave the log strip
+                    // silently dead — probe every 2s while down
+                    _ = tokio::time::sleep(Duration::from_secs(2)),
+                        if sock.is_none() && ep.is_some() => {}
+                }
+                if sock.is_none() {
+                    if let Some(e) = &ep {
+                        let mut s = SubSocket::new();
+                        if s.connect(e).await.is_ok() && s.subscribe("").await.is_ok() {
+                            sock = Some(s);
                         }
                     }
                 }
@@ -235,11 +243,30 @@ fn zero_path() -> std::path::PathBuf {
 /// leader_zero.json so all persisted state shares one dir; survives release
 /// builds where ui/ assets are baked into the binary. Missing file -> "{}"
 /// so the frontend seeds nothing and falls back to its own defaults.
+fn config_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config/lekiwi-console/config.json")
+}
+
 #[tauri::command]
 fn load_config() -> String {
+    std::fs::read_to_string(config_path()).unwrap_or_else(|_| "{}".into())
+}
+
+/// Directory holding the daemon token files (vlm/token, voice/token, synced
+/// from the board). Config key "tokenDir" points at the repo checkout; the
+/// legacy ~/work/lekiwi-jatson-orin default kept as fallback.
+fn token_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let p = std::path::PathBuf::from(home).join(".config/lekiwi-console/config.json");
-    std::fs::read_to_string(p).unwrap_or_else(|_| "{}".into())
+    let cfg: serde_json::Value =
+        serde_json::from_str(&load_config()).unwrap_or(serde_json::Value::Null);
+    if let Some(d) = cfg.get("tokenDir").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        let d = d.strip_prefix("~/")
+            .map(|rest| format!("{home}/{rest}"))
+            .unwrap_or_else(|| d.to_string());
+        return std::path::PathBuf::from(d);
+    }
+    std::path::PathBuf::from(home).join("work/lekiwi-jatson-orin")
 }
 
 /// The config file is the ONLY store for connection params — GUI edits write
@@ -248,8 +275,11 @@ fn load_config() -> String {
 /// stays the single hand-editable copy.
 #[tauri::command]
 fn save_config(text: String) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let p = std::path::PathBuf::from(home).join(".config/lekiwi-console/config.json");
+    // The file is the single source of truth with no backup — refuse to
+    // clobber it with something a frontend bug produced.
+    serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| format!("refusing to save invalid JSON: {e}"))?;
+    let p = config_path();
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
@@ -557,6 +587,11 @@ async fn sysinfo(ip: String) -> Result<String, String> {
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=6",
                 "-o", "StrictHostKeyChecking=accept-new",
+                // reuse one TCP+auth session across the 4 s polls instead of a
+                // full handshake per poll
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=/tmp/lekiwi-ssh-%r@%h",
+                "-o", "ControlPersist=60s",
                 &format!("jatson@{ip}"),
                 SYSINFO_SH,
             ])
@@ -638,9 +673,7 @@ const VLM_PORT: u16 = 8090;
 /// restart (new token) is picked up without relaunching the GUI. Missing/empty
 /// file -> None, which the commands turn into an error the UI shows as offline.
 fn vlm_token() -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let p = std::path::PathBuf::from(home).join("work/lekiwi-jatson-orin/vlm/token");
-    std::fs::read_to_string(p)
+    std::fs::read_to_string(token_dir().join("vlm/token"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -764,9 +797,7 @@ async fn vlm_set_state(ip: String, state: String) -> Result<String, String> {
 const VOICE_PORT: u16 = 8092;
 
 fn voice_auth() -> Result<String, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let p = std::path::PathBuf::from(home).join("work/lekiwi-jatson-orin/voice/token");
-    std::fs::read_to_string(p)
+    std::fs::read_to_string(token_dir().join("voice/token"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())

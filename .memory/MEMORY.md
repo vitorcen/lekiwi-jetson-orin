@@ -20,3 +20,4 @@
 - [ROS 2 集成计划](ros2-integration-plan.md) — 2026-07-20 定稿经 codex 评审:并行层+安全门下沉 base_host+slam_toolbox/AMCL/DWB;动 ROS 前必读 docs/ros2-integration-plan.html
 - [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
 - [板端单测](unit-tests-board.md) — tests/ 纯逻辑单测,Mac 上 uv run --with pytest --with numpy pytest tests/ -q;只测纯函数不测胶水,JS 不测
+- [Commit 纪律](commit-discipline.md) — 实施期不 commit 不 amend,留工作区等用户指示收尾

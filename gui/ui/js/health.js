@@ -18,8 +18,10 @@ function bar(fillId, pct, warnHi = 85, midHi = 65) {
 
 function offline() {
   $('sbDot').classList.remove('up');
-  for (const id of ['pwrTxt', 'battTxt', 'armTxt', 'cpuTxt', 'gpuTxt', 'ramTxt', 'hdTxt', 'tempTxt'])
+  for (const id of ['pwrTxt', 'battTxt', 'armTxt', 'cpuTxt', 'gpuTxt', 'ramTxt', 'hdTxt', 'tempTxt']) {
     $(id).textContent = '--';
+    $(id).style.color = '';      // clear stale warn colours (temp/power red)
+  }
   for (const id of ['battFill', 'cpuFill', 'gpuFill', 'ramFill', 'hdFill'])
     $(id).style.width = '0';
 }
@@ -106,6 +108,7 @@ function paint(kv) {
 }
 
 async function poll() {
+  if (document.hidden) return;      // minimized window must not ssh all night
   const ip = ($('ip') && $('ip').value.trim()) || '';
   if (!ip) { offline(); return; }   // no board configured yet
   try {
