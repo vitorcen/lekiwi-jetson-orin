@@ -21,3 +21,4 @@
 - [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
 - [板端单测](unit-tests-board.md) — tests/ 纯逻辑单测,Mac 上 uv run --with pytest --with numpy pytest tests/ -q;只测纯函数不测胶水,JS 不测
 - [Commit 纪律](commit-discipline.md) — 实施期不 commit 不 amend,留工作区等用户指示收尾
+- [板子内存已见底](board-memory-ceiling.md) — 空闲 195MB/swap 2.2GB,llama-server 独占 3.4GB;fork 变慢会伪装成设备故障,排查前先 free -m
