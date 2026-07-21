@@ -21,9 +21,10 @@ without any of that:
                   calibrated limits. Base keys may be omitted in such
                   messages (base is only driven when "x.vel" is present).
         "safety.motion" 1/0 master switch (latched in MOTION_FILE): 0 freezes
-                  actuation — wheels stopped, arm goals dropped, holding
-                  torque kept — while recv/mux/telemetry run normally, so
-                  the command chain can be debugged with motors dead.
+                  actuation — wheels stopped AND torque-released (limp, push
+                  the base by hand), arm goals dropped but arm holding torque
+                  kept (a raised arm must not drop) — while recv/mux/telemetry
+                  run normally, so the command chain can be debugged motors-off.
 
 Arm control (servos 1-6, optional — skipped if the arm doesn't answer):
 direct per-joint velocity teleop, no calibration and no cartesian IK. Left
@@ -416,6 +417,14 @@ def stop(ser):
         write(ser, sid, ADDR_SPEED, le(0))
 
 
+def wheels_torque(ser, on):
+    # Cut wheel torque so the base is limp (hand-pushable) when motion is off;
+    # re-energize on resume. Always stop() before cutting so the speed register
+    # is 0 and re-arming can't lurch on a stale command.
+    for sid in WHEELS:
+        write(ser, sid, ADDR_TORQUE, [1 if on else 0])
+
+
 def main():
     ser = serial.Serial(PORT, BAUD, timeout=0.02)
     ensure_wheel_mode(ser)
@@ -455,6 +464,8 @@ def main():
     mid_seek = False
     motion_on = read_motion()
     if not motion_on:
+        stop(ser)
+        wheels_torque(ser, False)   # boot latched off -> wheels limp
         print("[base_host] SAFETY: motion output DISABLED (latched)", flush=True)
     try:
         while True:
@@ -496,7 +507,10 @@ def main():
                     write_motion(motion_on)
                     if not motion_on:
                         stop(ser)
+                        wheels_torque(ser, False)   # go limp, hand-pushable
                         moving = False
+                    else:
+                        wheels_torque(ser, True)    # re-energize before drive
                     print(f"[base_host] SAFETY: motion output "
                           f"{'ENABLED' if motion_on else 'DISABLED'}", flush=True)
                 if not motion_on:

@@ -94,7 +94,7 @@
     <button id="connBtn" class="primary">连接</button>
     <span id="zmqState" class="pill bad">未连接</span>
     <button id="motionBtn" data-state=""
-            title="安全总开关:切断后 base_host 不再输出电机指令(轮停、臂冻结保持力矩),收包/仲裁/日志照常,用于安全调试业务链路。状态由板端回报。">🛑 切断电机输出</button>
+            title="安全总开关:切断后 base_host 不再输出电机指令(轮子停并松弛力矩可手推、臂冻结保持力矩不掉),收包/仲裁/日志照常,用于安全调试业务链路。状态由板端回报。">🛑 切断电机输出</button>
     <span class="hint">板端 <code>base_host</code> 已随 systemd 开机自启（车通电即可连）；
       没装过先跑一次 <code>scripts/setup_board.sh &lt;board-ip&gt;</code></span>
   </div>
