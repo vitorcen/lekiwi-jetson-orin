@@ -213,18 +213,26 @@ def current_pair(config):
 def apply_axis(config, axis, value):
     """By-axis whole replacement (no deep-merge guessing) — the GUI GETs the full axis,
     edits it, and POSTs it back. Returns a NEW config; never mutates the input.
-      axis 'asr'         -> current preset pair.asr (str)
-      axis 'tts'         -> current preset pair.tts (dict)
+      axis 'asr'         -> every preset's pair.asr (str)
+      axis 'tts'         -> every preset's pair.tts (dict)
       axis 'vision_speak'-> top-level bool
       axis 'brain'       -> top-level brain dict (P2)
     """
     cfg = copy.deepcopy(config)
     if axis in ("asr", "tts"):
-        name = current_preset_name(cfg)
+        # The Voice page's save is the only pair editor and it means "use this
+        # engine/voice for conversations, whichever brain is selected" — so the
+        # value fans out to every preset. Per-preset divergence has no UI to
+        # create it; honoring it would silently revert engines on a brain switch.
         presets = cfg.setdefault("presets", {})
-        preset = presets.setdefault(name, copy.deepcopy(DEFAULT_CONFIG["presets"]["deepseek"]))
-        pair = preset.setdefault("pair", copy.deepcopy(DEFAULT_PAIR))
-        pair[axis] = copy.deepcopy(value)
+        if not presets:
+            presets[current_preset_name(cfg)] = copy.deepcopy(
+                DEFAULT_CONFIG["presets"]["deepseek"])
+        for preset in presets.values():
+            if not isinstance(preset, dict):
+                continue
+            pair = preset.setdefault("pair", copy.deepcopy(DEFAULT_PAIR))
+            pair[axis] = copy.deepcopy(value)
     elif axis == "vision_speak":
         cfg["vision_speak"] = bool(value)
     elif axis == "vision_speak_limit":

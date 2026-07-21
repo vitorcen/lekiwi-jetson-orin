@@ -71,4 +71,13 @@ aarch64)捆的是 ORT1.11/CUDA10.2/cuDNN8,**不适配 JetPack6**,只能按官方
 且 int8 算子可能回落 CPU 反复拷贝、统一内存与 VLM 互抢。RTF 0.56 已够实时(GR3D 才 6-10%
 闲着也不缺算力),不值。板子已是 MAXN_SUPER。载入 24s 是一次性,另一回事。
 
+**保存自动应用到 Agent 页(2026-07-22 已实施)**:审计结论——daemon 侧本就闭环
+(保存 ephemeral=false = 切运行引擎+落盘+清覆盖,对话链即刻用新引擎);唯一的洞是
+**pair 按 preset 存**,保存只写当前 preset,Agent 页一切大脑,另一 preset 的旧 pair 把
+ASR/TTS 顶回去(板上实锅:mimo=funasr / deepseek=sensevoice 已分歧)。修法 = 消除
+特殊情况:`apply_axis` 的 asr/tts 轴**扇出写入所有 preset 的 pair**(per-preset 分歧
+本无任何 UI 能产生,唯一编辑入口 Voice 页保存语义天然全局)。板上验证:两 preset 对齐、
+applied=funasr、drift 空。另:VAD 默认 fsmn(0.5/0.1/0.5/0.9),离线第一位 funasr,
+流式默认 x-asr-zh-en。两遍法仍是开放项。
+
 **调研已否掉的**(codex+kimi,别重查):nemotron-3.5-asr 有中文但**只出 QNN/高通版**(Jetson 跑不了);nemotron-speech CPU 版是**纯英文**;Qwen3-ASR-1.7B 无 sherpa int8、CPU~4-5s、GPU 要 torch 服务抢显存 —— **都不值**。真瓶颈是音频 SNR,不是模型。相关:[[voice-frontend-s2]] [[voice-venv-dual-sherpa113]] [[board-memory-ceiling]]

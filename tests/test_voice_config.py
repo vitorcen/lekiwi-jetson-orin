@@ -24,7 +24,7 @@ def test_merge_defaults_does_not_mutate_input():
     assert src == {"vision_speak": True}
 
 
-def test_apply_axis_tts_replaces_only_current_preset_pair():
+def test_apply_axis_tts_replaces_pair_tts_only():
     cfg = vc.merge_defaults({})
     new = vc.apply_axis(cfg, "tts", {"engine": "melo"})
     assert new["presets"]["deepseek"]["pair"]["tts"] == {"engine": "melo"}
@@ -126,13 +126,17 @@ def test_apply_axis_unknown_raises():
         pass
 
 
-def test_apply_axis_targets_selected_preset_not_default():
+def test_apply_axis_asr_tts_fan_out_to_all_presets():
+    # Save means "use this engine/voice whichever brain is selected": a later
+    # brain switch must not revert the saved pair, so every preset gets it.
     cfg = vc.merge_defaults({})
     cfg["presets"]["mimo"] = copy.deepcopy(cfg["presets"]["deepseek"])
     cfg["brain"]["preset"] = "mimo"
     new = vc.apply_axis(cfg, "tts", {"engine": "melo"})
     assert new["presets"]["mimo"]["pair"]["tts"] == {"engine": "melo"}
-    assert new["presets"]["deepseek"]["pair"]["tts"]["engine"] == "edge"  # deepseek untouched
+    assert new["presets"]["deepseek"]["pair"]["tts"] == {"engine": "melo"}
+    new = vc.apply_axis(new, "asr", "funasr")
+    assert all(p["pair"]["asr"] == "funasr" for p in new["presets"].values())
 
 
 def test_effective_pair_override_wins_but_config_persists():

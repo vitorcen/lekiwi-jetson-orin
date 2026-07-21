@@ -880,6 +880,27 @@ fn voice_auth() -> Result<String, String> {
         .ok_or_else(|| "no voice token (daemon not running?)".to_string())
 }
 
+/// The daemon answers 4xx/5xx with a {"error": "why"} body; surface that reason
+/// instead of ureq's bare "status code NNN" (which hides e.g. 先停对话再切大脑).
+fn voice_err(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, resp) => {
+            let body = resp.into_string().unwrap_or_default();
+            serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error")?.as_str().map(str::to_string))
+                .unwrap_or_else(|| {
+                    if body.trim().is_empty() {
+                        format!("status code {code}")
+                    } else {
+                        body
+                    }
+                })
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Generic GET proxy: path is fixed by the frontend (health/feed/state only).
 #[tauri::command]
 async fn voice_get(ip: String, path: String) -> Result<String, String> {
@@ -896,7 +917,7 @@ async fn voice_get(ip: String, path: String) -> Result<String, String> {
             .timeout(Duration::from_secs(6))
             .set("Authorization", &auth)
             .call()
-            .map_err(|e| e.to_string())?
+            .map_err(voice_err)?
             .into_string()
             .map_err(|e| e.to_string())
     })
@@ -923,7 +944,7 @@ async fn voice_post(ip: String, path: String, body: String) -> Result<String, St
             .set("Authorization", &auth)
             .set("Content-Type", "application/json")
             .send_string(if body.trim().is_empty() { "{}" } else { &body })
-            .map_err(|e| e.to_string())?
+            .map_err(voice_err)?
             .into_string()
             .map_err(|e| e.to_string())
     })
