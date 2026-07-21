@@ -1123,31 +1123,40 @@ class Daemon:
 
     @staticmethod
     async def _iter_sse(resp):
-        """极简 SSE 解析:产出 (event, data_dict)。data 非 JSON 时包成 {'raw':...}。"""
+        """极简 SSE 解析:产出 (event, data_dict)。data 非 JSON 时包成 {'raw':...}。
+        自行按 \\n 切行,不用 aiohttp 行迭代器:那条路有 read_bufsize 上限(512KB),
+        assistant.completed 把全文塞进一行 data: 会超限抛错、整轮对话中断(实锅)。"""
         event = "message"
-        async for raw in resp.content:
-            line = raw.decode("utf-8", "replace").rstrip("\r\n")
-            if not line:
-                event = "message"
-                continue
-            if line.startswith(":"):
-                continue
-            if line.startswith("event:"):
-                event = line[6:].strip()
-            elif line.startswith("data:"):
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    yield "done", {}
+        buf = b""
+        async for chunk in resp.content.iter_chunked(65536):
+            buf += chunk
+            while True:
+                nl = buf.find(b"\n")
+                if nl < 0:
+                    break
+                line = buf[:nl].decode("utf-8", "replace").rstrip("\r")
+                buf = buf[nl + 1:]
+                if not line:
+                    event = "message"
                     continue
-                try:
-                    data = json.loads(payload)
-                    if not isinstance(data, dict):
-                        data = {"raw": data}
-                except json.JSONDecodeError:
-                    data = {"raw": payload}
-                # event 名有时在 data.type 里(assistant.delta 等)
-                etype = data.get("type", event)
-                yield etype, data
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        yield "done", {}
+                        continue
+                    try:
+                        data = json.loads(payload)
+                        if not isinstance(data, dict):
+                            data = {"raw": data}
+                    except json.JSONDecodeError:
+                        data = {"raw": payload}
+                    # event 名有时在 data.type 里(assistant.delta 等)
+                    etype = data.get("type", event)
+                    yield etype, data
 
     # ------------------------------------------------------------------ #
     # 朗读工作者:从队列取句,逐句合成+播放(SPEAKING)
