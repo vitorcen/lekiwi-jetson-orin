@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GUI 语音改版：🦞 Agent 页 + 🎤 Voice 页 · 大脑/ASR/TTS 可切换 · 设计与实施</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .fig{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin:26px 0;overflow-x:auto}
+  .fig figcaption{color:var(--muted);font-size:13px;margin-top:12px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  a{color:var(--accent-dk)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+<h1>GUI 语音改版：🦞 Agent 页 + 🎤 Voice 页</h1>
+<p class="sub">大脑（云端 LLM / 离线 Omni）· ASR · TTS 三轴可切换，搭配入 config ·
+2026-07-21 · v2：已吸收 codex gpt-5.6-sol（25 条）与 kimi（24 条）评审，见 §10</p>
+</header>
+
+<div class="tldr">
+<h2>TL;DR</h2>
+<ul>
+<li>现 🦞 Tab（voice 页）<strong>改名为 Agent 页</strong>：保留对话流，新增「大脑」下拉——
+  云端 preset（deepseek-v4-flash 现役、MiMo 等 OpenAI 兼容端点）或离线 Omni
+  （Mac 上 omnivla 包装成服务，末期）。<strong>preset 自带 ASR+TTS 搭配（pair），
+  pair 是引擎选择的唯一持久状态</strong>。</li>
+<li><strong>新增 🎤 Voice 页</strong>：ASR 调试（开麦实时转写，不进大脑）+
+  TTS 调试（选引擎/音色→输入即播）+「播报 Vision 描述」开关（桥在板端）。
+  调试页的引擎改动<strong>一律临时覆盖不落盘</strong>，退出调试即还原。</li>
+<li><strong>config 只有两个</strong>：Mac 上现有 <code>~/.config/lekiwi-console/config.json</code>
+  （连接字段 + UI 开关，不新增文件）；板上新增统一
+  <code>~/.config/lekiwi/config.json</code>（desired state，voice-daemon 唯一写入口）。
+  Hermes 的 <code>config.yaml</code> 由它<strong>下发</strong>（补丁式），
+  <code>/health</code> 回报 desired / applied / drift——不宣称假的原子真相。</li>
+<li>长操作（切大脑/切引擎）一律 <strong>202 + job，进度走 feed</strong>——Rust 代理
+  15s 超时是硬约束；切大脑落盘前必须过<strong>一发真实 1-token completion 探针</strong>，
+  端口健康≠模型可用。</li>
+<li>板子内存极紧：P0a 实验已定谳（2026-07-21 实测，见 §5.0）——<code>gc.collect()</code>
+  不还 RSS，但 <code>malloc_trim(0)</code> 还得彻底（卸载后 +18MB/+1MB），
+  <strong>引擎宿主 = 进程内模式，unload 序列以 malloc_trim(0) 收尾</strong>。</li>
+<li>一期砍：piper、在线 ASR、自动降级切大脑。推迟：zipformer 流式（P3）、Omni（P4，
+  实施前单独细化）。</li>
+</ul>
+</div>
+
+<h2>0 · 现状（三句话）</h2>
+<p>板端 <code>voice/daemon.py</code>（:8092）把 SenseVoice ASR、Silero VAD、edge-tts/Melo TTS、
+Hermes Sessions 桥全部焊死在一个进程里，引擎不可选；Hermes robot profile 唯一模型
+deepseek-v4-flash 写死在 <code>~/.hermes/profiles/robot/config.yaml</code>；GUI 只有一个
+🦞 Tab（<code>gui/ui/js/voice.js</code>）做对话流。三轴（大脑/ASR/TTS）都没有切换面。</p>
+
+<h2>1 · 目标与非目标</h2>
+<table>
+<tr><th>目标</th><th>非目标（明确不做）</th></tr>
+<tr><td>
+① Agent 页切大脑：云端 preset 或离线 Omni，preset 绑定 ASR/TTS 搭配一起存盘<br>
+② Voice 页独立调试 ASR（实时转写）与 TTS（即输即播、播 Vision 描述）<br>
+③ 引擎切换串行化、可观测、失败报真实状态；配置可 grep、可手改<br>
+④ 全局只有两个 config：Mac 一个（现有）、板上一个（新增统一）
+</td><td>
+✗ 唤醒词、声纹、多路会话、多 GUI 抢占仲裁<br>
+✗ 板上跑 Omni（8GB 不可能，Omni 在 Mac）<br>
+✗ 在线 ASR、piper（见 §9）<br>
+✗ 改动安全链（drive MCP 钳位、base_host 仲裁一个字节不动；见 §5.5 的 yaml 结构校验）
+</td></tr>
+</table>
+
+<h2>2 · 架构总览</h2>
+<figure class="fig">
+<svg viewBox="0 0 900 460" font-size="13">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#888"/></marker></defs>
+  <!-- Mac GUI -->
+  <rect x="20" y="20" width="270" height="180" rx="10" fill="none" stroke="#76b900" stroke-width="2"/>
+  <text x="35" y="45" font-weight="600">Mac · Tauri GUI（遥控器）</text>
+  <rect x="35" y="60" width="240" height="55" rx="6" fill="#76b90022" stroke="#76b900"/>
+  <text x="45" y="82">🦞 Agent 页：对话流 +</text>
+  <text x="45" y="102">大脑下拉（preset/omni）</text>
+  <rect x="35" y="125" width="240" height="55" rx="6" fill="#76b90022" stroke="#76b900"/>
+  <text x="45" y="147">🎤 Voice 页：ASR 转写台</text>
+  <text x="45" y="167">TTS 试听台 + Vision 播报开关</text>
+  <!-- omni-server -->
+  <rect x="20" y="250" width="270" height="120" rx="10" fill="none" stroke="#e3b341" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="35" y="275" font-weight="600">Mac · omni-server（P4）</text>
+  <text x="35" y="298">Qwen3-Omni 30B MLX 常驻</text>
+  <text x="35" y="318">POST /turn + 取消端点</text>
+  <text x="35" y="338">SSE：text delta + 音频流</text>
+  <!-- board daemon -->
+  <rect x="380" y="20" width="290" height="400" rx="10" fill="none" stroke="#888" stroke-width="2"/>
+  <text x="395" y="45" font-weight="600">板 · voice-daemon :8092（重构）</text>
+  <rect x="395" y="60" width="260" height="78" rx="6" fill="#8882" stroke="#888"/>
+  <text x="405" y="82">~/.config/lekiwi/config.json</text>
+  <text x="405" y="102" font-size="12">desired state · daemon 唯一写入口</text>
+  <text x="405" y="122" font-size="12">/health 回报 desired/applied/drift</text>
+  <rect x="395" y="150" width="260" height="60" rx="6" fill="#8882" stroke="#888"/>
+  <text x="405" y="172">切换执行器：全局锁串行</text>
+  <text x="405" y="192" font-size="12">202+job · 进度走 feed · drain 后卸载</text>
+  <rect x="395" y="222" width="122" height="76" rx="6" fill="#8882" stroke="#888"/>
+  <text x="405" y="242">ASR</text>
+  <text x="405" y="262" font-size="11.5">sensevoice</text>
+  <text x="405" y="279" font-size="11.5">zipformer(P3)</text>
+  <rect x="533" y="222" width="122" height="76" rx="6" fill="#8882" stroke="#888"/>
+  <text x="543" y="242">TTS</text>
+  <text x="543" y="262" font-size="11.5">edge(音色)</text>
+  <text x="543" y="279" font-size="11.5">melo 兜底</text>
+  <rect x="395" y="310" width="260" height="52" rx="6" fill="#8882" stroke="#888"/>
+  <text x="405" y="330">Brain：hermes ｜ omni(P4)</text>
+  <text x="405" y="350" font-size="12">切换探针轮过了才落盘</text>
+  <rect x="395" y="372" width="260" height="36" rx="6" fill="#8882" stroke="#888"/>
+  <text x="405" y="396" font-size="12">Vision 播报桥：vlm caption → say(latest-wins)</text>
+  <!-- hermes -->
+  <rect x="720" y="20" width="160" height="160" rx="10" fill="none" stroke="#888" stroke-width="2"/>
+  <text x="735" y="45" font-weight="600">板 · Hermes 网关</text>
+  <text x="735" y="68" font-size="12">robot profile :8642</text>
+  <text x="735" y="90" font-size="12">config.yaml ← 下发补丁</text>
+  <text x="735" y="110" font-size="12">restart → 探针轮</text>
+  <text x="735" y="132" font-size="12">→ session 重建</text>
+  <text x="735" y="158" font-size="12">☁ deepseek / mimo / …</text>
+  <!-- vlm -->
+  <rect x="720" y="220" width="160" height="70" rx="10" fill="none" stroke="#888" stroke-width="2"/>
+  <text x="735" y="245" font-weight="600">板 · vlm-daemon</text>
+  <text x="735" y="268" font-size="12">:8090 caption</text>
+  <!-- arrows -->
+  <line x1="290" y1="110" x2="380" y2="110" stroke="#888" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="296" y="100" font-size="11" fill="#888">Rust 代理(15s)</text>
+  <line x1="655" y1="100" x2="720" y2="100" stroke="#888" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="720" y1="255" x2="655" y2="390" stroke="#888" stroke-width="1.5" marker-end="url(#ar)"/>
+  <line x1="395" y1="336" x2="290" y2="336" stroke="#e3b341" stroke-width="1.5" marker-end="url(#ar)" stroke-dasharray="5 4"/>
+  <text x="300" y="328" font-size="11" fill="#a8862a">P4：局域网 HTTP/SSE</text>
+</svg>
+<figcaption>三轴切换收口在 voice-daemon；GUI 只是遥控器。Vision 播报桥在板端，不依赖 GUI 哪个 Tab 可见。虚线 = P4 才建。</figcaption>
+</figure>
+
+<h2>3 · 配置：全局只有两个 config</h2>
+<h3>3.1 Mac 端（不新增）</h3>
+<p>现有 <code>~/.config/lekiwi-console/config.json</code>（→ <code>gui/config.local.json</code>
+软链）继续只存连接字段与纯 UI 偏好。语音/大脑配置<strong>一个字节不进 GUI config</strong>——
+GUI 所有下拉由 <code>GET /config</code> 灌入，改动即发回板端。</p>
+<h3>3.2 板端统一 config（新增，desired state）</h3>
+<p>位置 <code>~/.config/lekiwi/config.json</code>（XDG 标准位：不在源码目录、天然不入 git、
+可 grep 可手改）。<strong>入 git 的是 <code>board/config.example.json</code></strong>——
+这是<strong>整个板端统一 config 的样例</strong>，不是 voice 专属：当前选了哪个 LLM
+（brain/preset）、全部 presets 与各自的 ASR/TTS 搭配、omni 地址、vision_speak 等开关，
+全字段带注释充当 schema 文档，后续板端其它服务的配置也归并进来。之所以不放进
+<code>board/home/jetson/</code> 部署镜像树——那棵树会被 rsync 覆盖部署，而本文件是
+daemon 运行时要写的（preset/开关），部署不能踩掉用户存的搭配。安装路径：
+<code>voice/setup.sh</code> 首次装机<strong>缺失才拷贝</strong> example →
+<code>~/.config/lekiwi/config.json</code>，已存在则不动。
+voice-daemon 是<strong>唯一写入口</strong>（原子 write-then-rename）；其它板端服务
+按需<strong>只读</strong>它（或由 daemon 下发），消费两式：</p>
+<ul>
+<li><strong>直读</strong>：voice-daemon 自己的 ASR/TTS/brain/vision 播报开关。</li>
+<li><strong>下发</strong>：Hermes 这种自带配置文件的，由 daemon 从统一 config 补丁其
+  <code>config.yaml</code>（见 §5.5）。下发结果即 applied 状态。</li>
+</ul>
+<pre><code>{
+  "brain":  { "kind": "hermes", "preset": "deepseek" }, // hermes | omni(P4)
+  "omni":   { "url": "http://192.168.3.2:8093" },
+  "vision_speak": false,
+  "presets": {
+    "deepseek": { "api": "https://api.deepseek.com", "model": "deepseek-v4-flash",
+               "transport": "openai_chat", "key_env": "DEEPSEEK_API_KEY",
+               "pair": { "asr": "sensevoice",
+                         "tts": { "engine": "edge", "voice": "zh-CN-XiaoxiaoNeural",
+                                  "fallback": "melo" } } },
+    "mimo":  { "api": "https://&lt;OpenAI 兼容端点&gt;", "model": "&lt;MiMo 型号名&gt;",
+               "transport": "openai_chat", "key_env": "MIMO_API_KEY",
+               "pair": { "asr": "sensevoice",
+                         "tts": { "engine": "melo" } } }
+  }
+}</code></pre>
+<div class="box ok"><strong>状态模型：一份持久 + 一层临时，没有第三种</strong>
+持久引擎状态<strong>只有</strong> <code>presets[*].pair</code> + 当前 <code>brain</code>——
+运行引擎永远等于「当前 preset 的 pair」。Voice 调试页的引擎改动是<strong>内存态
+ephemeral 覆盖</strong>：不落盘，退出调试态（或 daemon 重启）自动回到 pair。
+Agent 页改搭配 = 直接改当前 preset 的 pair（落盘）。这消除了评审指出的
+「当前值 vs 搭配值」双状态漂移。</div>
+<ul>
+<li><code>/health</code> 增报 <code>{desired, applied, drift}</code>：desired = config.json，
+  applied = 实际加载的引擎 + 实际 yaml 中的 provider/model，drift = 两者差异
+  （如人手改了 yaml）。有 drift 只报不自动纠——纠偏是人的动作。</li>
+<li><code>POST /config</code> 语义为<strong>按轴整体替换</strong>（GUI 从 GET 拿全量、
+  改完整轴发回），不做深/浅合并猜谜。</li>
+<li><strong>key 永不进任何 config</strong>：preset 只存 <code>key_env</code> 名，值由人手工
+  写进板端 <code>~/.hermes/profiles/robot/.env</code>（现有机制，P2 前置动作）。
+  daemon 切换前只校验该变量存在且非空，缺失 → 409 + 明确提示，GUI 永远看不到值。</li>
+</ul>
+
+<h2>4 · 页面设计</h2>
+<p><strong>Tab 顺序（用户定谳）</strong>：… → <strong>Vision → 🎤 Voice → 🦞 Agent</strong>
+（index.html 中 tab 按钮按此排列；调试链路从看到听到脑，左往右递进）。</p>
+<h3>4.1 🦞 Agent 页（现 voice 页原地改造）</h3>
+<p>只改路由与可见文案：<code>data-page="agent"</code>、<code>#page-agent</code>、
+<code>onEnterAgent/onLeaveAgent</code>、文件改名 <code>agent.js</code>；
+<strong>内部 DOM id（aListenBtn 等）与函数名保持不动</strong>——全量改名是无价值风险（评审共识）。</p>
+<table>
+<tr><th>区块</th><th>控件</th><th>行为</th></tr>
+<tr><td>服务条</td><td>现有 voip / 启停 / 自启 / 状态 pill</td><td>原样保留</td></tr>
+<tr><td><strong>大脑条（新）</strong></td><td>下拉：☁ deepseek · ☁ mimo · 💻 omni ＋
+  搭配一览（当前 pair 的 ASR/TTS）＋ drift 徽标 ＋ 切换 spinner</td>
+  <td>选择 → <code>POST /brain</code> → <strong>202 + job</strong>，进度/结果全走 feed 事件
+  （补丁→重启→探针→落盘/还原逐步回报）；失败弹回原大脑并显示原因。
+  preset 若带 drive MCP 能力，下拉项加 🛞 角标（能力来自 profile 不随模型变，切模型
+  ≠ 切权限，用户须看得见）</td></tr>
+<tr><td>对话区</td><td>现有 listen / 打断 / 常开窗 / 文字输入 / 对话流</td><td>原样保留；
+  feed 事件加 <code>turn_id</code> + <code>brain</code> 字段，GUI 按 turn_id 聚合气泡、
+  角标显示答话者，切换/并发不再串气泡</td></tr>
+</table>
+<h3>4.2 🎤 Voice 页（新建，占用腾出的 <code>data-page="voice"</code>）</h3>
+<table>
+<tr><th>区块</th><th>控件</th><th>行为</th></tr>
+<tr><td><strong>设备状态条（页顶）</strong></td><td>🎙 麦克风：卡名 + 实时电平表
+  （dBFS 条 + 3s 峰值）＋ 🔊 音响：卡名 + 播放态（空闲/播放中/backend）＋
+  <code>audio_ok</code> 总灯</td>
+  <td>数据全部来自现有 <code>/health</code>（cap/play 卡名、audio_ok、mic_dbfs、
+  mic_peak_dbfs），1Hz 轮询已有，零新端点。判读提示内置：电平常年 ≈ −79 dBFS →
+  提示「MCP01 未开机（长按电源键 3s）或静音键红灯」；卡名 None → 提示拔插/重发现。
+  这是把 <code>.memory/voice-frontend-s2.md</code> 里的排查铁律做成 UI，不用再猜</td></tr>
+<tr><td>ASR 转写台</td><td>引擎下拉（一期仅 sensevoice；P3 加 zipformer 流式）＋
+  「开始转写」＋电平表（/health 的 mic_dbfs）＋转写滚动区</td>
+  <td><code>POST /asr_debug {on:1}</code> 进入 <strong>DEBUG 态</strong>（§5.4 状态机）：
+  采集继续、VAD 切段照旧、识别结果<strong>不进大脑不触发 TTS</strong>；
+  与对话互斥——若对话在进行，先内部 do_stop 并向 feed 广播「对话被转写台终止」。
+  转写结果走独立增量端点 <code>/asr_debug/tail</code>，不挤 200 条 feed 环</td></tr>
+<tr><td>TTS 试听台</td><td>引擎下拉（edge / melo）＋ edge 音色下拉＋文本框＋「播报」</td>
+  <td>改下拉 → ephemeral 覆盖（不落盘）；「播报」→ <code>POST /say</code>；
+  行尾回显 backend + 首包耗时（tts 事件增 <code>first_byte_ms</code>）；
+  「保存为当前搭配」按钮才写回 pair（显式落盘动作）</td></tr>
+<tr><td>Vision 播报</td><td>开关「🔊 播报视觉描述」</td><td>写 config 的
+  <code>vision_speak</code>；<strong>桥在板端</strong>：daemon 起后台任务轮询 vlm-daemon
+  caption（成为其订阅者，vlm 自动保活），按 caption seq/frame_ts 去重，
+  <code>say</code> 走 latest-wins（§5.6）。GUI 关掉、切页、退出都不影响播报——
+  这才是「后台播报」的语义</td></tr>
+</table>
+
+<h2>5 · 板端改造：voice-daemon</h2>
+<h3>5.0 前置实验（P0 第一件事，结果定架构）</h3>
+<div class="box warn"><strong>两个实验，先做再写代码</strong>
+① 进程内卸载：加载 SenseVoice → <code>del</code> + <code>gc.collect()</code> → 读
+<code>/proc/self/status</code> VmRSS 是否回落（onnxruntime arena + glibc 碎片大概率<strong>不还</strong>）。
+不回落 → 引擎宿主定为<strong>子进程模式</strong>：每个 ASR/TTS 引擎一个 worker 子进程
+（stdin/stdout 传 PCM/文本），切换 = kill 旧 + spawn 新，内存归还由 OS 保证。
+② 代理长请求：经 <code>voice_post</code> 打一个挂 20s 的端点，确认 15s 超时行为——
+这决定了所有长操作必须 202+job（已按此设计）。实验结果记回本文档。
+<hr style="border:none;border-top:1px solid var(--warn-line);margin:.8em 0">
+<strong>实验① 结果（2026-07-21 实测，板 idle、voice-daemon 临时停）</strong>
+用 daemon 同参数在 <code>~/voice/.venv</code> 一次性脚本测进程 <code>VmRSS</code>（MB）：
+<table>
+<tr><th>引擎</th><th>加载前</th><th>加载+推理后</th><th>del+gc.collect() 后</th><th>+malloc_trim(0) 后</th></tr>
+<tr><td>SenseVoice ASR</td><td>29.0</td><td>608.8</td><td>303.3（仍 +274）</td><td><strong>47.1（+18.2）</strong></td></tr>
+<tr><td>Melo TTS</td><td>47.1</td><td>455.9</td><td>301.5（仍 +254）</td><td><strong>48.3（+1.2）</strong></td></tr>
+</table>
+<strong>结论：<code>gc.collect()</code> 单独不还 RSS</strong>（onnxruntime arena + glibc 碎片，正如预判）；
+但 <code>ctypes.CDLL("libc.so.6").malloc_trim(0)</code> <strong>有效</strong>——两引擎卸载+trim 后
+RSS 均回落到加载前 +50MB 内（ASR +18.2MB、TTS +1.2MB，判定「归还」）。
+<strong>→ 引擎宿主定为进程内模式</strong>：<code>unload()</code> 序列必须以 <code>malloc_trim(0)</code> 收尾，
+否则 RSS 不归还；子进程宿主非必需，省去 stdin/stdout 传 PCM 的复杂度。
+（实验②「代理长请求 15s 超时」本轮未测，仍待做。）</div>
+<h3>5.1 引擎抽象</h3>
+<pre><code>class OfflineAsr:    load()/unload()/transcribe(pcm) -&gt; text     # sensevoice
+class StreamingAsr:  load()/unload()/feed(pcm) -&gt; partials, final # zipformer, P3 一等公民接口
+class Tts:           load()/unload()/speak(text, generation)/cancel()  # 统一的是控制面
+REGISTRY = {"asr": {...}, "tts": {"edge": EdgeTts(fallback=melo), "melo": ...}}</code></pre>
+<ul>
+<li>TTS 统一的只是 <code>speak/cancel</code> 控制面与事件——edge（异步网络流+ffmpeg+aplay+熔断）
+  与 melo（本地批量合成）实现自由，不硬凑 <code>synth()-&gt;pcm</code>。
+  edge→melo 熔断链保留在 edge 引擎内部，切换逻辑不感知降级态。</li>
+<li>VAD/采集管线归 daemon 所有，不进引擎；流式引擎（P3）经 <code>feed()</code> 收连续帧，
+  VAD 作为其实现细节内移。</li>
+</ul>
+<h3>5.2 切换执行器（唯一切换路径）</h3>
+<ul>
+<li><strong>全局 asyncio.Lock 串行化</strong>所有切换（/config、/brain、debug 覆盖）；
+  已有切换在跑 → 409 in-progress。</li>
+<li>切换序：置 <code>switching</code> 态（拒新轮次、interrupt 在途播放、generation++）→
+  <strong>drain</strong> <code>_asr_pool</code>/<code>_tts_pool</code> 在途任务（防推理中
+  unload 的 use-after-free segfault）→ 卸旧 → 载新（或 kill/spawn worker）→ 成功落盘。</li>
+<li><strong>不承诺原子回滚</strong>：失败时尽力重载旧引擎，但旧引擎也可能因内存载不回——
+  一律报<strong>真实 applied 状态</strong>（可能是 <code>degraded: asr=none</code>），
+  GUI 红字显示，由人处置。一次只切一条轴。</li>
+</ul>
+<h3>5.3 端点一览（Rust 代理白名单同步放行，列入阶段契约）</h3>
+<table>
+<tr><th>端点</th><th>语义</th></tr>
+<tr><td><code>GET /config</code></td><td>全量 desired + 各轴可用枚举（含 edge 音色表）+ applied/drift</td></tr>
+<tr><td><code>POST /config</code></td><td>按轴整体替换 → 202+job（切引擎耗时不可控）；进度走 feed</td></tr>
+<tr><td><code>POST /brain</code></td><td>202+job，流程见 §5.5；前置条件 state∈{IDLE,DEBUG}，否则 409「先停对话」</td></tr>
+<tr><td><code>POST /asr_debug</code></td><td>DEBUG 态开关；<code>GET /asr_debug/tail?since=</code> 拉转写增量（partial 覆盖式节流 ≥150ms/条）</td></tr>
+<tr><td><code>POST /say</code></td><td>补 latest-wins：新 say 取消在途 say_task（修现有双声道叠播缺陷）</td></tr>
+</table>
+<p>feed 补齐：事件带 <code>turn_id/brain/generation</code>；响应带 <code>oldest_seq</code>，
+GUI 检测 gap 提示「事件有丢失」。</p>
+<h3>5.4 状态机</h3>
+<pre><code>IDLE ⇄ LISTENING → THINKING → SPEAKING → LISTENING…   （现状不变）
+IDLE/任意 → SWITCHING（切换执行器持锁期间）→ 原态或 IDLE
+IDLE ⇄ DEBUG（转写台：capture 存活条件从 state!=IDLE 改为 state∈{…,DEBUG}；
+              DEBUG 态禁用 barge-in 与大脑触发）</code></pre>
+<h3>5.5 大脑下发：Hermes yaml 补丁事务</h3>
+<ol>
+<li>前置校验：key_env 在 <code>~/.hermes/profiles/robot/.env</code> 存在且非空；
+  api 强制 <code>https://</code>（云端）且 scheme/地址过白名单校验（拒 link-local/metadata，
+  防 SSRF）；provider 名/model 名格式白名单。</li>
+<li>持锁读 yaml → 记 hash → 备份 <code>config.yaml.&lt;hash前8&gt;.bak</code> →
+  <strong>只允许两类修改</strong>：改 <code>model.provider/model.default</code> 两键 +
+  幂等 upsert <code>providers.&lt;name&gt;</code> 段（存在则校验一致，不一致报 drift 拒改；
+  不存在才插入，含 transport）。其余键（尤其 <code>disabled_toolsets</code>、
+  <code>mcp_servers</code>）<strong>结构 diff 必须为空</strong>，否则中止——安全链不许被
+  换模型顺手动到。</li>
+<li><code>systemctl --user restart hermes-gateway-robot</code> → 轮询 :8642 就绪 →
+  <code>ensure_hermes_session()</code> 重建会话 → <strong>探针轮</strong>：无工具、临时
+  session、1-token、≤10s 的真实 completion 打到新 provider。</li>
+<li>探针过 → 落盘统一 config + 应用 pair；探针败/超时 → 按 hash 还原备份、重启网关、
+  再探针旧模型，全程 feed 回报。进程崩溃恢复：启动时发现 .bak 与 yaml hash 不一致
+  → 报 drift 待人处置，不自动选边。</li>
+</ol>
+<h3>5.6 Vision 播报桥（板端）</h3>
+<p><code>vision_speak=true</code> 时 daemon 起后台任务：轮询 vlm-daemon caption 端点
+（带 token，1-2s 间隔，成为订阅者使 vlm 保活），caption seq 去重 + 限长（&gt;120 字截断）；
+经内部 say 队列 latest-wins——正在播则丢弃旧帧不排队。SPEAKING（对话回答中）时暂停桥，
+对话优先。</p>
+
+<h2>6 · Mac 端 omni-server（P4，实施前单独细化）</h2>
+<p>方向定谳、细节到 P4 再定稿（评审共识：这是另一套完整语音系统，不与 P0-P3 纠缠）：</p>
+<ul>
+<li>omnivla 仓库内包一层 aiohttp：<code>POST /turn</code>（wav 或 text + session id）→
+  SSE <code>text_delta</code>/<code>audio_chunk</code>/<code>done</code>；
+  <code>DELETE /turn/{session}</code> 取消（打断时必须能停 30B 生成，不许 GPU 空转到自然结束）；
+  <code>GET /health</code>；Bearer token。单会话单飞，新 /turn 抢占旧的。</li>
+<li>板端 brain=omni：VAD 段 wav 直发（Omni 自带 ASR），旁路本地 SenseVoice 转写只为
+  GUI 显示（用户点名）；回程音频<strong>复用现有单 aplay stdin 流式管道</strong>
+  （<code>_pump</code> 模式），不逐段起 aplay（防爆音）；此态 unload 本地 TTS 省内存；
+  asr_debug 复用旁路结果不二次解码。</li>
+<li>Mac 会睡眠/离网：5s 超时 + feed 建议切回云端，<strong>不自动切</strong>。</li>
+</ul>
+
+<h2>7 · 内存（以实测口径为准，纸面数字不作数）</h2>
+<p>评审指出文档旧版 955MB 基线与实测 647MB RSS + 327MB swap（2026-07-20 记录）口径冲突。
+P0 先建基线：冷启动/预热/稳态三点，采 <code>PSS + private dirty + swap</code>
+（RSS 受 paging 干扰不单独作数），记入本节。此前所有「切换省/费多少」一律标<strong>未知</strong>。
+不变的硬规则：<strong>任何双 ASR/双 TTS 大模型并存禁止</strong>；引擎宿主已定为<strong>进程内模式</strong>
+（§5.0 实验①），切换时内存归还由 <code>unload()+malloc_trim(0)</code> 保证（RSS 回落到加载前 +50MB 内）。</p>
+<p><strong>基线（2026-07-21 实测，voice-daemon，PSS+Private_Dirty+Swap，MB）</strong>。
+<code>load_models()</code> 载入时同步预热（<code>tts.generate("好")</code>），故「刚就绪」即「预热后」：</p>
+<table>
+<tr><th>数据点</th><th>PSS</th><th>Private_Dirty</th><th>Swap</th><th>RSS</th><th>commit≈PSS+Swap</th></tr>
+<tr><td>冷启动/预热（刚就绪 ~90s）</td><td>764</td><td>747</td><td>182</td><td>773</td><td>~946</td></tr>
+<tr><td>稳态（就绪 2min，fresh）</td><td>761</td><td>743</td><td>185</td><td>770</td><td>~946</td></tr>
+<tr><td>稳态（长运行 aged，内存压力换出）</td><td>305</td><td>300</td><td>646</td><td>314</td><td>~951</td></tr>
+</table>
+<p>洞见：冷启动与长运行是<strong>同一 working set（commit ~950MB）</strong>，只是 RSS/Swap 分布随运行时长与内存
+压力而变——旧版「955MB 纸面 vs 647MB RSS+327 swap」的口径冲突实为同一足迹的不同分布，纸面 955MB 与实测
+commit ~950MB 吻合。单引擎（ASR 或 TTS）常驻峰值见 §5.0 实验①：ASR ~580MB、TTS ~410MB 增量（加载+推理时的 RSS 涨幅）。</p>
+
+<h2>8 · 实施阶段与验收门</h2>
+<table>
+<tr><th>阶段</th><th>内容</th><th>验收门（不过不进下一阶段）</th></tr>
+<tr><td><strong>P0a</strong> 前置实验</td><td>§5.0 两实验 + 内存三点基线</td>
+  <td>实验结论写回本文档 §5.0/§7，引擎宿主模式（进程内/子进程）定谳</td></tr>
+<tr><td><strong>P0b</strong> daemon 引擎化</td><td>接口提取（固定现有引擎）→ 统一 config
+  读写 + /health desired/applied → 切换执行器（锁+drain+job）；Rust 白名单放行新端点；
+  /say latest-wins</td><td>现 GUI 零改动跑通完整对话；新端点<strong>经 Rust 代理</strong>打通
+  （不是 curl 直连验的）；切换回滚状态机、句子累积器进 tests/ 单测；
+  连发 /say 无叠播</td></tr>
+<tr><td><strong>P1</strong> GUI 拆两页</td><td>voice→agent 改路由与文案（DOM id 不动），
+  新建 voice 调试页（sensevoice 转写台 + edge/melo 试听 + Vision 播报开关）；
+  板端 Vision 桥</td><td>两页互斥正确（转写台开 → 对话停且 feed 有广播）；
+  edge/melo 试听即点即响、ephemeral 不落盘、退出调试还原；
+  Vision 播报在 GUI 关闭后仍工作、连续 100 帧 caption 无复读；
+  转写台连开 5 分钟，feed 的对话/错误事件零丢失</td></tr>
+<tr><td><strong>P2</strong> 大脑 preset 切换</td><td>/brain 全事务（§5.5）+ Agent 页大脑条
+  + key 前置校验；MIMO key 人工入 .env 为前置动作</td>
+  <td>deepseek↔mimo 往返 10 次无残局、每次探针轮真实过；<strong>故意配错 key/模型名 →
+  自动还原旧模型且 feed 报出具体原因</strong>；网关重启后首轮对话成功（session 重建验证）；
+  补丁前后 yaml 除 model/providers 外结构 diff 为空</td></tr>
+<tr><td><strong>P2.6</strong> Vision 模型切换</td>
+  <td>llama-server.service 参数化（<code>EnvironmentFile</code> + <code>${VLM_MODEL}/${VLM_MMPROJ}</code>）；
+  vlm-daemon <code>GET /models</code>（扫描/mmproj 配对/disk_mb/active）+ <code>POST /model</code>
+  （原子写 env → restart llama → 轮就绪 → 真实推理探针 → 败则还原旧 env 再探针,禁并发 409）；
+  voice-daemon <code>/config</code> 加 <code>vision</code> 轴 → 202+job 代理 vlm 并转 feed；
+  GUI Vision 页 connbar 加模型下拉；<code>vlm/vlm_models.py</code> 纯函数 + tests/ 单测</td>
+  <td>板上单模型降级验收全过（2026-07-21 实测,同一 Qwen3-VL-2B）：
+  (a) <code>/models</code> 列出该模型 active/usable/1056MB；
+  (b) <code>/model</code> 切同模型全链真跑 <strong>load_s=4.5s、探针 ok(vision)、整链 8.0s</strong>；
+  (c) 未知 id → 404 明确拒绝；
+  (d) 坏 env（bogus gguf）→ llama 90s 未就绪 → <strong>自动还原旧模型,old_probe ok,active 报回旧模型</strong>（整链 ~98s）；
+  (e) 收尾 llama-server/vlm-daemon 均 active、caption 链正常；并发 <code>/model</code> → 409。
+  单测 +16（vlm_models 配对/无 mmproj/坏名字/env + vision 轴）,tests 全绿 101 个</td></tr>
+<tr><td><strong>P3</strong> 引擎扩编</td><td>zipformer 流式（StreamingAsr 一等接口 +
+  /asr_debug/tail partial）、edge 音色表全量</td>
+  <td>partial 上屏 P95&lt;500ms（固定负载、预热后测）；每引擎往返切换 20 次，
+  <strong>PSS+swap</strong> 稳定（非 RSS）；流式转写期间对话事件零丢失</td></tr>
+<tr><td><strong>P4</strong> Omni 大脑</td><td>先补一节细化设计（取消语义/音频管道/资源实测）
+  再动工；Mac omni-server + brain=omni 通路 + 旁路转写</td>
+  <td>端到端「说完→首音」P50 ≤ 3.5s（同日同时段 ≥20 轮，绝对值门不用云端倍率）；
+  打断后 omni-server 生成实际停止；Mac 睡眠时切换被拒且提示清晰</td></tr>
+</table>
+
+<h2>9 · 砍掉 / 推迟</h2>
+<ul>
+<li><strong>piper</strong>：砍。memory 里定位就是二级保底，edge→melo 熔断链已覆盖降级，
+  第三个本地 TTS 边际价值≈0（kimi 建议，采纳）。</li>
+<li><strong>在线 ASR</strong>：砍。现 ASR 0.2s 解码不是瓶颈。</li>
+<li><strong>自动降级切大脑</strong>：砍。网络坏了只提示——大脑是谁必须永远是用户点的。</li>
+<li><strong>多 GUI 实例抢占仲裁</strong>：不做 owner 机制，只做 feed 广播让对方看得见原因。</li>
+<li><strong>Omni 视觉通路</strong>：P4 只接语音，视觉仍走现有 vlm 栈。</li>
+<li><strong>zipformer 流式</strong>：推迟到 P3（评审建议砍，保留是因为「切换 ASR」是明确
+  用户需求，但必须以一等公民流式接口落地，不做「# 流式变体」式埋雷）。</li>
+</ul>
+
+<h2>10 · 评审记录（2026-07-21）</h2>
+<p>codex gpt-5.6-sol（25 条）与 kimi（24 条）独立评审 v1，重叠度高。v2 已按下表吸收：</p>
+<table>
+<tr><th>结论</th><th>条目（两家合并去重）</th><th>处置</th></tr>
+<tr><td rowspan="8"><strong>采纳</strong></td>
+<td>跨进程切换不可原子回滚；「整体回滚」是虚假承诺</td>
+<td>§5.2：desired/applied/drift 三态 + 单轴切换 + 报真实 degraded 状态</td></tr>
+<tr><td>Rust 代理白名单未放行新端点、15s 超时 vs 20s 长操作（两家都抓到）</td>
+<td>§5.3：白名单入 P0 契约；所有长操作 202+job + feed 进度</td></tr>
+<tr><td>端口健康≠模型可用（错 key/错模型名穿过验收）；网关重启后 session 蒸发</td>
+<td>§5.5：真实 1-token 探针轮 + ensure_session；P2 验收含故意配错 key</td></tr>
+<tr><td>CPython+onnxruntime 卸载不还内存；195MB 空闲下「先卸后载」不可靠；预算数字口径冲突</td>
+<td>§5.0 前置实验定进程内/子进程宿主；§7 改为实测口径、纸面数字作废</td></tr>
+<tr><td>Vision 播报的 GUI 桥没有事件源（vision 轮询绑 Tab 可见性）；/say 并发叠播</td>
+<td>§5.6 桥下沉板端 + /say latest-wins（顺手修现有缺陷）</td></tr>
+<tr><td>切换零并发控制、ASR 线程池 use-after-free；切大脑不冻结在途轮次；DEBUG 态无状态机；
+  partial 冲垮 200 条 feed 环；浅合并抹字段</td>
+<td>§5.2 全局锁+drain；/brain 前置 state 检查；§5.4 状态机；/asr_debug/tail 独立通道；
+  POST /config 按轴整体替换</td></tr>
+<tr><td>yaml「两键补丁」与真实结构不符（要 upsert provider 段）；.env 路径写错；
+  单 .bak 不可靠；provider 扩权与 SSRF 未处理；新模型仍继承 drive MCP</td>
+<td>§5.5：upsert+结构 diff 为空+hash 备份+启动恢复；.env 路径修正+前置校验；
+  https/地址白名单；GUI 下拉 🛞 角标显示 drive 能力</td></tr>
+<tr><td>P1 验收依赖 P3 交付物；全量改名无价值风险；P0「纯重构」名不副实；
+  验收门用高噪声云端倍率/RSS 判泄漏；调试污染生产配置</td>
+<td>§8 阶段重排（P0a/P0b，P1 只验现有引擎）；§4.1 只改路由不动 DOM id；
+  绝对值门+PSS 口径；ephemeral 覆盖不落盘</td></tr>
+<tr><td rowspan="3"><strong>驳回</strong></td>
+<td>砍 preset.pair（两家都提：跨轴副作用/双状态）</td>
+<td>「LLM 指定 ASR/TTS 搭配存盘」是用户点名需求。但吸收其病根诊断：重定义为
+  <strong>pair 是唯一持久状态</strong>（运行值=pair 的投影，调试=ephemeral），
+  双状态漂移问题随之消失</td></tr>
+<tr><td>Omni 整体砍出本设计、schema 不留 brain.kind=omni</td>
+<td>离线 Omni 是用户点名需求，保留为 P4；但采纳「实施前单独细化」+ 取消端点 +
+  单管道播放 + 绝对值验收门</td></tr>
+<tr><td>调试页多 GUI owner 仲裁机制</td>
+<td>单用户单板的真实场景不存在这个问题，只做 feed 广播。复杂度不匹配</td></tr>
+</table>
+
+</div>
+</body>
+</html>
