@@ -102,6 +102,9 @@ fetch() {
 }
 
 HF_SV="https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
+HF_PARA="https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/main"
+HF_WHISPER="https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/main"
+HF_STREAM="https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main"
 HF_MELO="https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main"
 
 # Silero VAD (~2MB)
@@ -116,6 +119,63 @@ fetch "$GHFAST/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-model
 # SenseVoice ASR (~228MB int8 + tokens)
 fetch "$HF_SV/model.int8.onnx" "$MODELS/sense-voice/model.int8.onnx" 200000000
 fetch "$HF_SV/tokens.txt"      "$MODELS/sense-voice/tokens.txt"      1000
+
+# Paraformer-large ASR (zh, ~232MB int8 + tokens) — A/B alternative to SenseVoice,
+# non-autoregressive same footprint; often stronger on Mandarin homophones.
+fetch "$HF_PARA/model.int8.onnx" "$MODELS/paraformer-zh/model.int8.onnx" 200000000
+fetch "$HF_PARA/tokens.txt"      "$MODELS/paraformer-zh/tokens.txt"      1000
+
+# Whisper large-v3-turbo ASR (multilingual, ~1GB int8) — heavy A/B only; autoregressive,
+# ~1.5GB RAM + higher latency on Orin CPU, run with the vision service stopped.
+fetch "$HF_WHISPER/turbo-encoder.int8.onnx" "$MODELS/whisper-turbo/turbo-encoder.int8.onnx" 200000000
+fetch "$HF_WHISPER/turbo-decoder.int8.onnx" "$MODELS/whisper-turbo/turbo-decoder.int8.onnx" 80000000
+fetch "$HF_WHISPER/turbo-tokens.txt"        "$MODELS/whisper-turbo/turbo-tokens.txt"        100000
+
+# Qwen3-ASR-0.6B int8 ASR (LLM-ASR, sherpa-onnx native from_qwen3_asr; needs sherpa >=1.13
+# with qwen3-asr support). Strong noise/far-field robustness; ~3.5GB RSS so run with the
+# vision service stopped. Ships as a tarball (conv_frontend/encoder/decoder + tokenizer dir).
+# Streaming zipformer models (DEBUG streaming mode 免VAD, 二级下拉可选). Chinese-trained
+# ones (zh-2025 / multi-zh) are much cleaner than the old bilingual (which repeats tokens).
+# fetch_stream_tar <pkg-name> <target-dir>: download a GitHub asr-models tarball + extract.
+fetch_stream_tar() {
+  local pkg="$1" dir="$MODELS/$2"
+  if [[ -f "$dir/tokens.txt" ]]; then msg "have $2 ($(du -sh "$dir" | cut -f1))"; return; fi
+  msg "download + extract $2"
+  local tmp; tmp="$(mktemp --suffix=.tar.bz2)"
+  curl -fsSL -o "$tmp" \
+    "$GHFAST/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$pkg.tar.bz2" \
+    || curl -fsSL -o "$tmp" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$pkg.tar.bz2"
+  mkdir -p "$dir"; tar xjf "$tmp" -C "$dir" --strip-components=1; rm -f "$tmp"
+  [[ -f "$dir/tokens.txt" ]] || warn "$2 extract failed"
+}
+fetch_stream_tar "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30"          "streaming-zh-2025"
+fetch_stream_tar "sherpa-onnx-streaming-zipformer-zh-xlarge-int8-2025-06-30"   "streaming-zh-xlarge"
+fetch_stream_tar "sherpa-onnx-streaming-zipformer-multi-zh-hans-int8-2023-12-13" "streaming-multi-zh"
+# 老双语基线(HF 单文件)
+STREAM_D="$MODELS/streaming-zipformer-zh-en"
+for f in encoder-epoch-99-avg-1.int8.onnx decoder-epoch-99-avg-1.int8.onnx \
+         joiner-epoch-99-avg-1.int8.onnx tokens.txt; do
+  min=1000; [[ "$f" == *.onnx ]] && min=1000000
+  fetch "$HF_STREAM/$f" "$STREAM_D/$f" "$min"
+done
+
+QWEN3_DIR="$MODELS/qwen3-asr"
+QWEN3_TAR="sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2"
+if [[ -f "$QWEN3_DIR/encoder.int8.onnx" ]]; then
+  msg "have qwen3-asr ($(du -sh "$QWEN3_DIR" | cut -f1))"
+else
+  msg "download + extract qwen3-asr (~880MB tarball)"
+  tmp_tar="$(mktemp --suffix=.tar.bz2)"
+  curl -fsSL -o "$tmp_tar" \
+    "$GHFAST/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$QWEN3_TAR" \
+    || curl -fsSL -o "$tmp_tar" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$QWEN3_TAR"
+  mkdir -p "$QWEN3_DIR"
+  tar xjf "$tmp_tar" -C "$QWEN3_DIR" --strip-components=1
+  rm -f "$tmp_tar"
+  [[ -f "$QWEN3_DIR/encoder.int8.onnx" ]] || warn "qwen3-asr extract failed"
+fi
 
 # Melo TTS (zh_en): model + lexicon/tokens + normalization fsts + jieba dict
 fetch "$HF_MELO/model.onnx"   "$MODELS/vits-melo-tts-zh_en/model.onnx"   150000000

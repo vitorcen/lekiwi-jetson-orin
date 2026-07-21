@@ -39,6 +39,51 @@ def test_apply_axis_asr():
     assert new["presets"]["deepseek"]["pair"]["asr"] == "sensevoice"
 
 
+def test_apply_axis_asr_paraformer_roundtrips():
+    cfg = vc.merge_defaults({})
+    new = vc.apply_axis(cfg, "asr", "paraformer")
+    assert new["presets"]["deepseek"]["pair"]["asr"] == "paraformer"
+    assert "paraformer" in vc.ASR_ENGINES
+
+
+def test_default_has_stream_axis():
+    cfg = vc.merge_defaults({})
+    assert cfg["stream"] == {"enabled": False, "model": "zh-2025",
+                             "endpoint_silence_s": 1.2}
+
+
+def test_apply_axis_stream_boolifies_clamps_and_whitelists_model():
+    cfg = vc.merge_defaults({})
+    new = vc.apply_axis(cfg, "stream",
+                        {"enabled": 1, "model": "multi-zh", "endpoint_silence_s": 99})
+    assert new["stream"]["enabled"] is True
+    assert new["stream"]["model"] == "multi-zh"
+    assert new["stream"]["endpoint_silence_s"] == vc.STREAM_SILENCE_RANGE[1]  # clamped
+    # unknown model → falls back to default, not rejected
+    bad = vc.apply_axis(cfg, "stream", {"enabled": 0, "model": "nonsense"})
+    assert bad["stream"]["model"] == vc.DEFAULT_CONFIG["stream"]["model"]
+
+
+def test_enums_expose_stream_models():
+    e = vc.enums()
+    ids = [s["id"] for s in e["stream"]]
+    assert ids == vc.STREAM_MODELS
+    assert e["stream"][0]["id"] == "zh-2025"      # default listed first
+
+
+def test_current_stream_garbage_falls_back():
+    assert vc.current_stream({"stream": "nonsense"}) == vc.DEFAULT_CONFIG["stream"]
+    assert vc.current_stream({}) == vc.DEFAULT_CONFIG["stream"]
+
+
+def test_enums_expose_paraformer_with_size():
+    e = vc.enums()
+    asr = {a["id"]: a for a in e["asr"]}
+    assert "paraformer" in asr
+    assert asr["paraformer"]["label"] == "Paraformer-large zh"
+    assert asr["paraformer"]["params_b"] and asr["paraformer"]["disk_mb"]
+
+
 def test_apply_axis_vision_speak_is_boolified():
     cfg = vc.merge_defaults({})
     assert vc.apply_axis(cfg, "vision_speak", 1)["vision_speak"] is True
@@ -120,9 +165,10 @@ def test_compute_drift_empty_when_aligned():
 def test_enums_are_metadata_objects():
     e = vc.enums()
     # asr/tts entries are {id,label,params_b,disk_mb} objects, edge_voices stays strings
-    asr = e["asr"][0]
-    assert asr["id"] == "sensevoice" and asr["label"] == "SenseVoice-Small"
-    assert asr["params_b"] == 0.234 and asr["disk_mb"] == 229
+    asr = {a["id"]: a for a in e["asr"]}
+    assert asr["sensevoice"]["label"] == "SenseVoice-Small"
+    assert asr["sensevoice"]["params_b"] == 0.234 and asr["sensevoice"]["disk_mb"] == 229
+    assert e["asr"][0]["id"] == "qwen3"        # qwen3 listed first (headline engine)
     tts = {t["id"]: t for t in e["tts"]}
     assert tts["edge"]["params_b"] is None and tts["edge"]["disk_mb"] is None  # online
     assert tts["melo"]["disk_mb"] == 183                                       # offline

@@ -504,7 +504,10 @@ class Daemon:
 
         # 引擎宿主(进程内模式,P0a 定谳)。引擎只管模型生命周期 + 同步推理原语;
         # 采集/VAD/generation/子进程/edge->melo 熔断仍归 daemon(§5.1)。
-        self.asr = vengines.OfflineAsr()         # sensevoice
+        # ASR 多宿主(数据驱动自 REGISTRY):板上可用 RAM ~1.8G,两引擎不并存,
+        # 切换 = 载新→卸旧(见 _apply_asr)。self.asr 始终指向当前运行宿主。
+        self.asr_hosts = {n: cls() for n, cls in vengines.REGISTRY["asr"].items()}
+        self.asr = self.asr_hosts["sensevoice"]  # 下方按 pair 重定向
         self.melo = vengines.MeloTts()           # 本地 Melo(edge 兜底也用它)
         self.vad = None                          # VadEngine(daemon 所有,可切换)
         # 音频前端(全局,不属 preset pair):当前 VAD 描述 + 数字增益。ephemeral 标记
@@ -512,12 +515,18 @@ class Daemon:
         self.vad_desc = vconfig.current_vad(self.config)
         self.audio_gain_db = vconfig.current_audio_gain(self.config)
         self._frontend_ephemeral = False
+        # DEBUG 流式模式(免VAD,对比验证):按需载的独立 OnlineRecognizer 宿主。
+        self.stream_asr = vengines.StreamingAsr()
+        self.stream_cfg = vconfig.current_stream(self.config)
+        self._stream_last_partial = ""
+        self._stream_lock = asyncio.Lock()       # 串行化流式切换(大模型载入排队,latest 在后)
         self._asr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
         self._tts_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="melo")
 
         # 运行引擎 = 当前 preset pair 的投影(SWITCHING/ephemeral 才偏离,见 switch 执行器)
         _pair = vconfig.current_pair(self.config)
-        self.asr_engine = _pair["asr"]                       # "sensevoice"
+        self.asr_engine = _pair["asr"] if _pair["asr"] in self.asr_hosts else "sensevoice"
+        self.asr = self.asr_hosts[self.asr_engine]           # 运行宿主 = 当前 pair
         self.tts_engine = _pair["tts"].get("engine", "edge") # "edge" | "melo"
         self.edge_voice = _pair["tts"].get("voice") or EDGE_VOICE
 
@@ -901,6 +910,11 @@ class Daemon:
                 except Exception:
                     pass
             return
+        # DEBUG 流式模式(一级=流式):流式引擎自带端点、免VAD,实时出 partial/final。
+        # 模式互斥 —— 走流式就不再走 VAD(切模式对比,不并行,免双份推理)。
+        if debug and self.stream_cfg.get("enabled"):
+            self._feed_stream(samples)
+            return
         if self.vad is None:
             return
         try:
@@ -972,6 +986,69 @@ class Daemon:
             return
         outcome = vobs.classify_segment(text)
         self._record_seg(samples, outcome, text, to_debug=True)
+
+    def _feed_stream(self, samples: np.ndarray) -> None:
+        """DEBUG 流式:喂在线识别器 → 合并 partial、端点出 final,进转写台增量环(不进
+        大脑/不 TTS)。内联跑(流式解码实时,RTF<<1)。partial 仅在文本变化时上环去抖。"""
+        if not self.stream_asr.loaded:
+            return
+        try:
+            partial, final = self.stream_asr.feed(samples)
+        except Exception as exc:                                 # noqa: BLE001
+            self.emit("error", message=f"stream asr failed: {exc}")
+            return
+        if final:
+            self.debug_tail.append("stream", final, partial=False)
+            self._stream_last_partial = ""
+        elif partial and partial != self._stream_last_partial:
+            self.debug_tail.append("stream", partial, partial=True)
+            self._stream_last_partial = partial
+
+    async def _set_stream_runtime(self, want: dict) -> None:
+        """把流式引擎载/卸/重载到匹配 want(enabled + endpoint_silence_s;端点规则在 load
+        时烘焙,故 silence 变必重载)。只动运行态,不落盘。"""
+        loop = asyncio.get_running_loop()
+        if want["enabled"]:
+            need_reload = (not self.stream_asr.loaded
+                           or want["model"] != self.stream_cfg.get("model")
+                           or want["endpoint_silence_s"]
+                           != self.stream_cfg.get("endpoint_silence_s"))
+            if need_reload:
+                if self.stream_asr.loaded:
+                    await loop.run_in_executor(None, self.stream_asr.unload)
+                await loop.run_in_executor(
+                    None, self.stream_asr.load, want["model"], want["endpoint_silence_s"])
+            else:
+                self.stream_asr.reset()
+        elif self.stream_asr.loaded:
+            await loop.run_in_executor(None, self.stream_asr.unload)
+        self.stream_cfg = want
+        self._stream_last_partial = ""
+
+    async def apply_stream(self, value, ephemeral: bool) -> dict:
+        """DEBUG 流式开关 + 端点静音时长。ephemeral=调试态临时(退出 DEBUG 还原);否则
+        落盘(存参)。返回实际生效态。"""
+        want = vconfig.normalize_stream(value)
+        # 先落状态(存参 or ephemeral 标记),快;模型载入在锁内做(可能 700M,慢)。
+        if ephemeral:
+            self._frontend_ephemeral = True
+        else:
+            self.config = vconfig.apply_axis(self.config, "stream", want)
+            try:
+                vconfig.save_config(self.config)
+            except OSError as exc:
+                self.emit("error", message=f"config save failed: {exc}")
+        async with self._stream_lock:                            # 串行化,rapid 切换排队
+            try:
+                await self._set_stream_runtime(want)
+            except Exception as exc:                             # noqa: BLE001
+                self.emit("error", message=f"stream mode failed: {exc}")
+                return {"error": str(exc), "status": 500}
+        self.emit("stream", model=want["model"], enabled=want["enabled"],
+                  loaded=self.stream_asr.loaded)                 # 载完通知
+        return {"enabled": want["enabled"], "model": want["model"],
+                "endpoint_silence_s": want["endpoint_silence_s"],
+                "loaded": self.stream_asr.loaded}
 
     # ------------------------------------------------------------------ #
     # barge-in:SPEAKING 中检出的语音段 → 能量门 → ASR → 回声/停止词判别
@@ -1212,6 +1289,27 @@ class Daemon:
                 self.vad.reset()
             except Exception:
                 pass
+
+    async def retranscribe_seg(self, seg_id: int) -> dict:
+        """用当前 ASR 宿主对已存段重新识别 —— 同段同 PCM(增益已烘焙),只换引擎,
+        供切模型后并排对比。段不存在 404;切换中 409;引擎未载 409;识别异常 500。"""
+        path = self.seg_store.path(seg_id)
+        if path is None:
+            return {"error": "segment not found", "id": seg_id, "status": 404}
+        if self.switcher.busy:
+            return {"error": "switch in progress", "id": seg_id, "status": 409}
+        if not self.asr.loaded:
+            return {"error": "asr engine not loaded", "id": seg_id, "status": 409}
+        engine = self.asr_engine
+        samples = _read_wav_16k(path)
+        loop = asyncio.get_running_loop()
+        try:
+            text = await loop.run_in_executor(self._asr_pool, self.asr.transcribe,
+                                              samples)
+        except Exception as exc:                             # noqa: BLE001
+            return {"error": f"asr failed: {exc}", "id": seg_id,
+                    "engine": engine, "status": 500}
+        return {"id": seg_id, "engine": engine, "text": text or "", "status": 200}
 
     async def play_seg(self, seg_id: int) -> dict:
         """转写台段回放:板上(MCP01 音响)aplay 放段 wav(16k mono s16le)。段不存在
@@ -1622,20 +1720,32 @@ class Daemon:
         return True
 
     async def _apply_asr(self, asr_value) -> bool:
-        """切运行 ASR 引擎。P0b 仅 sensevoice —— 不拆当前唯一引擎;P3 在此 unload+load+trim。"""
+        """切运行 ASR 宿主。载新→卸旧(板上可用 RAM ~1.8G,两引擎不并存;先载新,
+        失败则旧引擎原样保留,由 switch_engine 判 degraded)。调用方须已 drain 推理池。"""
         loop = asyncio.get_running_loop()
         name = asr_value.get("asr") if isinstance(asr_value, dict) else asr_value
-        if name not in vconfig.ASR_ENGINES:
+        if name not in vconfig.ASR_ENGINES or name not in self.asr_hosts:
             raise ValueError(f"unknown asr engine: {name}")
-        if not self.asr.loaded:
-            await loop.run_in_executor(None, self.asr.load)
+        target = self.asr_hosts[name]
+        if not target.loaded:
+            await loop.run_in_executor(None, target.load)    # 先载新
+        old = self.asr
+        self.asr = target
         self.asr_engine = name
+        if old is not target and old.loaded:
+            await loop.run_in_executor(None, old.unload)      # 再卸旧,回收 RSS
         return True
 
-    def _apply_config_pair_runtime(self) -> None:
-        """把运行引擎拉回 config pair(退出 DEBUG / 清 ephemeral 覆盖时)。"""
+    async def _apply_config_pair_runtime(self) -> None:
+        """把运行引擎拉回 config pair(退出 DEBUG / 清 ephemeral 覆盖时)。ASR 可能被临时
+        切成别的宿主 → 先 drain 再真正卸调试引擎、载回 config 引擎。"""
         pair = vconfig.current_pair(self.config)
-        self.asr_engine = pair["asr"]
+        if pair["asr"] != self.asr_engine:
+            await self._drain_pools()
+            try:
+                await self._apply_asr(pair["asr"])
+            except Exception as exc:                          # noqa: BLE001
+                self.emit("error", message=f"restore asr failed: {exc}")
         self.tts_engine = pair["tts"].get("engine", "edge")
         if pair["tts"].get("voice"):
             self.edge_voice = pair["tts"]["voice"]
@@ -1766,6 +1876,13 @@ class Daemon:
             return
         self._frontend_ephemeral = False
         self.audio_gain_db = vconfig.current_audio_gain(self.config)
+        # 流式模式的 ephemeral 改动也还原回 config
+        want_stream = vconfig.current_stream(self.config)
+        if want_stream != self.stream_cfg:
+            try:
+                await self._set_stream_runtime(want_stream)
+            except Exception as exc:                              # noqa: BLE001
+                self.emit("error", message=f"restore stream failed: {exc}")
         want = vconfig.current_vad(self.config)
         if want == self.vad_desc:
             return
@@ -1965,7 +2082,7 @@ class Daemon:
                 vconfig.save_config(self.config)
             except OSError as exc:
                 self.emit("error", message=f"config save failed: {exc}")
-            self._apply_config_pair_runtime()
+            await self._apply_config_pair_runtime()
             self.override.clear()
             self.emit("job", job_id=job_id, phase="done", axis="brain",
                       status="ok", preset=preset_name, drift=self.drift(),
@@ -2043,15 +2160,25 @@ class Daemon:
                 self.emit("debug", status="took_over", message="对话被转写台终止")
             self.debug_tail.clear()
             self.set_state(DEBUG)
+            # 流式模式已开则载流式引擎(免VAD 走它);仅 DEBUG 期常驻,退出即卸。
+            if self.stream_cfg.get("enabled") and not self.stream_asr.loaded:
+                try:
+                    await self._set_stream_runtime(self.stream_cfg)
+                except Exception as exc:                          # noqa: BLE001
+                    self.emit("error", message=f"stream load failed: {exc}")
             await self.start_capture()
         else:
             if self.state == DEBUG:
                 self.set_state(IDLE)
                 await self.stop_capture()
             # 退出 DEBUG:ephemeral 引擎改动自动还原为 config pair;音频前端(VAD+增益)同理
-            self._apply_config_pair_runtime()
+            await self._apply_config_pair_runtime()
             self.override.clear()
             await self.restore_frontend()
+            # 流式引擎只在 DEBUG 期有意义 → 退出即卸,释放 ~190MB(下次进 DEBUG 再载)。
+            if self.stream_asr.loaded:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.stream_asr.unload)
 
     # ------------------------------------------------------------------ #
     # Vision 播报桥(板端后台任务)§5.6
@@ -2199,6 +2326,11 @@ class Daemon:
             "vad_active": bool(self.vad.active) if self.vad is not None else False,
             "vad_engine": self.vad_desc.get("engine"),
             "audio_gain_db": round(self.audio_gain_db, 1),
+            # 流式模式运行态(可能是 ephemeral,与 desired.stream 不同):GUI 据此反映实际
+            "stream": {"enabled": bool(self.stream_cfg.get("enabled")),
+                       "model": self.stream_cfg.get("model"),
+                       "endpoint_silence_s": self.stream_cfg.get("endpoint_silence_s"),
+                       "loaded": self.stream_asr.loaded},
             # 统一 config 三态 + 引擎状态(desired/applied/drift)
             "desired": {"brain": self.config.get("brain"),
                         "vision_speak": bool(self.config.get("vision_speak")),
@@ -2323,6 +2455,14 @@ async def h_config_post(request: web.Request) -> web.Response:
                                      status=500)
         await DAEMON.set_vision_speak(bool(value))
         return web.json_response({"ok": True, "vision_speak": bool(value)})
+    if axis == "stream":
+        # DEBUG 流式模式开关 + 模型 + 端点静音(ephemeral 不落盘 / 否则存参)。模型可能
+        # 700M,同步载入会超 GUI HTTP 超时 → 后台加载、立即返回,GUI 轮询 /health.stream.loaded。
+        want = vconfig.normalize_stream(value)
+        asyncio.create_task(DAEMON.apply_stream(value, ephemeral))
+        return web.json_response({"enabled": want["enabled"], "model": want["model"],
+                                  "endpoint_silence_s": want["endpoint_silence_s"],
+                                  "state": "loading"})
     if axis == "vision_speak_limit":
         DAEMON.config = vconfig.apply_axis(DAEMON.config, "vision_speak_limit", value)
         try:
@@ -2442,6 +2582,22 @@ async def h_asr_debug_seg(request: web.Request) -> web.Response:
     return web.json_response({"wav_b64": b64})
 
 
+async def h_asr_debug_seg_asr(request: web.Request) -> web.Response:
+    """POST /asr_debug/seg_asr {id} → 用当前 ASR 宿主重识别已存段,返回
+    {id, engine, text}。切模型后对同一段重跑,并排比引擎效果。段不存在 404。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        sid = int(body.get("id", 0))
+    except (ValueError, TypeError):
+        sid = 0
+    result = await DAEMON.retranscribe_seg(sid)
+    status = result.pop("status", 200)
+    return web.json_response(result, status=status)
+
+
 async def h_asr_debug_seg_play(request: web.Request) -> web.Response:
     """POST /asr_debug/seg_play {id} → 板上 aplay 放段(机器人音响),播放期闸采集防回录。
     段不存在 404;音响不可用 409;aplay 非零 500。供转写台段行「▶ 听」板上播。"""
@@ -2524,6 +2680,7 @@ def make_app() -> web.Application:
     app.router.add_get("/asr_debug/tail", h_asr_debug_tail)
     app.router.add_get("/asr_debug/seg", h_asr_debug_seg)
     app.router.add_post("/asr_debug/seg_play", h_asr_debug_seg_play)
+    app.router.add_post("/asr_debug/seg_asr", h_asr_debug_seg_asr)
     app.router.add_post("/selftest", h_selftest)
     app.router.add_get("/feed", h_feed)
     app.router.add_get("/events", h_events)

@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     "vad": {"engine": "silero", "threshold": 0.5,
             "min_speech_s": 0.25, "min_silence_s": 0.55, "pre_roll_s": 0.45},
     "audio": {"gain_db": 0},
+    # DEBUG-only streaming recognition mode (免VAD, 对比验证). enabled 时调试转写台走
+    # 流式 OnlineRecognizer 连续解码+端点检测,不影响对话链路(对话恒走 VAD+离线)。
+    "stream": {"enabled": False, "model": "zh-2025", "endpoint_silence_s": 1.2},
     "presets": {
         "deepseek": {
             "api": "https://api.deepseek.com",
@@ -50,15 +53,20 @@ DEFAULT_CONFIG = {
 # Axis enumerations surfaced by GET /config so the GUI dropdowns need no hardcoding.
 # The bare id lists stay the membership source of truth (switch executors check
 # `x in ASR_ENGINES`); enums() decorates them with label/size metadata.
-ASR_ENGINES = ["sensevoice"]                       # P3 adds zipformer
+# qwen3 listed first (best noise robustness, the headline engine); whisper + qwen3 are
+# heavy — run them with the vision service stopped. Order here = GUI dropdown order.
+ASR_ENGINES = ["qwen3", "sensevoice", "paraformer", "whisper"]
 TTS_ENGINES = ["edge", "melo"]
 VAD_ENGINES = ["silero", "ten", "webrtc", "energy"]
+# Streaming models (二级下拉 when 一级=流式). zh-2025 default (cleanest Chinese).
+STREAM_MODELS = ["zh-2025", "zh-xlarge", "multi-zh", "zh-en"]
 
 # vad axis range guards + digital gain guard.
 VAD_THRESHOLD_RANGE = (-90.0, 3.0)                 # energy uses dBFS (negative), silero 0..1
 VAD_TIME_RANGE = (0.02, 30.0)                      # min_speech_s / min_silence_s seconds
 VAD_PREROLL_RANGE = (0.0, 1.0)                     # pre-roll look-back seconds
 AUDIO_GAIN_RANGE = (0.0, 30.0)                     # digital make-up gain, dB
+STREAM_SILENCE_RANGE = (0.2, 5.0)                  # streaming endpoint trailing silence, s
 
 # Per-engine display metadata for GET /config enums (GUI shows size on offline
 # models). params_b = published parameter count in billions (null when no reliable
@@ -67,6 +75,12 @@ AUDIO_GAIN_RANGE = (0.0, 30.0)                     # digital make-up gain, dB
 ASR_META = {
     "sensevoice": {"id": "sensevoice", "label": "SenseVoice-Small",
                    "params_b": 0.234, "disk_mb": 229},
+    "paraformer": {"id": "paraformer", "label": "Paraformer-large zh",
+                   "params_b": 0.22, "disk_mb": 232},
+    "whisper": {"id": "whisper", "label": "Whisper large-v3-turbo",
+                "params_b": 0.809, "disk_mb": 989},
+    "qwen3": {"id": "qwen3", "label": "Qwen3-ASR-0.6B (LLM抗噪)",
+              "params_b": 0.6, "disk_mb": 954},
 }
 TTS_META = {
     "edge": {"id": "edge", "label": "edge-tts 在线",
@@ -87,6 +101,14 @@ VAD_META = {
                "default_threshold": 0.6},
     "energy": {"id": "energy", "label": "能量门 dBFS", "disk_mb": 0,
                "default_threshold": -45},
+}
+
+# Streaming model display table (二级下拉 when 一级=流式). disk_mb measured on the board.
+STREAM_META = {
+    "zh-2025": {"id": "zh-2025", "label": "zipformer zh 2025", "disk_mb": 300},
+    "zh-xlarge": {"id": "zh-xlarge", "label": "zipformer zh xlarge 700M", "disk_mb": 737},
+    "multi-zh": {"id": "multi-zh", "label": "multi-zh-hans 14k小时", "disk_mb": 250},
+    "zh-en": {"id": "zh-en", "label": "双语 zh-en (弱/基线)", "disk_mb": 190},
 }
 
 # A small curated edge-tts zh voice table (the full table is fetched at P3).
@@ -209,6 +231,8 @@ def apply_axis(config, axis, value):
     elif axis == "audio":
         gain = value.get("gain_db") if isinstance(value, dict) else value
         cfg["audio"] = {"gain_db": clamp_gain(gain)}
+    elif axis == "stream":
+        cfg["stream"] = normalize_stream(value)
     else:
         raise ValueError(f"unknown axis: {axis}")
     return cfg
@@ -248,6 +272,25 @@ def normalize_vad(value):
 def current_vad(config):
     """The persistent vad axis with defaults filled + guards applied."""
     return normalize_vad(config.get("vad"))
+
+
+def normalize_stream(value):
+    """Whole-axis stream value: enabled bool + model(whitelist) + endpoint_silence_s
+    clamped. Bad hand-edit coerces back to defaults (never rejects)."""
+    d = value if isinstance(value, dict) else {}
+    out = copy.deepcopy(DEFAULT_CONFIG["stream"])
+    out["enabled"] = bool(d.get("enabled", out["enabled"]))
+    if d.get("model") in STREAM_MODELS:
+        out["model"] = d["model"]
+    if "endpoint_silence_s" in d:
+        out["endpoint_silence_s"] = _clamp(d["endpoint_silence_s"], STREAM_SILENCE_RANGE[0],
+                                           STREAM_SILENCE_RANGE[1], out["endpoint_silence_s"])
+    return out
+
+
+def current_stream(config):
+    """The persistent stream axis with defaults filled + guards applied."""
+    return normalize_stream(config.get("stream"))
 
 
 def current_audio_gain(config):
@@ -293,4 +336,5 @@ def enums():
     return {"asr": [copy.deepcopy(ASR_META[k]) for k in ASR_ENGINES],
             "tts": [copy.deepcopy(TTS_META[k]) for k in TTS_ENGINES],
             "vad": [copy.deepcopy(VAD_META[k]) for k in VAD_ENGINES],
+            "stream": [copy.deepcopy(STREAM_META[k]) for k in STREAM_MODELS],
             "edge_voices": list(EDGE_VOICES)}

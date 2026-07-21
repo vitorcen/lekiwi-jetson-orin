@@ -27,3 +27,4 @@
 - [GUI 语音改版计划](agent-voice-pages-plan.md) — 2026-07-21 定稿经 codex+kimi 双评审:Agent/Voice 分页、三轴切换、板端统一 config;动语音/GUI 前必读 docs/agent-voice-pages-plan.html
 - [大脑切换探针](hermes-brain-switch-probe.md) — /brain 探针判据:网关把 provider 4xx 伪装成 assistant.completed,必须靠 delta/output_tokens 判过;网关重启就绪>20s;改探针/加大脑前必读
 - [voice 双 venv + sherpa 1.13.4](voice-venv-dual-sherpa113.md) — .venv 软链→.venv-exp(1.13.4/TEN)vs .venv-stable(1.10.46)秒级回滚;TEN 同阈值比 Silero 低幅更敏感;升级/回滚 voice sherpa 前必读
+- [语音 ASR 引擎阵容](voice-asr-engines.md) — qwen3-asr sherpa 原生抗噪主力+四离线四流式热切换+两级选择;流式现场不可用/nemotron已否;加换 ASR 前必读
