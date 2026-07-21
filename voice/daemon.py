@@ -341,7 +341,8 @@ class Daemon:
         # 切换 = 载新→卸旧(见 _apply_asr)。self.asr 始终指向当前运行宿主。
         self.asr_hosts = {n: cls() for n, cls in vengines.REGISTRY["asr"].items()}
         self.asr = self.asr_hosts["sensevoice"]  # 下方按 pair 重定向
-        self.melo = vengines.MeloTts()           # 本地 Melo(edge 兜底也用它)
+        self.melo = vengines.MeloTts()           # 本地 Melo(edge 兜底也用它,常驻)
+        self.matcha = vengines.MatchaTts()       # 本地 Matcha(实时,按需载/卸)
         self.vad = None                          # VadEngine(daemon 所有,可切换)
         # 音频前端(全局,不属 preset pair):当前 VAD 描述 + 数字增益。ephemeral 标记
         # 表示调试态临时改动未落盘 —— 退出 DEBUG 时从 config 还原(与 tts/asr 同语义)。
@@ -367,7 +368,7 @@ class Daemon:
         _pair = vconfig.current_pair(self.config)
         self.asr_engine = _pair["asr"] if _pair["asr"] in self.asr_hosts else "sensevoice"
         self.asr = self.asr_hosts[self.asr_engine]           # 运行宿主 = 当前 pair
-        self.tts_engine = _pair["tts"].get("engine", "edge") # "edge" | "melo"
+        self.tts_engine = _pair["tts"].get("engine", "edge") # "edge"|"matcha"|"melo"
         self.edge_voice = _pair["tts"].get("voice") or EDGE_VOICE
 
         # 切换执行器(全局串行) + ephemeral 覆盖(调试态不落盘) + 状态机快照
@@ -1194,7 +1195,8 @@ class Daemon:
             await self.discover_audio()     # 设备刚回来时当句即恢复,不等巡检
         backend = None
         breaker_open = time.time() < self.breaker_until
-        # tts_engine=="melo" → 纯本地 Melo(单独引擎);"edge" → edge 含 melo 兜底+熔断。
+        # "edge" → edge 含本地兜底+熔断;"matcha"/"melo" → 纯本地引擎。本地宿主选路:
+        # matcha 选中且已载用 matcha,否则 melo(常驻)—— 未载时静默降级,不断播报。
         use_edge = self.tts_engine == "edge"
         if use_edge and not breaker_open and FFMPEG:
             ok = await self._edge_play(gen, sentence)
@@ -1207,8 +1209,10 @@ class Daemon:
                     self.breaker_until = time.time() + BREAKER_COOLDOWN
                     self.edge_fail_streak = 0
         if backend is None and gen == self.generation:
-            ok = await self._melo_play(gen, sentence)
-            backend = "melo" if ok else "failed"
+            host = (self.matcha if self.tts_engine == "matcha" and self.matcha.loaded
+                    else self.melo)
+            ok = await self._local_play(gen, sentence, host)
+            backend = host.name if ok else "failed"
         if gen == self.generation:
             self.emit("tts", sentence=sentence, backend=backend)
 
@@ -1373,22 +1377,23 @@ class Daemon:
             await self._reap(ap)
             self._after_playback()
 
-    def _melo_sync(self, text: str) -> np.ndarray:
-        return self.melo.synth(text)
-
     async def _melo_play(self, gen: int, text: str) -> bool:
-        """本地 Melo:float32@44100 → int16 → aplay -r 44100。合成丢 executor。"""
-        if not self.melo.loaded or not self.audio_ok:
+        return await self._local_play(gen, text, self.melo)
+
+    async def _local_play(self, gen: int, text: str, host) -> bool:
+        """本地引擎(melo/matcha):synth 丢 executor → int16 → aplay 按宿主采样率播。"""
+        if not host.loaded or not self.audio_ok:
             return False
         loop = asyncio.get_running_loop()
         ap = None
         try:
-            pcm16 = await loop.run_in_executor(self._tts_pool, self._melo_sync, text)
+            pcm16 = await loop.run_in_executor(self._tts_pool, host.synth, text)
             if gen != self.generation:
                 return False
             ap = await asyncio.create_subprocess_exec(
                 "aplay", "-D", self.play_dev(),
-                "-f", "S16_LE", "-r", "44100", "-c", "1", "-t", "raw", "-q",
+                "-f", "S16_LE", "-r", str(host.sample_rate), "-c", "1",
+                "-t", "raw", "-q",
                 stdin=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -1406,7 +1411,7 @@ class Daemon:
             return True
         except Exception as exc:
             self._kill(ap)
-            self.emit("error", message=f"melo play failed: {exc}")
+            self.emit("error", message=f"{host.name} play failed: {exc}")
             return False
         finally:
             await self._reap(ap)
@@ -1535,7 +1540,9 @@ class Daemon:
 
         def _load():
             self.asr.load()                          # SenseVoice(引擎宿主)
-            self.melo.load()                         # Melo(含预热)
+            self.melo.load()                         # Melo(含预热,edge 兜底常驻)
+            if self.tts_engine == "matcha":          # pair 选了 matcha 才载(按需)
+                self.matcha.load()
             # 当前 config 选中的 VAD 引擎。默认 silero + 默认参数 ⇒ 与 P2.7 前逐字节一致。
             return vvad.make_vad(desc["engine"], desc, MODELS)
 
@@ -1640,13 +1647,19 @@ class Daemon:
                 pass
 
     async def _apply_tts(self, tts_value) -> bool:
-        """切运行 TTS 引擎。edge 兜底与 melo 单独都需要 Melo 模型常驻。"""
+        """切运行 TTS 引擎。Melo 常驻(edge 兜底/错误短语都用它);Matcha 按需:
+        选中才载,离开即卸(回收 ~150MB,板上内存金贵)。"""
         loop = asyncio.get_running_loop()
         engine = tts_value.get("engine") if isinstance(tts_value, dict) else tts_value
         if engine not in vconfig.TTS_ENGINES:
             raise ValueError(f"unknown tts engine: {engine}")
         if not self.melo.loaded:
             await loop.run_in_executor(None, self.melo.load)
+        if engine == "matcha":
+            if not self.matcha.loaded:
+                await loop.run_in_executor(None, self.matcha.load)
+        elif self.matcha.loaded:
+            await loop.run_in_executor(None, self.matcha.unload)
         self.tts_engine = engine
         if engine == "edge" and isinstance(tts_value, dict) and tts_value.get("voice"):
             self.edge_voice = tts_value["voice"]
@@ -1685,7 +1698,10 @@ class Daemon:
                 await self._apply_asr(pair["asr"])
             except Exception as exc:                          # noqa: BLE001
                 self.emit("error", message=f"restore asr failed: {exc}")
-        self.tts_engine = pair["tts"].get("engine", "edge")
+        try:
+            await self._apply_tts(pair["tts"])       # 含 matcha 按需载/卸
+        except Exception as exc:                          # noqa: BLE001
+            self.emit("error", message=f"restore tts failed: {exc}")
         if pair["tts"].get("voice"):
             self.edge_voice = pair["tts"]["voice"]
 
@@ -2300,6 +2316,7 @@ class Daemon:
             "applied": self.applied_engines(),
             "drift": self.drift(),
             "engines": {"asr_loaded": self.asr.loaded, "melo_loaded": self.melo.loaded,
+                        "matcha_loaded": self.matcha.loaded,
                         "tts_engine": self.tts_engine, "edge_voice": self.edge_voice},
             "vision_speak": bool(self.vision_task and not self.vision_task.done()),
         }

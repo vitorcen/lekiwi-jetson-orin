@@ -43,8 +43,9 @@ DEFAULT_CONFIG = {
             "key_env": "DEEPSEEK_API_KEY",
             "pair": {
                 "asr": "sensevoice",
-                "tts": {"engine": "edge", "voice": "zh-CN-XiaoxiaoNeural",
-                        "fallback": "melo"},
+                # matcha default (2026-07-22): realtime offline (RTF 0.18), no
+                # per-sentence network stalls; edge stays selectable, melo is fallback.
+                "tts": {"engine": "matcha"},
             },
         },
     },
@@ -57,7 +58,8 @@ DEFAULT_CONFIG = {
 # funasr/whisper/qwen3 are heavy — run them with the vision service stopped.
 # Order here = GUI dropdown order.
 ASR_ENGINES = ["funasr", "qwen3", "sensevoice", "paraformer", "whisper"]
-TTS_ENGINES = ["edge", "melo"]
+# matcha first/default (realtime offline); edge online quality; melo resident fallback
+TTS_ENGINES = ["matcha", "edge", "melo"]
 # fsmn first/default (field-tested best: built-in endpointing, ~150ms lead-in)
 VAD_ENGINES = ["fsmn", "silero", "ten", "webrtc", "energy"]
 # Streaming models (二级下拉 when 一级=流式). x-asr first/default: field-tested slightly
@@ -90,6 +92,9 @@ ASR_META = {
 TTS_META = {
     "edge": {"id": "edge", "label": "edge-tts 在线",
              "params_b": None, "disk_mb": None},
+    # board-measured RTF 0.18 @2t (melo is 1.60 — not realtime); model 93MB + vocos 52MB
+    "matcha": {"id": "matcha", "label": "Matcha zh-en 离线(实时)",
+               "params_b": None, "disk_mb": 145},
     "melo": {"id": "melo", "label": "MeloTTS zh-en",
              "params_b": None, "disk_mb": 183},
 }

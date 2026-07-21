@@ -30,7 +30,7 @@ def test_apply_axis_tts_replaces_pair_tts_only():
     assert new["presets"]["deepseek"]["pair"]["tts"] == {"engine": "melo"}
     # asr untouched, other top-level untouched, input immutable
     assert new["presets"]["deepseek"]["pair"]["asr"] == "sensevoice"
-    assert cfg["presets"]["deepseek"]["pair"]["tts"]["engine"] == "edge"
+    assert cfg["presets"]["deepseek"]["pair"]["tts"]["engine"] == "matcha"
 
 
 def test_apply_axis_asr():
@@ -144,7 +144,7 @@ def test_effective_pair_override_wins_but_config_persists():
     eff = vc.effective_pair(cfg, {"tts": {"engine": "melo"}})
     assert eff["tts"]["engine"] == "melo"
     # config itself unchanged (ephemeral, not persisted)
-    assert vc.current_pair(cfg)["tts"]["engine"] == "edge"
+    assert vc.current_pair(cfg)["tts"]["engine"] == "matcha"
 
 
 def test_effective_pair_no_override_is_config_pair():
@@ -160,9 +160,8 @@ def test_compute_drift_detects_ephemeral_override():
 
 
 def test_compute_drift_empty_when_aligned():
-    desired = vc.current_pair(vc.merge_defaults({}))
-    applied = {"asr": "sensevoice", "tts_engine": "edge",
-               "edge_voice": desired["tts"]["voice"]}
+    desired = vc.current_pair(vc.merge_defaults({}))       # matcha default
+    applied = {"asr": "sensevoice", "tts_engine": "matcha", "edge_voice": None}
     assert vc.compute_drift(desired, applied) == {}
 
 
@@ -176,6 +175,8 @@ def test_enums_are_metadata_objects():
     tts = {t["id"]: t for t in e["tts"]}
     assert tts["edge"]["params_b"] is None and tts["edge"]["disk_mb"] is None  # online
     assert tts["melo"]["disk_mb"] == 183                                       # offline
+    assert tts["matcha"]["disk_mb"] == 145           # model 93MB + vocos 52MB
+    assert [t["id"] for t in e["tts"]] == vc.TTS_ENGINES
     assert all(isinstance(v, str) for v in e["edge_voices"])
     # id lists remain the membership source of truth for the switch executors
     assert [a["id"] for a in e["asr"]] == vc.ASR_ENGINES

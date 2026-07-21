@@ -412,11 +412,56 @@ class MeloTts:
         return (pcm * 32767.0).astype(np.int16)
 
 
+class MatchaTts:
+    """Matcha-TTS zh-en (icefall) + vocos 16k vocoder. Non-autoregressive: board-measured
+    RTF 0.18 @2 threads vs melo 1.60 — the only realtime local engine. Single voice.
+    The zh-en acoustic model requires the 16khz vocos vocoder (22khz plays wrong)."""
+
+    name = "matcha"
+    sample_rate = 16000
+
+    def __init__(self):
+        self.tts = None
+
+    @property
+    def loaded(self):
+        return self.tts is not None
+
+    def load(self):
+        import sherpa_onnx as so
+        base = os.path.join(MODELS, "matcha-icefall-zh-en")
+        tc = so.OfflineTtsConfig()
+        tc.model.matcha.acoustic_model = os.path.join(base, "model-steps-3.onnx")
+        tc.model.matcha.vocoder = os.path.join(MODELS, "vocos-16khz-univ.onnx")
+        tc.model.matcha.lexicon = os.path.join(base, "lexicon.txt")
+        tc.model.matcha.tokens = os.path.join(base, "tokens.txt")
+        tc.model.matcha.data_dir = os.path.join(base, "espeak-ng-data")
+        tc.model.num_threads = 2
+        tc.rule_fsts = ",".join(
+            os.path.join(base, f)
+            for f in ("date-zh.fst", "number-zh.fst", "phone-zh.fst")
+        )
+        self.tts = so.OfflineTts(tc)
+        self.tts.generate("好", sid=0, speed=1.0)      # warm up
+
+    def unload(self):
+        self.tts = None
+        gc.collect()
+        malloc_trim()
+
+    def synth(self, text):
+        import numpy as np
+        audio = self.tts.generate(text, sid=0, speed=1.0)
+        samp = np.asarray(audio.samples, dtype=np.float32)
+        pcm = np.clip(samp, -1.0, 1.0)
+        return (pcm * 32767.0).astype(np.int16)
+
+
 # Metadata registry: which engines exist per axis. edge is a playback mode over the
 # shared Melo model (its fallback), so only the model-owning engines appear as hosts.
 REGISTRY = {
     "asr": {"sensevoice": OfflineAsr, "paraformer": OfflineParaformer,
             "whisper": OfflineWhisper, "qwen3": OfflineQwen3Asr,
             "funasr": OfflineFunAsr},
-    "tts": {"melo": MeloTts},          # 'edge' reuses MeloTts as its breaker fallback
+    "tts": {"melo": MeloTts, "matcha": MatchaTts},
 }

@@ -208,6 +208,24 @@ for f in char_state_tab.utf8 prob_emit.utf8 prob_start.utf8 prob_trans.utf8; do
   fetch "$HF_MELO/dict/pos_dict/$f" "$MODELS/vits-melo-tts-zh_en/dict/pos_dict/$f" 1
 done
 
+# Matcha TTS (zh-en, realtime: board RTF 0.18 vs melo 1.60) + 16k vocos vocoder.
+# The zh-en acoustic model REQUIRES the 16khz vocoder — 22khz plays wrong.
+MATCHA_D="$MODELS/matcha-icefall-zh-en"
+if [[ ! -f "$MATCHA_D/tokens.txt" ]]; then
+  msg "download + extract matcha-icefall-zh-en"
+  tmp="$(mktemp --suffix=.tar.bz2)"
+  curl -fsSL -o "$tmp" \
+    "$GHFAST/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-en.tar.bz2" \
+    || curl -fsSL -o "$tmp" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-zh-en.tar.bz2"
+  mkdir -p "$MATCHA_D"; tar xjf "$tmp" -C "$MATCHA_D" --strip-components=1; rm -f "$tmp"
+  [[ -f "$MATCHA_D/tokens.txt" ]] || warn "matcha extract failed"
+else msg "have matcha-icefall-zh-en ($(du -sh "$MATCHA_D" | cut -f1))"; fi
+fetch "$GHFAST/https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-16khz-univ.onnx" \
+      "$MODELS/vocos-16khz-univ.onnx" 40000000 \
+  || fetch "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-16khz-univ.onnx" \
+      "$MODELS/vocos-16khz-univ.onnx" 40000000
+
 # ---------------------------------------------------------------- ffmpeg note
 command -v ffmpeg >/dev/null || warn "ffmpeg not found — needed to decode edge-tts mp3"
 

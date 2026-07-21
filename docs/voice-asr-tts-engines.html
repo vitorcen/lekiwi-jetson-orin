@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语音引擎全景：ASR 多宿主 + TTS 三引擎 · 板上实测与选型</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  a{color:var(--accent-dk)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+<h1>语音引擎全景：ASR 多宿主 + TTS 三引擎</h1>
+<p class="sub">Jetson Orin Nano 8GB · voice-daemon (:8092) · 2026-07-22 · 全部数据为板上实测</p>
+</header>
+
+<div class="tldr">
+<h2>TL;DR</h2>
+<ul>
+<li><strong>ASR 门面引擎 = Fun-ASR-Nano 0.8B(GPU, ~0.65s/句,带标点)</strong>；抗噪备选 qwen3；流式仅调试用。</li>
+<li><strong>TTS：edge(在线主力)→ matcha(离线实时,RTF 0.18)→ melo(兜底常驻)</strong>。melo RTF 1.60 不实时且丢数字——它当主引擎的时代结束了。</li>
+<li>持久状态只有一份：<code>presets[*].pair</code>；Voice 页改动是临时覆盖，「保存」扇出写入<strong>所有</strong> preset——Agent 页切大脑不会顶回旧引擎。</li>
+<li>质量上限路线（待实验）：Qwen3-TTS-0.6B 走 TensorRT-Edge-LLM(int4, ~1.7GB, 原生流式)。</li>
+</ul>
+</div>
+
+<h2>1 · 架构:一份持久状态 + 数据驱动多宿主</h2>
+<p>运行引擎永远是「当前 preset 的 pair」的投影。Voice 调试页的引擎/参数改动是<strong>内存态
+ephemeral 覆盖</strong>(不落盘,退出调试自动还原);「保存」把值写回 pair 并<strong>扇出到所有
+preset</strong>——per-preset 分歧没有任何 UI 能产生它,保留它只会让 Agent 页切大脑时把
+ASR/TTS 悄悄顶回旧搭配(实锅已修,2026-07-22)。</p>
+<pre><code>axes:  brain(preset) | asr | tts | vad | audio | stream(DEBUG-only) | vision
+hosts: REGISTRY["asr"] = funasr qwen3 sensevoice paraformer whisper
+       REGISTRY["tts"] = melo matcha       # edge 是 melo 之上的播放模式
+切换:  载新→卸旧;大宿主(funasr)unload_first 先卸旧防击穿 8GB
+保存:  切运行引擎 + 落盘(扇出全 preset) + 清 ephemeral 覆盖 → 对话链即刻生效</code></pre>
+
+<h2>2 · ASR 离线引擎(VAD 切段 → transcribe 整段)</h2>
+<table>
+<tr><th>引擎</th><th>模型/大小</th><th>板上实测</th><th>定位</th></tr>
+<tr><td><strong>funasr</strong>(第一位)</td><td>Fun-ASR-Nano 0.8B GGUF,932MB,自编 llama.cpp CUDA sm_87</td>
+  <td>~0.65s/句(GPU),带标点,峰值 RSS 1.63GB</td>
+  <td><strong>门面引擎</strong>。常驻子进程 serve 模式;与 VLM llama-server 不共存</td></tr>
+<tr><td>qwen3</td><td>Qwen3-ASR-0.6B int8,954MB,sherpa 原生</td>
+  <td>~1.5s/短段,0dB WER ~7%</td><td>抗噪主力(LLM decoder,同音字/中英混最准)</td></tr>
+<tr><td>sensevoice</td><td>234M int8,229MB</td><td>&lt;1s,多语种</td><td>轻量备选;近场噪声马马虎虎</td></tr>
+<tr><td>paraformer</td><td>220M int8,232MB</td><td>&lt;1s</td><td>轻量备选(纯中文)</td></tr>
+<tr><td>whisper</td><td>large-v3-turbo int8,989MB</td><td>RTF~2,太慢</td><td>淘汰,仅对比</td></tr>
+</table>
+
+<h3>2.1 流式模式(DEBUG-only,不进对话链路)</h3>
+<p>免 VAD、自带端点(<code>OnlineRecognizer</code>)。默认 <code>x-asr-zh-en</code>(160M/百万小时,中英混,RTF 0.25);
+备选 zh-xlarge(700M,纯中文,RTF 0.56)、para-zh-en(int8 226MB,RTF 0.115)等。
+三个已修的坑:①解码下专用线程(内联解码卡事件循环→ALSA overrun 整段丢音);
+②端点检查移进 decode 循环(批中间的端点原来会整句丢);③num_threads=2 最优(4 线程是负优化)。
+<strong>结论:这套硬件上流式是对比工具,不是可用模式</strong>——精度天生低于离线,丢块敏感,对话恒走 VAD+离线。</p>
+
+<div class="box warn"><strong>GPU 之于 ASR</strong>
+pip 版 sherpa 是 CPU-only;官方 cuda wheel 旧结论"绑 CUDA 10.2 不适配 JetPack 6"<strong>已过时</strong>——
+sherpa-onnx 现已支持 Orin Nano JetPack 6.2 自编(ORT 1.18.1 + CUDA 12.6,板上正是 12.6)。
+但离线 RTF 已够用,重开 ASR GPU 只在与 TTS GPU 自编合并时顺带考虑。</div>
+
+<h2>3 · TTS 三引擎(2026-07-22 新格局)</h2>
+<table>
+<tr><th>引擎</th><th>路径</th><th>板上实测</th><th>定位</th></tr>
+<tr><td><strong>edge</strong>(默认)</td><td>edge-tts 在线,ffmpeg 解码</td>
+  <td>音质最好;<strong>逐句付网络延迟</strong>(体感"每几个字断1秒"),断网不可用</td>
+  <td>在线主力,含 melo 兜底 + 熔断(连败 3 次冷却 120s)</td></tr>
+<tr><td><strong>matcha</strong>(新)</td><td>matcha-icefall-zh-en 93MB + vocos-16khz 52MB,sherpa 原生,16k</td>
+  <td><strong>RTF 0.18 @2线程(8×实时)</strong>,载入 3.5s,自带数字/日期归一化</td>
+  <td><strong>离线实时引擎</strong>。按需载/卸(~150MB);单音色;必须配 16k vocoder</td></tr>
+<tr><td>melo</td><td>vits-melo-tts-zh_en 183MB,sherpa,44.1k</td>
+  <td><strong>RTF 1.60 @2线程(不实时:4.5s 话要 7s)</strong>,lexicon 直接丢阿拉伯数字</td>
+  <td>常驻兜底(edge 熔断/错误短语用它),不再适合当主引擎</td></tr>
+</table>
+
+<h3>3.1 淘汰赛记录(全部板上实测,别重测)</h3>
+<table>
+<tr><th>候选</th><th>实测/事实</th><th>结论</th></tr>
+<tr><td>kokoro v1.1(103 音色 zh-en)</td><td>fp32 RTF 2.25 @2t / 1.44 @4t;<strong>int8 更慢(2.33)</strong></td>
+  <td>CPU 死路;模型留板上,音质路线需 GPU 自编 sherpa 才有戏</td></tr>
+<tr><td>CosyVoice3-0.5B(FunAudioLLM)</td><td>ONNX 需 ~5.2GB 显存;无 Jetson 支持;ttsfrd 仅 x86</td><td>8GB 板出局</td></tr>
+<tr><td>IndexTTS-2 / FishAudio S1-mini</td><td>4-8GB 起步 / 非商用许可</td><td>出局</td></tr>
+<tr><td>OuteTTS / Piper</td><td>中文质量差 / 机械感且中英不能混读</td><td>不用</td></tr>
+</table>
+
+<h3>3.2 质量上限路线(待实验):Qwen3-TTS-0.6B</h3>
+<p>官方只有 torch/vLLM(fp16 2.5GB,无 ONNX/GGUF 上游)。Jetson 现实路径 =
+<strong>NVIDIA TensorRT-Edge-LLM</strong>(官方支持,拆 Talker/CodePredictor/Code2Wav 三引擎;
+社区现成 int4+fp8 包 ~1.7GB,9 音色 zh+en,原生流式;Edge-LLM issue #87 有 Orin Nano 8GB
+同板跑 ASR+TTS 先例)。坑:Predictor 每帧串行 15 步是天然瓶颈;llama.cpp sm_87 要关
+flash-attn;官方 97ms 首包是云端数,板上预期 ×3-5;与 VLM 3.4GB 共存需先停 VLM 实测峰值。</p>
+
+<div class="box ok"><strong>GPU 收益评估结论</strong>
+matcha CPU 已 8×实时 → 小模型上 GPU 不解决真问题;GPU 的用武之地只有两个:
+① kokoro 音质路线(需自编 sherpa GPU,预期 5-10×),② Qwen3-TTS 质量线(必须 GPU)。
+按需求触发,不为加速而加速。</div>
+
+<h2>4 · VAD 五引擎(全局音频前端,不属 pair)</h2>
+<table>
+<tr><th>引擎</th><th>事实</th></tr>
+<tr><td><strong>fsmn</strong>(默认,0.5/0.1/0.5/0.9)</td><td>FunASR FSMN,RTF 0.009,段起点自带 ~150ms 提前量(治掐头);
+  llama-funasr-vad 常驻子进程 serve;threshold/min_silence 不外调(自带状态机)</td></tr>
+<tr><td>silero / ten / webrtc / energy</td><td>常规备选;energy 阈值是 dBFS(-45)非 0..1</td></tr>
+</table>
+
+<h2>5 · 已修的关键实锅(供回归对照)</h2>
+<table>
+<tr><th>症状</th><th>根因</th><th>修法</th></tr>
+<tr><td>流式"识别一句忽略几句"</td><td>内联解码卡事件循环 → ALSA overrun;批尾端点丢失</td>
+  <td>解码专用线程 + 端点检查进 decode 循环,feed() 返回 finals 列表</td></tr>
+<tr><td>切 funasr 全板假死</td><td>载新未卸旧,两大引擎并存击穿 8GB → swap 抖动</td><td>unload_first:先卸旧再载新</td></tr>
+<tr><td>对话中途 <code>hermes error: Got more than 524288 bytes</code></td>
+  <td>aiohttp 行迭代器 512KB 上限;assistant.completed 一行 data: 带全文超限</td>
+  <td>SSE 解析自行按 \n 切行(iter_chunked),无行长上限</td></tr>
+<tr><td>保存后 Agent 切大脑引擎被顶回</td><td>pair per-preset,保存只写当前 preset</td><td>asr/tts 保存扇出全 preset</td></tr>
+<tr><td>GUI 只显示"status code 409"</td><td>Rust ureq 代理吞掉响应体里的 error 原因</td><td>voice_err 解析 body 透传原因</td></tr>
+<tr><td>fsmn vad 超时假死</td><td>select+TextIOWrapper:readline 吸走多行响应,后续 select 永远超时</td>
+  <td>二进制管道 + os.read + 自管缓冲</td></tr>
+</table>
+
+<p class="sub">相关文档:<a href="agent-voice-pages-plan.html">Agent/Voice 页面改版设计</a> ·
+记忆:<code>.memory/voice-asr-engines.md</code> / <code>.memory/voice-tts-upgrade.md</code></p>
+
+</div>
+</body>
+</html>
