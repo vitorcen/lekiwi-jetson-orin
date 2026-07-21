@@ -379,6 +379,16 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .cap-seg .capmeta { flex-basis: 100%; margin-bottom: 1px; }
 .segbadge { font: 11px ui-monospace, monospace; color: #9aa2bf;
   border: 1px solid #2c3350; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+/* 重识别结果行:切引擎后逐段追加,并排比模型出字 */
+.capreasr { flex-basis: 100%; display: flex; gap: 6px; align-items: baseline;
+  margin-top: 3px; font-size: 13px; color: #cdd6f4; word-break: break-word; }
+.reasreng { flex: none; font: 11px ui-monospace, monospace; color: #89dceb;
+  border: 1px solid #2c4650; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+/* 流式转写行:「流式」徽章 + 进行中(cap-live)斜体半透明,和 VAD+离线的 seg 行区分 */
+.cap-stream { border-left: 2px solid #89b4fa; }
+.cap-stream .capmsg::before { content: '流式 '; color: #89b4fa;
+  font: 11px ui-monospace, monospace; }
+.cap-stream.cap-live .capmsg { opacity: 0.6; font-style: italic; }
 .seg-accepted { border-left-color: #a6e3a1; }
 .seg-accepted .segbadge { color: #a6e3a1; border-color: #33502c; }
 .seg-empty_asr { border-left-color: #f38ba8; }

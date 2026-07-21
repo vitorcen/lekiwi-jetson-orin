@@ -191,7 +191,9 @@ function fillVadSel(list, curEngine) {
 function paintInput(id, v, ephemeralLive) {
   const el = $(id);
   if (!el || v == null) return;
-  if (ephemeralLive || document.activeElement === el) return;
+  // 空框没有用户编辑要保护 —— 永远 seed(否则一个 asr/tts 的 ephemeral 覆盖会让整组
+  // VAD 参数框刷新后空着,即"参数值不见了"的 bug)。只有已有值且被编辑/覆盖时才跳过。
+  if (el.value !== '' && (ephemeralLive || document.activeElement === el)) return;
   el.value = v;
 }
 
@@ -232,6 +234,53 @@ function curGain() {
   return Number.isFinite(g) ? g : 0;
 }
 
+// ---- 两级:一级识别模式(vlRecMode) + 二级模型(vlModelSel,随模式变) ----
+let asrEnums = [], streamEnums = [], curAsr = '', curStreamModel = 'zh-2025';
+
+function recMode() { return $('vlRecMode') ? $('vlRecMode').value : 'vad'; }
+
+// 二级模型下拉:VAD→离线引擎枚举,流式→流式模型枚举。eph 时保留用户选择不 stomp。
+function fillModelSel(eph) {
+  const sel = $('vlModelSel');
+  if (!sel) return;
+  const stream = recMode() === 'stream';
+  const list = stream ? streamEnums : asrEnums;
+  const want = stream ? curStreamModel : curAsr;
+  const keep = (eph && sel.value) ? sel.value : want;   // ephemeral 覆盖时不回抢
+  fillEngineSel(sel, list, keep);
+}
+
+// 参数区随模式显隐(VAD 参数 vs 端点静音)
+function applyModeUI() {
+  const stream = recMode() === 'stream';
+  if ($('vlVadRow')) $('vlVadRow').style.display = stream ? 'none' : '';
+  if ($('vlStreamRow')) $('vlStreamRow').style.display = stream ? '' : 'none';
+}
+
+function curStream() {
+  const stream = recMode() === 'stream';
+  return { enabled: stream,
+           model: stream ? ($('vlModelSel').value || curStreamModel) : curStreamModel,
+           endpoint_silence_s: numVal('vlStreamSilence') };
+}
+
+// 从 config 回填一级模式 + 二级模型 + 参数(与 VAD 同语义:ephemeral 时不覆盖用户改动)。
+function applyStreamFromConfig(cfg) {
+  const desired = (cfg && cfg.desired) || cfg || {};
+  const st = desired.stream || {};
+  const en = desired.enums || cfg.enums || {};
+  const eph = !!(cfg && cfg.drift && cfg.drift.ephemeral);
+  streamEnums = en.stream || [];
+  curStreamModel = st.model || 'zh-2025';
+  const modeSel = $('vlRecMode');
+  if (modeSel && document.activeElement !== modeSel && !eph) {
+    modeSel.value = st.enabled ? 'stream' : 'vad';
+  }
+  paintInput('vlStreamSilence', st.endpoint_silence_s, eph);
+  fillModelSel(eph);
+  applyModeUI();
+}
+
 function applyTtsFromConfig(cfg) {
   const desired = (cfg && cfg.desired) || cfg || {};
   const presets = desired.presets || {};
@@ -241,7 +290,9 @@ function applyTtsFromConfig(cfg) {
   const tts = pair && pair.tts;
   // Engine dropdowns from the daemon's enums (labels carry offline model sizes).
   const en = desired.enums || cfg.enums || {};
-  fillEngineSel($('vlAsrEngine'), en.asr, pair && pair.asr);
+  // 二级模型下拉的离线引擎数据(VAD 模式用);实际填充在 applyStreamFromConfig 里按模式做。
+  asrEnums = en.asr || [];
+  curAsr = (pair && pair.asr) || '';
   fillEngineSel($('vlTtsEngine'), en.tts);
   // Current engine / voice from the active pair.
   const engineSel = $('vlTtsEngine');
@@ -279,6 +330,7 @@ function applyTtsFromConfig(cfg) {
   const vl = $('vlVisionLimit');
   if (vl && desired.vision_speak_limit != null) vl.value = desired.vision_speak_limit;
   applyVadFromConfig(cfg);
+  applyStreamFromConfig(cfg);
   syncTtsUi();
 }
 
@@ -305,13 +357,15 @@ async function refreshConfig() {
   } catch { /* /config not up yet — dropdowns keep their static defaults */ }
 }
 
-async function postConfig(patch, feedNote) {
+// feedId 决定反馈落哪个台:VAD/增益/ASR 属左边 ASR 台(vlAsrFeed),TTS/Vision 属右边
+// TTS 台(vlTtsFeed,默认)。之前一律写 vlTtsFeed,导致切 VAD 的提示跑到右边。
+async function postConfig(patch, feedNote, feedId = 'vlTtsFeed') {
   if (!invoke) return;
   try {
     await invoke('voice_post', { ip: curIp(), path: '/config', body: JSON.stringify(patch) });
-    if (feedNote) addRow('vlTtsFeed', feedNote, 'ask');
+    if (feedNote) addRow(feedId, feedNote, 'ask');
   } catch (e) {
-    addRow('vlTtsFeed', '配置失败: ' + e, 'error');
+    addRow(feedId, '配置失败: ' + e, 'error');
   }
 }
 
@@ -326,6 +380,32 @@ function addAsrEvent(ev) {
     // A final commits: drop the live partial row it was refining, add a clean one.
     if (partialRow) { const r = partialRow.closest('.caprow'); if (r) r.remove(); partialRow = null; }
     if (text) addRow('vlAsrFeed', text, '');
+  }
+}
+
+// 流式转写行:partial 实时刷同一行,final(端点)提交为定稿。带「流式」徽章,和下方
+// VAD+离线的 seg 行并排,一眼分清是哪条路出的字。用自己的 partialRow,不和别处冲突。
+let streamPartialRow = null;
+function addStreamRow(ev) {
+  const text = ev.text || '';                                   // untrusted model output
+  if (ev.partial) {
+    if (!streamPartialRow) {
+      streamPartialRow = addRow('vlAsrFeed', text, 'stream');
+      streamPartialRow.closest('.caprow') &&
+        streamPartialRow.closest('.caprow').classList.add('cap-stream', 'cap-live');
+    } else {
+      streamPartialRow.textContent = text;
+    }
+  } else {
+    if (streamPartialRow) {
+      if (text) streamPartialRow.textContent = text;            // 写入定稿文本再提交
+      const r = streamPartialRow.closest('.caprow');
+      if (r) r.classList.remove('cap-live');                    // 去掉"进行中"样式
+      streamPartialRow = null;
+    } else if (text) {
+      const msg = addRow('vlAsrFeed', text, 'stream');
+      msg.closest('.caprow') && msg.closest('.caprow').classList.add('cap-stream');
+    }
   }
 }
 
@@ -369,10 +449,17 @@ function addSegRow(ev) {
     // 本机播(远程调试用):Web Audio 在这台机器出声
     const local = document.createElement('button');
     local.className = 'minibtn';
-    local.textContent = '🎧';
+    local.textContent = '💻';
     local.title = '本机播,远程调试用';
     local.onclick = () => playSeg(ev.seg_id, local);
-    textwrap.append(board, local);
+    // 🔁 重识:用当前 ASR 引擎对这段重新识别 —— 切模型后点它,同段同 PCM 只换引擎,
+    // 结果并排追加在段下方,直接比模型效果。
+    const reasr = document.createElement('button');
+    reasr.className = 'minibtn';
+    reasr.textContent = '🔁 重识';
+    reasr.title = '用当前 ASR 引擎重识别此段,切模型后可并排对比';
+    reasr.onclick = () => retranscribeSeg(ev.seg_id, reasr, textwrap);
+    textwrap.append(board, local, reasr);
   }
   row.append(textwrap);
   feed.insertBefore(row, feed.firstChild);
@@ -408,6 +495,35 @@ async function playSeg(id, btn) {
   }
 }
 
+// 用当前 ASR 引擎重识别已存段,结果并排追加到该段下方 —— 切引擎后逐段点,
+// 就能看到 sensevoice / paraformer 对同一段 PCM 各出什么字。
+async function retranscribeSeg(id, btn, wrap) {
+  if (!invoke) return;
+  btn.disabled = true;
+  try {
+    const r = JSON.parse(await invoke('voice_post',
+      { ip: curIp(), path: '/asr_debug/seg_asr', body: JSON.stringify({ id }) }));
+    if (r.error) {
+      const msg = /switch in progress/.test(r.error)
+        ? '引擎切换中,请等「服务就绪」后再重识' : '重识别失败: ' + r.error;
+      addRow('vlAsrFeed', msg, 'error'); return;
+    }
+    const line = document.createElement('div');
+    line.className = 'capreasr';
+    const eng = document.createElement('span');
+    eng.className = 'reasreng';
+    eng.textContent = r.engine || '?';                                // engine id
+    const txt = document.createElement('span');
+    txt.textContent = (r.text && r.text.trim()) ? r.text : '(空)';    // untrusted ASR text
+    line.append(eng, txt);
+    wrap.append(line);
+  } catch (e) {
+    addRow('vlAsrFeed', '重识别失败: ' + e, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // 板上播:daemon 用 aplay 在机器人音响出声,播放期自动闭麦防回录。默认推荐。
 async function playSegBoard(id, btn) {
   if (!invoke) return;
@@ -429,9 +545,10 @@ async function pollTail() {
     const r = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/asr_debug/tail?since=' + tailSeq }));
     if (r.last_seq != null && r.last_seq < tailSeq) { tailSeq = 0; return; }  // daemon restart
     for (const ev of r.events || []) {
-      // seg rows (kind 'seg' / outcome-bearing) render with outcome + replay;
-      // legacy partial/final rows fall through to addAsrEvent.
-      if (ev.kind === 'seg' || ev.outcome || ev.seg_id != null) addSegRow(ev);
+      // 流式行(kind 'stream')带「流式」徽章,与 VAD+离线的 seg 行并排区分;
+      // seg 行带 outcome+回放;其余(旧 partial/final)走 addAsrEvent。
+      if (ev.kind === 'stream') addStreamRow(ev);
+      else if (ev.kind === 'seg' || ev.outcome || ev.seg_id != null) addSegRow(ev);
       else addAsrEvent(ev);
     }
     if (r.last_seq != null) tailSeq = r.last_seq;
@@ -454,7 +571,7 @@ async function setAsr(on) {
     paintAsrBtn();
     armHealth();               // DEBUG → 300ms telemetry so the level meter tracks peaks
     if (on) { tailSeq = 0; startTail(); }
-    else { stopTail(); partialRow = null; }
+    else { stopTail(); partialRow = null; streamPartialRow = null; }
   } catch (e) {
     addRow('vlAsrFeed', '转写开关失败: ' + e, 'error');
   }
@@ -483,7 +600,7 @@ async function pollHealth() {
       asrOn = debug;
       paintAsrBtn();
       armHealth();
-      if (asrOn) startTail(); else { stopTail(); partialRow = null; }
+      if (asrOn) startTail(); else { stopTail(); partialRow = null; streamPartialRow = null; }
     }
   } catch {
     if (online) goOffline();
@@ -505,7 +622,7 @@ function goOffline() {
   online = false;
   asrOn = false;
   stopTail();
-  partialRow = null;
+  partialRow = null; streamPartialRow = null;
   armHealth();
   paintAsrBtn();
   const tb = $('vlTtsBtn'); if (tb) tb.disabled = true;
@@ -543,7 +660,73 @@ export function onLeaveVoice() { stopActive(); }
 // ---- wiring --------------------------------------------------------------
 
 $('vlAsrBtn') && ($('vlAsrBtn').onclick = () => { if (online) setAsr(!asrOn); });
-$('vlAsrClear') && ($('vlAsrClear').onclick = () => { $('vlAsrFeed').innerHTML = ''; partialRow = null; });
+$('vlAsrClear') && ($('vlAsrClear').onclick = () => { $('vlAsrFeed').innerHTML = ''; partialRow = null; streamPartialRow = null; });
+
+// 切换是异步 job(载新卸旧数秒)。/health 的 applied.asr 是 daemon 上「真正运行」的
+// 引擎(非下拉选值);轮询它直到 == 目标,才算对应模型服务就绪。给出明确确认。
+async function confirmAsrSwitch(target) {
+  const wait = addRow('vlAsrFeed', '切换中: ' + target + ' …(载入模型数秒)', 'ask');
+  for (let i = 0; i < 25; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const h = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/health' }));
+      const applied = h.applied && h.applied.asr;
+      if (applied === target) {
+        if (wait) wait.textContent = '✓ 已切到 ' + target + ' — 服务就绪,可点「🔁 重识」';
+        return true;
+      }
+    } catch { /* transient; keep polling */ }
+  }
+  if (wait) wait.textContent = '⚠ ' + target + ' 切换未在预期内确认,重识前请再看运行引擎';
+  return false;
+}
+
+// 流式模型是后台异步加载(可能 700M),POST 立即返回 → 轮询 /health.stream 直到 loaded。
+async function confirmStreamSwitch(model) {
+  const wait = addRow('vlAsrFeed', '流式加载中: ' + model + ' …(大模型 xlarge 可达 20-30s)', 'ask');
+  for (let i = 0; i < 45; i++) {          // xlarge daemon 里 ~24s,留足余量
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const h = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/health' }));
+      const st = h.stream || {};
+      if (st.enabled && st.loaded && st.model === model) {
+        if (wait) wait.textContent = '✓ 流式已就绪: ' + model + ' — 可开始说话';
+        return true;
+      }
+    } catch { /* transient */ }
+  }
+  if (wait) wait.textContent = '⚠ ' + model + ' 加载未在预期内确认';
+  return false;
+}
+
+// ASR engine change → ephemeral switch (debug A/B; auto-reverts on leaving DEBUG).
+// value 是引擎 id 字符串(apply_axis 的 asr 轴收 str)。先发切换,再轮询确认服务已载。
+// 一级:识别模式切换(VAD+离线 ↔ 流式免VAD)。重填二级下拉 + 显隐参数 + ephemeral 切后端。
+$('vlRecMode') && ($('vlRecMode').onchange = () => {
+  fillModelSel(false);          // 强制按新模式填(不保留旧模式的选择)
+  applyModeUI();
+  if (recMode() === 'stream') {
+    const m = $('vlModelSel').value;
+    postConfig({ axis: 'stream', value: curStream(), ephemeral: true },
+               '临时切流式(免VAD): ' + m, 'vlAsrFeed');
+    confirmStreamSwitch(m);
+  } else {
+    postConfig({ axis: 'stream', value: { enabled: false }, ephemeral: true },
+               '临时回 VAD+离线: ' + $('vlModelSel').value, 'vlAsrFeed');
+  }
+});
+// 二级:模型切换。VAD 模式→切离线引擎(asr 轴);流式模式→切流式模型(stream 轴)。均 ephemeral。
+$('vlModelSel') && ($('vlModelSel').onchange = async () => {
+  const m = $('vlModelSel').value;
+  if (recMode() === 'stream') {
+    postConfig({ axis: 'stream', value: curStream(), ephemeral: true },
+               '临时切流式模型: ' + m, 'vlAsrFeed');
+    confirmStreamSwitch(m);     // 后台加载,轮询到就绪
+  } else {
+    await postConfig({ axis: 'asr', value: m, ephemeral: true });
+    confirmAsrSwitch(m);        // 轮询 /health 直到服务就绪
+  }
+});
 
 // TTS engine / voice change → ephemeral override (does NOT persist).
 // POST /config body shape is {axis, value, ephemeral} — by-axis whole replacement.
@@ -570,21 +753,32 @@ $('vlVadEngine') && ($('vlVadEngine').onchange = () => {
   const e = vadEnums.find(x => x.id === $('vlVadEngine').value);
   if (e && e.default_threshold != null) $('vlVadThreshold').value = e.default_threshold;
   postConfig({ axis: 'vad', value: curVad(), ephemeral: true },
-             '临时切 VAD: ' + $('vlVadEngine').value);
+             '临时切 VAD: ' + $('vlVadEngine').value, 'vlAsrFeed');
 });
 for (const id of ['vlVadThreshold', 'vlVadMinSpeech', 'vlVadMinSilence', 'vlVadPreRoll']) {
   $(id) && ($(id).onchange = () => {
-    postConfig({ axis: 'vad', value: curVad(), ephemeral: true }, '临时改 VAD 参数');
+    postConfig({ axis: 'vad', value: curVad(), ephemeral: true }, '临时改 VAD 参数', 'vlAsrFeed');
   });
 }
 $('vlAudioGain') && ($('vlAudioGain').onchange = () => {
   postConfig({ axis: 'audio', value: { gain_db: curGain() }, ephemeral: true },
-             '临时增益: ' + curGain() + ' dB');
+             '临时增益: ' + curGain() + ' dB', 'vlAsrFeed');
 });
-// 存: persist VAD engine/params + gain into config (non-ephemeral).
+// 存(VAD 模式): 落盘 离线引擎(二级) + VAD 引擎/参数 + 增益。
 $('vlVadSave') && ($('vlVadSave').onclick = () => {
-  postConfig({ axis: 'vad', value: curVad() }, '已保存 VAD 前端');
+  postConfig({ axis: 'asr', value: $('vlModelSel').value }, '', 'vlAsrFeed');   // 离线引擎
+  postConfig({ axis: 'vad', value: curVad() }, '已存离线引擎+VAD+增益', 'vlAsrFeed');
   postConfig({ axis: 'audio', value: { gain_db: curGain() } });
+});
+
+// ---- 流式参数(端点静音临时改;「存」落盘 流式模型+端点+增益,存参) ----------
+$('vlStreamSilence') && ($('vlStreamSilence').onchange = () => {
+  postConfig({ axis: 'stream', value: curStream(), ephemeral: true },
+             '临时改端点静音: ' + curStream().endpoint_silence_s + 's', 'vlAsrFeed');
+});
+$('vlStreamSave') && ($('vlStreamSave').onclick = () => {
+  postConfig({ axis: 'stream', value: curStream() }, '', 'vlAsrFeed');
+  postConfig({ axis: 'audio', value: { gain_db: curGain() } }, '已存流式模型+端点+增益', 'vlAsrFeed');
 });
 
 // 播报: audition through POST /say; echo backend + first-byte if the daemon

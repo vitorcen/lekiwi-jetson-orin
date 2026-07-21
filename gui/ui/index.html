@@ -299,17 +299,27 @@
     <!-- ASR 转写台 -->
     <section class="panel">
       <h2>ASR 转写台 <span class="en">Live transcription</span></h2>
+      <!-- 一级:识别模式(VAD+离线 / 流式免VAD) + 二级:模型(随模式变) + 全局增益 -->
       <div class="watchrow">
-        <label class="ivlabel">引擎
-          <select id="vlAsrEngine"><option value="sensevoice">sensevoice</option></select>
+        <label class="ivlabel" title="一级:VAD 切段+离线引擎,或流式(免VAD,边说边出字)。互斥,切一个看一个">识别模式
+          <select id="vlRecMode">
+            <option value="vad">VAD+离线</option>
+            <option value="stream">流式(免VAD)</option>
+          </select>
+        </label>
+        <label class="ivlabel" title="二级:随模式变——VAD 时选离线引擎(qwen3等),流式时选流式模型(zh-2025等)">模型
+          <select id="vlModelSel"></select>
+        </label>
+        <label class="ivlabel" title="数字增益 dB(0=不变):MCP01 采集偏低时补足,两种模式都生效">增益
+          <input type="number" id="vlAudioGain" min="0" max="30" step="1" style="width:4.5em">
         </label>
         <button id="vlAsrBtn" class="primary" disabled>开始转写</button>
         <button id="vlAsrClear" class="minibtn" title="清空下方转写(仅本机显示)">清空</button>
-        <span class="tip">转写结果<b>不进大脑、不触发播报</b>;开启会终止正在进行的对话。</span>
+        <span class="tip">转写<b>不进大脑、不触发播报</b>;开启会终止对话。改动<b>临时</b>,「存」才落盘。</span>
       </div>
-      <!-- VAD 前端 + 数字增益(全局音频前端,不属对话搭配)。改参数为临时覆盖,「存」才落盘。 -->
-      <div class="watchrow">
-        <label class="ivlabel" title="VAD 引擎:silero 现役;energy 零依赖调试基准;webrtc/ten 视板上可用性">VAD
+      <!-- VAD 模式参数(一级=VAD+离线 时显示) -->
+      <div class="watchrow" id="vlVadRow">
+        <label class="ivlabel" title="VAD 引擎:silero 现役;energy 零依赖基准;webrtc/ten 视板上可用">VAD
           <select id="vlVadEngine"></select>
         </label>
         <label class="ivlabel" title="silero/webrtc 为 0~1;energy 为 dBFS 门(如 -45)">阈值
@@ -321,14 +331,19 @@
         <label class="ivlabel" title="收段:静音这么久(秒)才截断">尾静音
           <input type="text" inputmode="decimal" id="vlVadMinSilence" style="width:5em">
         </label>
-        <label class="ivlabel" title="前置回溯(秒):把段起点前这么久的音频一并纳入,修「起音被掐头」。默认 0.45">前置
+        <label class="ivlabel" title="前置回溯(秒):把段起点前这么久音频一并纳入,修「起音掐头」。默认0.45">前置
           <input type="text" inputmode="decimal" id="vlVadPreRoll" style="width:5em">
         </label>
-        <label class="ivlabel" title="数字增益 dB(0=不变):MCP01 采集偏低时补足,电平表随之显示增益后幅度">增益
-          <input type="number" id="vlAudioGain" min="0" max="30" step="1" style="width:4.5em">
+        <button id="vlVadSave" class="minibtn" title="把离线引擎 + VAD 参数 + 增益落盘">存</button>
+        <span class="tip">VAD 切段喂上面二级选的离线引擎。改动<b>临时</b>,「存」写入 config。</span>
+      </div>
+      <!-- 流式模式参数(一级=流式 时显示;默认 VAD 模式,先隐藏) -->
+      <div class="watchrow" id="vlStreamRow" style="display:none">
+        <label class="ivlabel" title="端点静音(秒):停顿这么久判为一句结束。小=收句快易切断,大=稳但慢。默认1.2">端点静音
+          <input type="text" inputmode="decimal" id="vlStreamSilence" style="width:5em">
         </label>
-        <button id="vlVadSave" class="minibtn" title="把当前 VAD 引擎/参数与数字增益落盘(全局音频前端)">存</button>
-        <span class="tip">改参数为<b>临时</b>(不落盘,退出转写自动还原);「存」才写入 config。</span>
+        <button id="vlStreamSave" class="minibtn" title="把流式模型 + 端点静音 + 增益落盘(存参)">存</button>
+        <span class="tip">流式<b>自带端点(免VAD)</b>,边说边出字(带「流式」徽章)。精度通常低于离线,换响应感。改动临时,「存」落盘。</span>
       </div>
       <div id="vlAsrFeed"></div>
     </section>
