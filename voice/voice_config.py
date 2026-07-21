@@ -29,12 +29,12 @@ DEFAULT_CONFIG = {
     "vision": {"model": None},          # desired VLM model id; null = use board env as-is
     # Audio front-end (global, not part of a preset pair). vad = the switchable segmenter;
     # audio.gain_db = digital make-up gain (0 = identity, stock behaviour unchanged).
-    "vad": {"engine": "silero", "threshold": 0.5,
-            "min_speech_s": 0.25, "min_silence_s": 0.55, "pre_roll_s": 0.45},
+    "vad": {"engine": "fsmn", "threshold": 0.5,
+            "min_speech_s": 0.1, "min_silence_s": 0.5, "pre_roll_s": 0.9},
     "audio": {"gain_db": 0},
     # DEBUG-only streaming recognition mode (免VAD, 对比验证). enabled 时调试转写台走
     # 流式 OnlineRecognizer 连续解码+端点检测,不影响对话链路(对话恒走 VAD+离线)。
-    "stream": {"enabled": False, "model": "zh-2025", "endpoint_silence_s": 1.2},
+    "stream": {"enabled": False, "model": "x-asr-zh-en", "endpoint_silence_s": 1.2},
     "presets": {
         "deepseek": {
             "api": "https://api.deepseek.com",
@@ -53,13 +53,16 @@ DEFAULT_CONFIG = {
 # Axis enumerations surfaced by GET /config so the GUI dropdowns need no hardcoding.
 # The bare id lists stay the membership source of truth (switch executors check
 # `x in ASR_ENGINES`); enums() decorates them with label/size metadata.
-# qwen3 listed first (best noise robustness, the headline engine); whisper + qwen3 are
-# heavy — run them with the vision service stopped. Order here = GUI dropdown order.
-ASR_ENGINES = ["qwen3", "sensevoice", "paraformer", "whisper"]
+# funasr listed first (field-tested best: GPU ~0.65s/seg, punctuation, LLM decoder);
+# funasr/whisper/qwen3 are heavy — run them with the vision service stopped.
+# Order here = GUI dropdown order.
+ASR_ENGINES = ["funasr", "qwen3", "sensevoice", "paraformer", "whisper"]
 TTS_ENGINES = ["edge", "melo"]
-VAD_ENGINES = ["silero", "ten", "webrtc", "energy"]
-# Streaming models (二级下拉 when 一级=流式). zh-2025 default (cleanest Chinese).
-STREAM_MODELS = ["zh-2025", "zh-xlarge", "multi-zh", "zh-en"]
+# fsmn first/default (field-tested best: built-in endpointing, ~150ms lead-in)
+VAD_ENGINES = ["fsmn", "silero", "ten", "webrtc", "energy"]
+# Streaming models (二级下拉 when 一级=流式). x-asr first/default: field-tested slightly
+# ahead of zh-xlarge (2026-07-21), bilingual, and 2x faster (RTF 0.25 vs 0.56).
+STREAM_MODELS = ["x-asr-zh-en", "zh-xlarge", "para-zh-en", "zh-2025", "multi-zh", "zh-en"]
 
 # vad axis range guards + digital gain guard.
 VAD_THRESHOLD_RANGE = (-90.0, 3.0)                 # energy uses dBFS (negative), silero 0..1
@@ -81,6 +84,8 @@ ASR_META = {
                 "params_b": 0.809, "disk_mb": 989},
     "qwen3": {"id": "qwen3", "label": "Qwen3-ASR-0.6B (LLM抗噪)",
               "params_b": 0.6, "disk_mb": 954},
+    "funasr": {"id": "funasr", "label": "Fun-ASR-Nano 0.8B (GPU,带标点)",
+               "params_b": 0.8, "disk_mb": 932},
 }
 TTS_META = {
     "edge": {"id": "edge", "label": "edge-tts 在线",
@@ -95,6 +100,9 @@ TTS_META = {
 VAD_META = {
     "silero": {"id": "silero", "label": "Silero VAD", "disk_mb": 2,
                "default_threshold": 0.5},
+    # FSMN 自带内部状态机:threshold/min_silence 不外调,min_speech/pre_roll 有效
+    "fsmn": {"id": "fsmn", "label": "FSMN-VAD (FunASR,自带端点)", "disk_mb": 2,
+             "default_threshold": 0.5},
     "ten": {"id": "ten", "label": "TEN VAD", "disk_mb": 1,
             "default_threshold": 0.5},
     "webrtc": {"id": "webrtc", "label": "WebRTC VAD", "disk_mb": 0,
@@ -109,6 +117,10 @@ STREAM_META = {
     "zh-xlarge": {"id": "zh-xlarge", "label": "zipformer zh xlarge 700M", "disk_mb": 737},
     "multi-zh": {"id": "multi-zh", "label": "multi-zh-hans 14k小时", "disk_mb": 250},
     "zh-en": {"id": "zh-en", "label": "双语 zh-en (弱/基线)", "disk_mb": 190},
+    "x-asr-zh-en": {"id": "x-asr-zh-en", "label": "X-ASR 中英混 1M小时",
+                    "disk_mb": 584},
+    "para-zh-en": {"id": "para-zh-en", "label": "Paraformer-large 中英",
+                   "disk_mb": 226},
 }
 
 # A small curated edge-tts zh voice table (the full table is fetched at P3).

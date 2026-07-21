@@ -12,6 +12,11 @@ from __future__ import annotations
 import time
 from collections import deque
 
+# Daemon state names — shared vocabulary between the daemon core and the HTTP
+# layer (voice_http), defined here so neither imports the other's module.
+IDLE, LISTENING, THINKING, SPEAKING = "idle", "listening", "thinking", "speaking"
+SWITCHING, DEBUG = "switching", "debug"
+
 
 # --------------------------------------------------------------------------- #
 # MCP01 off-hook HID report (pure byte builder — device I/O lives in the daemon)

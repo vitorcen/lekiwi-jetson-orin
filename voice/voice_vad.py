@@ -30,8 +30,13 @@ FRAME_MS = 20
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000          # 320
 
-VAD_ENGINES = ["silero", "ten", "webrtc", "energy"]
+VAD_ENGINES = ["silero", "fsmn", "ten", "webrtc", "energy"]
 TEN_MODEL = "ten-vad.onnx"                              # under voice/models/
+# FSMN-VAD (FunASR) runs via the patched llama-funasr-vad serve binary — built from the
+# Fun-ASR fork outside the repo tree (see voice/patches/ + .memory/voice-asr-engines).
+FSMN_BIN = os.path.expanduser(
+    "~/work/Fun-ASR/runtime/llama.cpp/build/bin/llama-funasr-vad")
+FSMN_MODEL = os.path.expanduser("~/work/funasr-gguf/fsmn-vad.gguf")
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +342,167 @@ class EnergyVad(_FramedVad):
         return dbfs >= self._thr
 
 
+class FsmnVad(VadEngine):
+    """FSMN-VAD (FunASR, Alibaba production VAD) via the patched llama-funasr-vad serve
+    binary: a resident subprocess, one wav path line in -> 'beg end' ms lines + '.' out.
+
+    The C++ side is batch (whole clip -> closed segments), so this engine keeps a rolling
+    buffer and re-runs detection every DETECT_EVERY_S of new audio (~40-90ms per pass,
+    model is 1.7MB). A reported segment is emitted only once its end sits CLOSE_MARGIN_S
+    clear of the buffer tail — a segment touching the tail is still open (batch VAD ends
+    it at clip end, not at true speech end). Emitted audio is trimmed off the buffer.
+    threshold is ignored (FSMN has its own internal state machine); min_speech_s filters
+    short segments; pre_roll_s extends the cut left (FSMN already leads ~150ms)."""
+
+    name = "fsmn"
+    DETECT_EVERY_S = 0.64            # re-run batch detection per this much new audio
+    CLOSE_MARGIN_S = 0.24            # tail clearance before a segment counts as closed
+    MAX_BUFFER_S = 60.0              # runaway guard: force-trim (open seg force-closed)
+
+    def __init__(self, min_speech_s, pre_roll_s=0.0):
+        import subprocess
+        import numpy as np
+        if not (os.path.exists(FSMN_BIN) and os.path.exists(FSMN_MODEL)):
+            raise ValueError("fsmn vad binary/model missing on this board")
+        self._min_speech = float(min_speech_s)
+        self._pre = max(0, int(round(float(pre_roll_s) * SAMPLE_RATE)))
+        self._np = np
+        # Binary pipes + own line buffer: the response is MULTI-line ('beg end'* + '.'),
+        # and select() on a TextIOWrapper is a trap — readline() slurps the whole
+        # response into Python's buffer, after which select() on the fd never fires
+        # again and every later line 'times out'. Byte-level reads keep select honest.
+        self._proc = subprocess.Popen(
+            [FSMN_BIN, "-m", FSMN_MODEL, "-a", "-"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL)
+        self._rdbuf = b""
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._base = 0                # absolute sample index of _buf[0]
+        self._since = 0               # samples fed since last detection
+        self._open = False            # an in-progress segment touched the tail last run
+
+    def _detect(self):
+        """Run batch detection over the current buffer via the serve process.
+        Returns [(beg_samp, end_samp)] relative to _buf. Dead child -> ValueError
+        (the daemon's vad-error path surfaces it; never silently no-speech)."""
+        import select
+        import tempfile
+        import wave
+        if self._proc.poll() is not None:
+            raise ValueError("fsmn vad serve process died")
+        pcm = (self._buf * 32767.0).clip(-32768, 32767).astype("int16")
+        fd, path = tempfile.mkstemp(suffix=".wav", prefix="fsmnvad-")
+        try:
+            with os.fdopen(fd, "wb") as fh, wave.open(fh, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes(pcm.tobytes())
+            self._proc.stdin.write((path + "\n").encode())
+            self._proc.stdin.flush()
+            segs = []
+            deadline = 10.0
+            fd = self._proc.stdout.fileno()
+            import time as _time
+            t_end = _time.monotonic() + deadline
+            while True:
+                nl = self._rdbuf.find(b"\n")
+                if nl >= 0:
+                    line = self._rdbuf[:nl].strip()
+                    self._rdbuf = self._rdbuf[nl + 1:]
+                    if line == b".":
+                        return segs
+                    if line:
+                        b_ms, e_ms = line.split()
+                        segs.append((int(b_ms) * SAMPLE_RATE // 1000,
+                                     int(e_ms) * SAMPLE_RATE // 1000))
+                    continue
+                remain = t_end - _time.monotonic()
+                if remain <= 0:
+                    self._proc.kill()
+                    raise ValueError("fsmn vad timed out")
+                r, _, _ = select.select([fd], [], [], remain)
+                if not r:
+                    self._proc.kill()
+                    raise ValueError("fsmn vad timed out")
+                data = os.read(fd, 65536)
+                if not data:
+                    raise ValueError("fsmn vad closed pipe")
+                self._rdbuf += data
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def feed(self, chunk):
+        np = self._np
+        chunk = np.asarray(chunk, dtype=np.float32)
+        self._buf = np.concatenate([self._buf, chunk]) if self._buf.size else chunk
+        self._since += len(chunk)
+        if self._since < int(self.DETECT_EVERY_S * SAMPLE_RATE):
+            return []
+        self._since = 0
+        return self._harvest(force=len(self._buf) > int(self.MAX_BUFFER_S * SAMPLE_RATE))
+
+    def _harvest(self, force=False):
+        np = self._np
+        segs = self._detect()                             # chronological [(beg,end)]
+        limit = len(self._buf) - int(self.CLOSE_MARGIN_S * SAMPLE_RATE)
+        out = []
+        trim_to = 0
+        self._open = False
+        for beg, end in segs:
+            if end >= limit and not force:
+                # Segment touches the buffer tail: still growing. Everything before it
+                # is emitted or inter-segment silence — keep only the open segment plus
+                # its pre-roll context.
+                self._open = True
+                trim_to = max(0, beg - self._pre)
+                break
+            if end - beg >= int(self._min_speech * SAMPLE_RATE):
+                lo = max(0, beg - self._pre)
+                out.append(np.array(self._buf[lo:end], dtype=np.float32))
+            trim_to = end
+        if not self._open and not segs:
+            # pure silence: keep only a short tail so the buffer can't creep up
+            trim_to = max(0, limit - self._pre)
+        if trim_to > 0:
+            self._buf = self._buf[trim_to:]
+            self._base += trim_to
+        return out
+
+    def reset(self):
+        self._buf = self._np.zeros(0, dtype=self._np.float32)
+        self._base = 0
+        self._since = 0
+        self._open = False
+
+    def flush(self):
+        """End of capture: everything still buffered is final — emit open segments too."""
+        if not self._buf.size:
+            return []
+        try:
+            out = self._harvest(force=True)
+        except ValueError:
+            out = []
+        self.reset()
+        return out
+
+    @property
+    def active(self):
+        return self._open
+
+    def close(self):
+        p, self._proc = self._proc, None
+        if p is not None:
+            try:
+                p.stdin.close()
+                p.wait(timeout=3.0)
+            except Exception:                            # noqa: BLE001
+                p.kill()
+
+
 # --------------------------------------------------------------------------- #
 # Availability + factory
 # --------------------------------------------------------------------------- #
@@ -360,6 +526,7 @@ def availability(models_dir):
     """Which engines can actually be built on THIS board. energy is always true."""
     return {
         "silero": os.path.exists(os.path.join(models_dir, "silero_vad.onnx")),
+        "fsmn": os.path.exists(FSMN_BIN) and os.path.exists(FSMN_MODEL),
         "ten": _sherpa_has_ten() and os.path.exists(os.path.join(models_dir, TEN_MODEL)),
         "webrtc": _webrtc_ok(),
         "energy": True,
@@ -380,6 +547,8 @@ def make_vad(engine, params, models_dir):
     pr = params.get("pre_roll_s", 0.0)
     if engine == "silero":
         return SileroVad(os.path.join(models_dir, "silero_vad.onnx"), thr, msp, msl, pr)
+    if engine == "fsmn":
+        return FsmnVad(msp, pr)      # threshold/min_silence: FSMN 自带内部状态机,不外调
     if engine == "ten":
         return TenVad(os.path.join(models_dir, TEN_MODEL), thr, msp, msl, pr)
     if engine == "webrtc":

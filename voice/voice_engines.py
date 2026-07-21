@@ -184,6 +184,86 @@ class OfflineQwen3Asr:
         return _TAG_RE.sub("", text).strip()
 
 
+class OfflineFunAsr:
+    """Fun-ASR-Nano 0.8B (LLM-ASR: SAN-M encoder + Qwen3-0.6B decoder) via the patched
+    llama-funasr-cli serve mode (-a -): a resident subprocess, one wav path line in ->
+    one transcription line out. GPU decode (~0.4-0.7s/segment on Orin vs qwen3 CPU
+    ~1.5s), emits punctuation. No --vad passed: the daemon's VAD already segmented, so
+    the whole handed-over file is one window. Binary + GGUFs live outside the repo tree
+    (built from the Fun-ASR fork, see .memory/voice-asr-engines)."""
+
+    name = "funasr"
+    unload_first = True    # ~1.6GB peak: can't coexist with the old engine on 8GB
+    BIN = os.path.expanduser("~/work/Fun-ASR/runtime/llama.cpp/build/bin/llama-funasr-cli")
+    GGUF = os.path.expanduser("~/work/funasr-gguf")
+    SELFTEST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selftest.wav")
+
+    def __init__(self):
+        self.proc = None
+
+    @property
+    def loaded(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def load(self):
+        import subprocess
+        if not os.path.exists(self.BIN):
+            raise RuntimeError(f"llama-funasr-cli missing: {self.BIN}")
+        self.proc = subprocess.Popen(
+            [self.BIN, "--enc", os.path.join(self.GGUF, "funasr-encoder-f16.gguf"),
+             "-m", os.path.join(self.GGUF, "qwen3-0.6b-q4km.gguf"), "-a", "-"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        # Readiness barrier + honest load probe: the first request only answers once
+        # the models are resident; a broken binary/GGUF fails HERE, not mid-conversation.
+        if os.path.exists(self.SELFTEST) and not self._ask(self.SELFTEST, timeout=60.0):
+            self.unload()
+            raise RuntimeError("funasr serve probe returned empty")
+
+    def unload(self):
+        p, self.proc = self.proc, None
+        if p is not None:
+            try:
+                p.stdin.close()                       # EOF -> serve loop exits
+                p.wait(timeout=5.0)
+            except Exception:                         # noqa: BLE001
+                p.kill()
+        gc.collect()
+        malloc_trim()
+
+    def _ask(self, wav_path, timeout=60.0):
+        """One request/response on the resident process. Timeout or death -> kill +
+        raise (the daemon's ASR pool must never hang on a wedged child)."""
+        import select
+        if not self.loaded:
+            raise RuntimeError("funasr serve process not running")
+        self.proc.stdin.write(wav_path + "\n")
+        self.proc.stdin.flush()
+        r, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if not r:
+            self.proc.kill()
+            raise RuntimeError(f"funasr timed out after {timeout}s")
+        return self.proc.stdout.readline().strip()
+
+    def transcribe(self, samples):
+        import tempfile
+        import wave as _wave
+        pcm = (samples * 32767.0).clip(-32768, 32767).astype("int16")
+        fd, path = tempfile.mkstemp(suffix=".wav", prefix="funasr-")
+        try:
+            with os.fdopen(fd, "wb") as fh, _wave.open(fh, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(pcm.tobytes())
+            return self._ask(path)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 # Selectable streaming models (all zipformer transducers → same from_transducer path,
 # only the model dir + filenames differ). Chinese-trained ones are much cleaner than the
 # old bilingual (which repeats tokens). disk_mb measured on the board.
@@ -203,8 +283,17 @@ STREAM_SPECS = {
               "encoder": "encoder-epoch-99-avg-1.int8.onnx",
               "decoder": "decoder-epoch-99-avg-1.int8.onnx",
               "joiner": "joiner-epoch-99-avg-1.int8.onnx", "disk_mb": 190},
+    "x-asr-zh-en": {"label": "流式 X-ASR 中英混 (1M小时,fp32)",
+                    "dir": "streaming-x-asr-zh-en", "encoder": "encoder-480ms.onnx",
+                    "decoder": "decoder-480ms.onnx", "joiner": "joiner-480ms.onnx",
+                    "disk_mb": 584},
+    # api=paraformer: OnlineRecognizer.from_paraformer (no joiner file). Same feed()/
+    # endpoint surface as the transducers — only the constructor differs.
+    "para-zh-en": {"label": "流式 Paraformer-large 中英 (int8)", "api": "paraformer",
+                   "dir": "streaming-paraformer-zh-en", "encoder": "encoder.int8.onnx",
+                   "decoder": "decoder.int8.onnx", "disk_mb": 226},
 }
-STREAM_DEFAULT = "zh-2025"
+STREAM_DEFAULT = "x-asr-zh-en"
 
 
 class StreamingAsr:
@@ -229,15 +318,22 @@ class StreamingAsr:
         import sherpa_onnx as so
         spec = STREAM_SPECS.get(model_id) or STREAM_SPECS[STREAM_DEFAULT]
         base = os.path.join(MODELS, spec["dir"])
-        self.rec = so.OnlineRecognizer.from_transducer(
+        # Measured on Orin (xlarge, 16s audio): RTF 1t=0.62, 2t=0.56, 3t=0.80,
+        # 4t=0.72, 6t=1.15 — streaming chunks are too small for wide parallelism,
+        # more threads only add sync overhead. 2 is the sweet spot.
+        common = dict(
             tokens=os.path.join(base, "tokens.txt"),
             encoder=os.path.join(base, spec["encoder"]),
             decoder=os.path.join(base, spec["decoder"]),
-            joiner=os.path.join(base, spec["joiner"]),
-            num_threads=4, decoding_method="greedy_search",
+            num_threads=2, decoding_method="greedy_search",
             enable_endpoint_detection=True,
             rule2_min_trailing_silence=float(endpoint_silence_s),
         )
+        if spec.get("api") == "paraformer":
+            self.rec = so.OnlineRecognizer.from_paraformer(**common)
+        else:
+            self.rec = so.OnlineRecognizer.from_transducer(
+                joiner=os.path.join(base, spec["joiner"]), **common)
         self.stream = self.rec.create_stream()
         self.model = model_id if model_id in STREAM_SPECS else STREAM_DEFAULT
 
@@ -254,18 +350,23 @@ class StreamingAsr:
             self.stream = self.rec.create_stream()
 
     def feed(self, samples):
-        """Feed a float32 16k chunk. Returns (partial, final|None): partial is the current
-        growing hypothesis; final is set exactly on the chunk an endpoint fires, after
-        which the stream is reset so the next utterance starts clean."""
+        """Feed a float32 16k chunk (any size — the daemon's decode worker merges backlog
+        into big batches to catch up). Returns (partial, finals): finals is a list because
+        a merged batch can span several utterances. The endpoint check MUST be inside the
+        decode loop: checking once per feed() call loses everything decoded after a
+        mid-batch endpoint (reset wipes it) and misses endpoints entirely when the batch
+        tail is speech again — that was the 'whole sentences vanish' bug."""
         self.stream.accept_waveform(16000, samples)
+        finals = []
         while self.rec.is_ready(self.stream):
             self.rec.decode_stream(self.stream)
+            if self.rec.is_endpoint(self.stream):
+                txt = _TAG_RE.sub("", self.rec.get_result(self.stream) or "").strip()
+                if txt:
+                    finals.append(txt)
+                self.rec.reset(self.stream)
         partial = _TAG_RE.sub("", self.rec.get_result(self.stream) or "").strip()
-        final = None
-        if self.rec.is_endpoint(self.stream):
-            final = partial
-            self.rec.reset(self.stream)
-        return partial, final
+        return partial, finals
 
 
 class MeloTts:
@@ -315,6 +416,7 @@ class MeloTts:
 # shared Melo model (its fallback), so only the model-owning engines appear as hosts.
 REGISTRY = {
     "asr": {"sensevoice": OfflineAsr, "paraformer": OfflineParaformer,
-            "whisper": OfflineWhisper, "qwen3": OfflineQwen3Asr},
+            "whisper": OfflineWhisper, "qwen3": OfflineQwen3Asr,
+            "funasr": OfflineFunAsr},
     "tts": {"melo": MeloTts},          # 'edge' reuses MeloTts as its breaker fallback
 }

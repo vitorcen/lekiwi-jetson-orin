@@ -5,7 +5,8 @@ import voice_config as vc
 
 
 def test_registry_asr_has_all_hosts():
-    assert set(ve.REGISTRY["asr"]) == {"sensevoice", "paraformer", "whisper", "qwen3"}
+    assert set(ve.REGISTRY["asr"]) == {"sensevoice", "paraformer", "whisper", "qwen3",
+                                       "funasr"}
 
 
 def test_host_classes_carry_matching_names():

@@ -48,7 +48,7 @@ def test_apply_axis_asr_paraformer_roundtrips():
 
 def test_default_has_stream_axis():
     cfg = vc.merge_defaults({})
-    assert cfg["stream"] == {"enabled": False, "model": "zh-2025",
+    assert cfg["stream"] == {"enabled": False, "model": "x-asr-zh-en",
                              "endpoint_silence_s": 1.2}
 
 
@@ -68,7 +68,7 @@ def test_enums_expose_stream_models():
     e = vc.enums()
     ids = [s["id"] for s in e["stream"]]
     assert ids == vc.STREAM_MODELS
-    assert e["stream"][0]["id"] == "zh-2025"      # default listed first
+    assert e["stream"][0]["id"] == "x-asr-zh-en"  # default listed first
 
 
 def test_current_stream_garbage_falls_back():
@@ -168,7 +168,7 @@ def test_enums_are_metadata_objects():
     asr = {a["id"]: a for a in e["asr"]}
     assert asr["sensevoice"]["label"] == "SenseVoice-Small"
     assert asr["sensevoice"]["params_b"] == 0.234 and asr["sensevoice"]["disk_mb"] == 229
-    assert e["asr"][0]["id"] == "qwen3"        # qwen3 listed first (headline engine)
+    assert e["asr"][0]["id"] == "funasr"       # funasr listed first (headline engine)
     tts = {t["id"]: t for t in e["tts"]}
     assert tts["edge"]["params_b"] is None and tts["edge"]["disk_mb"] is None  # online
     assert tts["melo"]["disk_mb"] == 183                                       # offline
@@ -180,9 +180,9 @@ def test_enums_are_metadata_objects():
 # ---- vad axis (switchable segmenter, global audio front-end) ---------------
 def test_default_has_vad_and_audio_axes():
     cfg = vc.merge_defaults({})
-    assert cfg["vad"] == {"engine": "silero", "threshold": 0.5,
-                          "min_speech_s": 0.25, "min_silence_s": 0.55,
-                          "pre_roll_s": 0.45}
+    assert cfg["vad"] == {"engine": "fsmn", "threshold": 0.5,
+                          "min_speech_s": 0.1, "min_silence_s": 0.5,
+                          "pre_roll_s": 0.9}
     assert cfg["audio"] == {"gain_db": 0}
 
 
@@ -210,10 +210,11 @@ def test_apply_axis_vad_normalizes_engine_and_ranges():
     assert new["vad"]["threshold"] == -45
     assert new["vad"]["min_speech_s"] == 0.3
     # unknown engine falls back to default silero (never rejects a hand-edit)
-    assert vc.apply_axis(cfg, "vad", {"engine": "bogus"})["vad"]["engine"] == "silero"
+    assert (vc.apply_axis(cfg, "vad", {"engine": "bogus"})["vad"]["engine"]
+            == vc.DEFAULT_CONFIG["vad"]["engine"])
     # out-of-range time clamped into [0.02, 30]
     assert vc.apply_axis(cfg, "vad", {"min_speech_s": 999})["vad"]["min_speech_s"] == 30.0
-    assert cfg["vad"]["engine"] == "silero"               # input immutable
+    assert cfg["vad"]["engine"] == vc.DEFAULT_CONFIG["vad"]["engine"]  # input immutable
 
 
 def test_apply_axis_audio_gain_clamped():
@@ -228,6 +229,7 @@ def test_current_vad_and_gain_accessors():
     cfg = vc.merge_defaults({"vad": {"engine": "webrtc", "threshold": 0.6},
                              "audio": {"gain_db": 18}})
     assert vc.current_vad(cfg)["engine"] == "webrtc"
-    assert vc.current_vad(cfg)["min_silence_s"] == 0.55    # default filled
+    assert (vc.current_vad(cfg)["min_silence_s"]
+            == vc.DEFAULT_CONFIG["vad"]["min_silence_s"])  # default filled
     assert vc.current_audio_gain(cfg) == 18.0
     assert vc.current_audio_gain(vc.merge_defaults({})) == 0.0

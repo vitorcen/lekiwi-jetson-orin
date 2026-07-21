@@ -160,6 +160,23 @@ for f in encoder-epoch-99-avg-1.int8.onnx decoder-epoch-99-avg-1.int8.onnx \
   fetch "$HF_STREAM/$f" "$STREAM_D/$f" "$min"
 done
 
+# X-ASR zh-en (2026, 160M params / 1M-hour data, code-switching; fp32 only ~584MB.
+# True-streaming zipformer2 transducer, 480ms chunk variant).
+HF_XASR="https://huggingface.co/GilgameshWind/X-ASR-zh-en/resolve/main/deployment/models/chunk-480ms-model"
+XASR_D="$MODELS/streaming-x-asr-zh-en"
+fetch "$HF_XASR/encoder-480ms.onnx" "$XASR_D/encoder-480ms.onnx" 500000000
+fetch "$HF_XASR/decoder-480ms.onnx" "$XASR_D/decoder-480ms.onnx" 5000000
+fetch "$HF_XASR/joiner-480ms.onnx"  "$XASR_D/joiner-480ms.onnx"  5000000
+fetch "$HF_XASR/tokens.txt"         "$XASR_D/tokens.txt"         1000
+
+# Streaming Paraformer-large bilingual zh-en (DAMO online, int8 ~226MB, RTF~0.15;
+# fp32 is the 825MB class — int8 is the same model quantized).
+HF_SPARA="https://huggingface.co/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en/resolve/main"
+SPARA_D="$MODELS/streaming-paraformer-zh-en"
+fetch "$HF_SPARA/encoder.int8.onnx" "$SPARA_D/encoder.int8.onnx" 100000000
+fetch "$HF_SPARA/decoder.int8.onnx" "$SPARA_D/decoder.int8.onnx" 50000000
+fetch "$HF_SPARA/tokens.txt"        "$SPARA_D/tokens.txt"        1000
+
 QWEN3_DIR="$MODELS/qwen3-asr"
 QWEN3_TAR="sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25.tar.bz2"
 if [[ -f "$QWEN3_DIR/encoder.int8.onnx" ]]; then
