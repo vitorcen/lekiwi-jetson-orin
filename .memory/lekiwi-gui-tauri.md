@@ -52,6 +52,12 @@ Tauri runtime 里不能连，一测就分明。
 sandbox 开关都无效）——只能让用户在自己桌面 `./run.sh` 跑。所以 GUI 的端到端验证靠
 「板子侧 `ss`/`base_host.log` 观察 + 最小 repro」间接完成，不是直接点 GUI。
 
+**血泪坑 — 改 `ui/` 前端不生效（2026-07-21）**：前端资产是 `generate_context!` **编译期
+嵌入**二进制的。`build.rs` 原来只 `rerun-if-changed=../ui`（**一个目录**）——cargo 对目录只
+看目录本身 mtime，增删文件才变，**编辑文件内容不变** → 改 JS/HTML/CSS 后 `run.sh` 跑的还是
+旧前端，改了半天没反应。**修复**：build.rs 递归 `rerun-if-changed` ui/ 下**每个文件**。以后
+改前端会自动重编。验证:`cargo check/build` exit 0。改前端看不到效果先查这个。
+
 **ZMQ 线协议**（对齐 lerobot 0.5.2 `lekiwi_host`/`lekiwi.py`，见 [[lerobot-installed-orin]]）：
 host 在 `tcp://*:5555` bind PULL socket，每条命令一段 JSON：
 `{"x.vel": <m/s>, "y.vel": <m/s>, "theta.vel": <deg/s>}`。host 过滤 `.vel` 结尾的 key

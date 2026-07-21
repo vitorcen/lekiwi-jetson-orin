@@ -910,7 +910,8 @@ async fn voice_get(ip: String, path: String) -> Result<String, String> {
 async fn voice_post(ip: String, path: String, body: String) -> Result<String, String> {
     if !matches!(path.as_str(),
         "/listen" | "/stop" | "/interrupt" | "/say" | "/simulate"
-        | "/config" | "/brain" | "/asr_debug" | "/asr_debug/seg_play" | "/selftest")
+        | "/config" | "/brain" | "/asr_debug" | "/asr_debug/seg_play"
+        | "/asr_debug/seg_asr" | "/selftest")
     {
         return Err(format!("bad path: {path}"));
     }
