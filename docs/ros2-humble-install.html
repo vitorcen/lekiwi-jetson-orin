@@ -70,7 +70,7 @@
   <h1>ROS 2 Humble 安装记录
     <span class="en">Installing ROS 2 Humble Desktop on Jetson Orin Nano Super (JetPack 6.2.2)</span>
   </h1>
-  <p class="sub">目标：Orin Nano 8GB @ 192.168.3.189 ｜ Ubuntu 22.04 / L4T 36.5 ｜ ROS 2 <span class="pill">humble 0.10.0</span> ｜ 日期：2026-07-16</p>
+  <p class="sub">目标：Orin Nano 8GB @ 192.168.13.189 ｜ Ubuntu 22.04 / L4T 36.5 ｜ ROS 2 <span class="pill">humble 0.10.0</span> ｜ 日期：2026-07-16</p>
 </header>
 
 <div class="tldr">
@@ -91,7 +91,7 @@
   <tr><td>系统</td><td>Ubuntu 22.04.5 / L4T 36.5（JetPack 6.2.2）/ 内核 5.15.185-tegra</td></tr>
   <tr><td>ROS 2</td><td>Humble Hawksbill，<code>ros-humble-desktop</code> 0.10.0</td></tr>
   <tr><td>DDS（RMW）</td><td><code>rmw_fastrtps_cpp</code>（默认，eProsima Fast DDS）</td></tr>
-  <tr><td>访问方式</td><td>SSH 免密（本机公钥已注入）<code>ssh jetson@192.168.3.189</code></td></tr>
+  <tr><td>访问方式</td><td>SSH 免密（本机公钥已注入）<code>ssh jetson@192.168.13.189</code></td></tr>
 </table>
 
 <h2>2. 安装流程<span class="en">The pipeline</span></h2>
@@ -255,7 +255,7 @@ ros2 topic hz /chatter</code></pre>
 </ul>
 
 <footer>
-  ROS 2 Humble 安装记录 · 2026-07-16 · Orin Nano Super @ 192.168.3.189<br>
+  ROS 2 Humble 安装记录 · 2026-07-16 · Orin Nano Super @ 192.168.13.189<br>
   <span style="opacity:.8">前置：见刷机文档 <code>docs/orin-nano-super-install.html</code>。SSH 免密已配置（本机公钥注入板子 <code>~/.ssh/authorized_keys</code>）。</span>
 </footer>
 

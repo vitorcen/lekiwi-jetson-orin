@@ -24,7 +24,7 @@ P0-P7 阶段验收门、砍掉/推迟清单、codex 评审摘要）。背景：U
 - 仓库布局：`ros2/` 五包（base_bridge/description/safety/recorder/bringup），
   nav2 参数 yaml 必须进 repo（yahboom 的教训：参数只在板上没入仓）。
 
-**进展 2026-07-20(P0 部分 + 深度预览抢跑)**:板子 DHCP 换 IP → **192.168.3.189**
+**进展 2026-07-20(P0 部分 + 深度预览抢跑)**:板子 DHCP 换 IP → **192.168.13.189**
 (全仓引用已更新;免密公钥重注入)。深度相机认定 = **Orbbec Astra Pro**(2bc5:0403 深度
 OpenNI 私有协议 + 0501 UVC 彩色)——与 yahboom 同款,其教训直接继承:厂商 astra_camera
 ROS 驱动激光/LDP 坏(深度恒 0)→ **OpenNI2 直读**(redist 取自 orbbec/ros2_astra_camera

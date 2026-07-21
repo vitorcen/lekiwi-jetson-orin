@@ -9,9 +9,9 @@ metadata:
 不在任何文件:
 
 ```
-service: lekiwi-board-192.168.3.189
+service: lekiwi-board-192.168.13.189
 account: jetson
-读取:    security find-generic-password -a jetson -s lekiwi-board-192.168.3.189 -w
+读取:    security find-generic-password -a jetson -s lekiwi-board-192.168.13.189 -w
 ```
 
 **Why**:`.memory/` 随仓库提交,git 历史不可逆,密码一旦写进去就等于公开。钥匙串是本机的、
@@ -21,8 +21,8 @@ account: jetson
 (命令行会进 shell history 和 `ps`):
 
 ```bash
-security find-generic-password -a jetson -s lekiwi-board-192.168.3.189 -w \
-  | ssh jetson@192.168.3.189 'sudo -S -p "" bash /tmp/somescript.sh'
+security find-generic-password -a jetson -s lekiwi-board-192.168.13.189 -w \
+  | ssh jetson@192.168.13.189 'sudo -S -p "" bash /tmp/somescript.sh'
 ```
 
 注意 `sudo -S` 只吃掉 stdin 第一行,所以脚本要用**文件**传(`bash /tmp/x.sh`),

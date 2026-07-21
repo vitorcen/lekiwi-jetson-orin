@@ -201,14 +201,14 @@
 
 <h2>部署 <span class="en-h">Deploy</span></h2>
 <pre><code># 首次一次性：ssh 免密 + 装单元 + NOPASSWD 规则（唯一要 sudo 的一次）
-ssh-copy-id jetson@192.168.3.189        # ssh/scp/rsync 从此免密，密码不入库
-scripts/setup_board.sh 192.168.3.189    # 只跑一次
+ssh-copy-id jetson@192.168.13.189        # ssh/scp/rsync 从此免密，密码不入库
+scripts/setup_board.sh 192.168.13.189    # 只跑一次
 
 # 之后改完 board/ 里的程序，一条命令 rsync + 重启，全程免密
-scripts/deploy_board.sh 192.168.3.189
+scripts/deploy_board.sh 192.168.13.189
 
 # 看日志
-ssh jetson@192.168.3.189 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'</code></pre>
+ssh jetson@192.168.13.189 'journalctl -u pad_teleop -u base_host -n 30 --no-pager'</code></pre>
 <p class="sub">板端源码在项目 <code>board/</code>(1:1 镜像板子文件系统)：<code>board/home/jetson/pad_teleop.py</code> · <code>base_host.py</code> · <code>probe_bus.py</code>(总线诊断) · <code>board/etc/systemd/system/*.service</code>。</p>
 
 </div>

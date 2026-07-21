@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Orin 板子（192.168.3.189）**已装好 lerobot**（2026-07-16）：
+Orin 板子（192.168.13.189）**已装好 lerobot**（2026-07-16）：
 
 - conda env **`lerobot`**（python 3.12），miniconda 在 `~/miniconda3`（`auto_activate_base false`）。
   用前 `source ~/miniconda3/etc/profile.d/conda.sh && conda activate lerobot`。
