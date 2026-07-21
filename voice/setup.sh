@@ -8,6 +8,17 @@
 #   GitHub-> ghfast.top prefix
 # Board RAM is tight (llama-server resident) — this script never compiles from
 # source: sherpa-onnx is pinned to a version with a prebuilt cp310 aarch64 wheel.
+#
+# Dual-venv layout (rollback safety, 2026-07-21): on the board .venv is a SYMLINK,
+# not a directory. Two real venvs sit beside it:
+#   .venv-stable  — the sherpa-onnx 1.10.46 baseline (no TEN VAD), kept as a
+#                   seconds-level rollback cushion.
+#   .venv-exp     — the current sherpa-onnx 1.13.4 venv (adds TEN VAD support).
+#   .venv         — symlink -> .venv-exp (the live one the systemd unit runs).
+# Roll back with:  ln -sfn .venv-stable .venv && systemctl --user restart voice-daemon
+# Roll forward:    ln -sfn .venv-exp .venv && systemctl --user restart voice-daemon
+# A fresh install below creates a single real .venv (1.13.4); the dual layout is
+# only materialised on demand when upgrading an already-deployed board.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,11 +49,14 @@ msg "pip ready: $("$VENV/bin/pip" --version)"
 "$VENV/bin/pip" install --quiet --upgrade pip -i "$PIP_INDEX"
 
 # ---------------------------------------------------------------- python deps
-# sherpa-onnx 1.10.46 ships a cp310 manylinux2014_aarch64 wheel on TUNA.
-# --only-binary guarantees we never fall back to a source build.
+# sherpa-onnx 1.13.4 ships a cp310 manylinux2014_aarch64 wheel on TUNA (splits into
+# sherpa-onnx + sherpa-onnx-core, both wheels — pip pulls the core dep automatically).
+# 1.13.x is the first line whose VadModelConfig carries the ten_vad field, so TEN VAD
+# (voice_vad.py) lights up here; 1.10.46 (the .venv-stable baseline) has no ten_vad.
+# --only-binary guarantees we never fall back to a source build (board RAM is tight).
 if ! "$VENV/bin/python" -c "import sherpa_onnx" &>/dev/null; then
   msg "pip install sherpa-onnx (wheel only)"
-  "$VENV/bin/pip" install --only-binary=:all: "sherpa-onnx==1.10.46" -i "$PIP_INDEX"
+  "$VENV/bin/pip" install --only-binary=:all: "sherpa-onnx==1.13.4" -i "$PIP_INDEX"
 else
   msg "sherpa-onnx already installed"
 fi
@@ -52,6 +66,25 @@ for mod in edge_tts aiohttp numpy; do
   msg "pip install $pkg"
   "$VENV/bin/pip" install "$pkg" -i "$PIP_INDEX"
 done
+# webrtcvad: optional VAD engine (P2.7). Builds a cp310 aarch64 wheel from source.
+# Its module does `import pkg_resources`, which setuptools>=81 removed — pin
+# setuptools<81 so the import works. Best-effort: the 'energy' engine is the
+# zero-dependency baseline, so a failed webrtcvad build must NOT abort setup
+# (voice_vad just reports webrtc unavailable and the GUI greys it out).
+if ! "$VENV/bin/python" -c "import webrtcvad" &>/dev/null; then
+  msg "pip install webrtcvad (+ setuptools<81 for pkg_resources)"
+  "$VENV/bin/pip" install "setuptools<81" webrtcvad -i "$PIP_INDEX" \
+    || warn "webrtcvad unavailable (energy VAD still works); skipping"
+fi
+# ruamel.yaml: round-trip yaml patch for the Hermes brain switch (§5.5) — keeps
+# the profile config.yaml's comments/other bytes intact while touching only
+# model.*/providers.<name>.
+if ! "$VENV/bin/python" -c "import ruamel.yaml" &>/dev/null; then
+  msg "pip install ruamel.yaml"
+  "$VENV/bin/pip" install "ruamel.yaml" -i "$PIP_INDEX"
+else
+  msg "ruamel.yaml already installed"
+fi
 
 # ---------------------------------------------------------------- models
 # fetch <url> <dest> <min_bytes> — skip if a plausibly-complete file exists.
@@ -74,6 +107,11 @@ HF_MELO="https://huggingface.co/csukuangfj/vits-melo-tts-zh_en/resolve/main"
 # Silero VAD (~2MB)
 fetch "$GHFAST/https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx" \
       "$MODELS/silero_vad.onnx" 2000000
+
+# TEN VAD (~324KB) — needs sherpa-onnx >=1.13 (ten_vad field). Filename must be
+# ten-vad.onnx to match voice_vad.TEN_MODEL. Unavailable on the 1.10.46 baseline.
+fetch "$GHFAST/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx" \
+      "$MODELS/ten-vad.onnx" 100000
 
 # SenseVoice ASR (~228MB int8 + tokens)
 fetch "$HF_SV/model.int8.onnx" "$MODELS/sense-voice/model.int8.onnx" 200000000
@@ -104,6 +142,22 @@ if [[ ! -s "$HERE/token" ]]; then
   chmod 600 "$HERE/token"
 else
   msg "control token present"
+fi
+
+# ---------------------------------------------------------------- unified config
+# 板端统一 config(desired state)。首次装机缺失才拷贝 example → ~/.config/lekiwi/,
+# 已存在则不动(部署 rsync 覆盖 board/ 时不会踩掉用户存的 preset/搭配)。
+CFG_DIR="$HOME/.config/lekiwi"
+CFG_DST="$CFG_DIR/config.json"
+CFG_SRC="$HERE/../board/config.example.json"
+if [[ ! -f "$CFG_DST" && -f "$CFG_SRC" ]]; then
+  msg "installing unified config -> $CFG_DST (from example)"
+  mkdir -p "$CFG_DIR"
+  cp "$CFG_SRC" "$CFG_DST"
+elif [[ -f "$CFG_DST" ]]; then
+  msg "unified config present: $CFG_DST (left untouched)"
+else
+  warn "config example missing ($CFG_SRC) — daemon will use built-in defaults"
 fi
 
 # ---------------------------------------------------------------- systemd (user)

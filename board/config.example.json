@@ -1,0 +1,53 @@
+{
+  "_comment": "板端统一 config 样例(desired state)。安装到 ~/.config/lekiwi/config.json —— 不入 git、可 grep 可手改。voice-daemon 是唯一写入口(原子 write-then-rename);其它板端服务只读或由 daemon 下发。JSON 无注释,用 _comment* 键充当 schema 文档,读时忽略。首次装机由 voice/setup.sh 缺失才拷贝,已存在则不动(部署 rsync 不会踩掉用户存的搭配)。",
+  "_comment_brain": "当前选哪个大脑。kind: hermes(现役)| omni(P4)。preset: 指向 presets 里的键。",
+  "brain": {
+    "kind": "hermes",
+    "preset": "deepseek"
+  },
+  "_comment_omni": "离线 Omni 大脑地址(P4,Mac 上),P0b-P2 不用。",
+  "omni": {
+    "url": "http://192.168.13.2:8093"
+  },
+  "_comment_vision_speak": "板端 Vision 播报桥开关。true 时 daemon 后台轮询 vlm-daemon caption 并朗读(不依赖 GUI 可见)。",
+  "vision_speak": false,
+  "_comment_vision_speak_limit": "Vision 播报朗读字数上限(Python len 字符数,超出截断加省略号)。默认 300。",
+  "vision_speak_limit": 300,
+  "_comment_vision": "期望的 VLM 模型 id(~/models/vlm 下的 gguf 文件名去 .gguf)。null=用板上 llama-model.env 现状。GUI 切换经 voice-daemon 代理 vlm-daemon POST /model,成功才落盘。",
+  "vision": {
+    "model": null
+  },
+  "_comment_presets": "每个大脑 preset:OpenAI 兼容端点 + 模型 + 传输 + key 环境变量名(key 值绝不入 config,人工写进 ~/.hermes/profiles/robot/.env)+ 该 preset 的 ASR/TTS 搭配 pair。pair 是引擎选择的唯一持久状态:运行引擎永远=当前 preset pair 的投影,调试改动是不落盘的 ephemeral 覆盖。",
+  "presets": {
+    "deepseek": {
+      "api": "https://api.deepseek.com",
+      "model": "deepseek-v4-flash",
+      "transport": "openai_chat",
+      "key_env": "DEEPSEEK_API_KEY",
+      "pair": {
+        "_comment_asr": "asr 引擎:sensevoice(一期唯一);P3 加 zipformer 流式。",
+        "asr": "sensevoice",
+        "_comment_tts": "tts 引擎:edge(含 melo 兜底+熔断,voice=edge 音色)| melo(本地单独,忽略 voice)。",
+        "tts": {
+          "engine": "edge",
+          "voice": "zh-CN-XiaoxiaoNeural",
+          "fallback": "melo"
+        }
+      }
+    },
+    "mimo": {
+      "api": "https://api.xiaomimimo.com/v1",
+      "model": "mimo-v2.5",
+      "transport": "openai_chat",
+      "key_env": "XIAOMI_API_KEY",
+      "pair": {
+        "asr": "sensevoice",
+        "tts": {
+          "engine": "edge",
+          "voice": "zh-CN-XiaoxiaoNeural",
+          "fallback": "melo"
+        }
+      }
+    }
+  }
+}

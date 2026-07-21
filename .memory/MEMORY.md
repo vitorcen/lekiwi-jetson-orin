@@ -6,7 +6,7 @@
 - [JetPack 版本选择](jetpack-version-choice.md) — 为何用 6.2.2 而非最新 7.2：生态成熟优先于版本新
 - [板子 apt 国内网络](jetson-apt-network-cn.md) — 装任何 apt 包前：换 TUNA 镜像 + 强制 IPv4 + hold nvidia 包
 - [板子 WiFi 6E AX210](jetson-wifi-ax210.md) — L4T 没编 iwlwifi，装 backport-iwlwifi DKMS；坑在 cfg80211 符号冲突，卸掉重载
-- [ROS 2 Humble 已装](ros2-humble-installed.md) — 板子已装 humble desktop，SSH 免密已配，直接 ssh jetson@192.168.3.189
+- [ROS 2 Humble 已装](ros2-humble-installed.md) — 板子已装 humble desktop，SSH 免密已配，直接 ssh jetson@192.168.13.189
 - [舵机总线 bring-up](servo-bus-ch341-bringup.md) — CH340 需自编 ch341.ko + 卸 brltty；舵机 Feetech STS3215 ID1@1Mbps，控制脚本在板子上
 - [目标机器人 LeKiwi](lekiwi-robot-target.md) — 3轮底盘+SO-101 从臂 9电机单总线；lerobot 锚定 26ff40d；语雀资料可走 API 匿名读
 - [板子已装 lerobot](lerobot-installed-orin.md) — conda env lerobot/py3.12；GitHub 必须走 ghfast.top 镜像；PyPI torch 是 cu130 用不了 GPU
@@ -24,3 +24,6 @@
 - [板子账号已改名 jetson](board-account-jetson.md) — 2026-07-20 usermod -l 就地改名;改路径时 grep 扫不到符号链接和 ELF RUNPATH,搬家前必读
 - [板子 sudo 密码在钥匙串](board-sudo-keychain.md) — 密码不入仓库;security find-generic-password 取,只经 stdin 喂 sudo -S
 - [板子内存已见底](board-memory-ceiling.md) — 空闲 195MB/swap 2.2GB,llama-server 独占 3.4GB;fork 变慢会伪装成设备故障,排查前先 free -m
+- [GUI 语音改版计划](agent-voice-pages-plan.md) — 2026-07-21 定稿经 codex+kimi 双评审:Agent/Voice 分页、三轴切换、板端统一 config;动语音/GUI 前必读 docs/agent-voice-pages-plan.html
+- [大脑切换探针](hermes-brain-switch-probe.md) — /brain 探针判据:网关把 provider 4xx 伪装成 assistant.completed,必须靠 delta/output_tokens 判过;网关重启就绪>20s;改探针/加大脑前必读
+- [voice 双 venv + sherpa 1.13.4](voice-venv-dual-sherpa113.md) — .venv 软链→.venv-exp(1.13.4/TEN)vs .venv-stable(1.10.46)秒级回滚;TEN 同阈值比 Silero 低幅更敏感;升级/回滚 voice sherpa 前必读

@@ -21,20 +21,31 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
+import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import time
+import wave
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from aiohttp import web
 import aiohttp
+
+import voice_config as vconfig
+import voice_switching as vswitch
+import voice_engines as vengines
+import voice_vad as vvad
+import voice_brain as vbrain
+import voice_asr_obs as vobs
 
 # --------------------------------------------------------------------------- #
 # Config(全部可用环境变量覆盖;默认值针对本板)
@@ -74,7 +85,17 @@ HERMES_SESSION = _env("VOICE_HERMES_SESSION", "voice")
 HERMES_ENV = os.path.expanduser(
     _env("VOICE_HERMES_ENV", "~/.hermes/profiles/robot/.env")
 )
+HERMES_YAML = os.path.expanduser(
+    _env("VOICE_HERMES_YAML", "~/.hermes/profiles/robot/config.yaml")
+)
+HERMES_UNIT = _env("VOICE_HERMES_UNIT", "hermes-gateway-robot")
 HERMES_TURN_TIMEOUT = float(_env("VOICE_HERMES_TIMEOUT", "60"))
+# Gateway restart re-spawns the profile's MCP servers (vlm + drive python venvs),
+# so readiness can legitimately take >20s on this board — 30s gives margin. This
+# is internal to the /brain job (POST returns 202 first), so the Rust 15s cap
+# never applies here.
+HERMES_READY_TIMEOUT = float(_env("VOICE_HERMES_READY_TIMEOUT", "30"))
+HERMES_PROBE_TIMEOUT = float(_env("VOICE_HERMES_PROBE_TIMEOUT", "10"))
 
 # TTS
 EDGE_VOICE = _env("VOICE_EDGE_VOICE", "zh-CN-XiaoxiaoNeural")
@@ -86,16 +107,47 @@ BREAKER_FAILS = 3               # 连续失败触发熔断
 BREAKER_COOLDOWN = 300.0        # 熔断后直接走 Melo 的时长
 BREAKER_PROBE = 60.0            # 熔断期间后台探测间隔
 
+# Vision 播报桥:板端订阅 vlm-daemon caption(:8090,token 与 vlm daemon 同文件)
+VLM_BASE = _env("VOICE_VLM_BASE", "http://127.0.0.1:8090").rstrip("/")
+VLM_TOKEN_FILE = os.path.expanduser(
+    _env("VOICE_VLM_TOKEN_FILE", os.path.join(HERE, "..", "vlm", "token"))
+)
+# vlm-daemon POST /model is synchronous through a cold model load (90s ready +
+# probe); give the proxied call generous margin. POST returns 202 first, so the
+# Rust 15s cap never applies (this runs inside the /config vision job).
+VLM_MODEL_TIMEOUT = float(_env("VOICE_VLM_MODEL_TIMEOUT", "180"))
+
+
+def _load_vlm_token() -> str | None:
+    try:
+        with open(VLM_TOKEN_FILE, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 # 事件反馈环形缓冲(/feed 增量拉取用)
 FEED_RING = 200
 
-# 状态常量
+# ASR 段级观测:最近 N 段原始 PCM 存 tmp(16k mono wav,环形覆盖,启动清空),
+# 供转写台「▶ 听」回放。只存 /tmp,不入仓库。
+SEG_DIR = _env("VOICE_ASR_SEG_DIR", "/tmp/lekiwi_asr_segs")
+SEG_KEEP = int(_env("VOICE_ASR_SEG_KEEP", "10"))
+
+# 一键回环自检:已知中文人声测试 wav(edge-tts 合成)直接喂 VAD+ASR 全链,绕过麦克风。
+# 把「声学问题」与「模型问题」一键二分(见 .memory/voice-frontend-s2.md 麦克风排查铁律)。
+SELFTEST_WAV = os.path.expanduser(
+    _env("VOICE_SELFTEST_WAV", os.path.join(HERE, "selftest.wav")))
+SELFTEST_TXT = os.path.expanduser(
+    _env("VOICE_SELFTEST_TXT", os.path.join(HERE, "selftest.txt")))
+SELFTEST_DEFAULT_TEXT = _env("VOICE_SELFTEST_TEXT", "今天天气怎么样")
+
+# 状态常量。SWITCHING=切换执行器持锁期间(拒新轮次);DEBUG=转写台(禁大脑/TTS/barge-in)。
 IDLE, LISTENING, THINKING, SPEAKING = "idle", "listening", "thinking", "speaking"
+SWITCHING, DEBUG = "switching", "debug"
 
 START_TS = time.time()
 
-# SenseVoice 标签形如 <|zh|><|HAPPY|><|Speech|>,ASR 正文里剥掉
-_TAG_RE = re.compile(r"<\|[^|]*\|>")
 # 语气词单字(过短/纯语气 → 不上 LLM)
 _FILLER = {"嗯", "啊", "哦", "呃", "唉", "呀", "哎", "嗯嗯"}
 
@@ -150,6 +202,38 @@ def _load_hermes_key() -> str | None:
 
 
 HERMES_KEY = _load_hermes_key()
+
+
+def _hermes_env_has(name: str) -> bool:
+    """True iff `name` is set to a non-empty value in the profile .env. Reads the
+    value only to test emptiness — never returns it, never logs it (§5.5)."""
+    try:
+        with open(HERMES_ENV, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == name:
+                    return bool(v.strip().strip('"').strip("'"))
+    except OSError:
+        return False
+    return False
+
+
+def hermes_capabilities() -> list[str]:
+    """Capability tags for the current profile = the mcp_servers keys in the yaml.
+    Capabilities come from the PROFILE, not the model — switching preset never
+    changes them (plan §4.1). Read-only, best-effort; [] if the yaml is unreadable."""
+    try:
+        with open(HERMES_YAML, "r", encoding="utf-8") as fh:
+            data = vbrain._yaml().load(fh.read())
+        servers = data.get("mcp_servers") if isinstance(data, dict) else None
+        if isinstance(servers, dict):
+            return sorted(str(k) for k in servers.keys())
+    except Exception:                                    # noqa: BLE001
+        pass
+    return []
 
 
 def _rss_mb() -> float:
@@ -289,6 +373,83 @@ class SentenceAccumulator:
 
 
 # --------------------------------------------------------------------------- #
+# 段音频回放:最近 N 段原始 PCM 存 tmp(16k mono wav,环形覆盖)
+# --------------------------------------------------------------------------- #
+class SegStore:
+    """Ring of the last N VAD segments as 16k mono wav under a tmp dir. Cleared on
+    daemon start; seg_id is monotonic and path()/read_b64() return None once evicted.
+    tmp-only — segment audio never enters the repo."""
+
+    def __init__(self, directory: str, keep: int = SEG_KEEP) -> None:
+        self.dir = directory
+        self.keep = max(1, keep)
+        self.seq = 0
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            for f in os.listdir(self.dir):
+                if f.startswith("seg-") and f.endswith(".wav"):
+                    try:
+                        os.unlink(os.path.join(self.dir, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _path(self, seg_id: int) -> str:
+        return os.path.join(self.dir, f"seg-{seg_id}.wav")
+
+    def save(self, samples: np.ndarray) -> int:
+        """samples: float32 [-1,1] @16k → wav. Returns seg_id (0 on failure)."""
+        self.seq += 1
+        sid = self.seq
+        try:
+            pcm = (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
+            with wave.open(self._path(sid), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(pcm.tobytes())
+            old = sid - self.keep
+            if old > 0:
+                try:
+                    os.unlink(self._path(old))
+                except OSError:
+                    pass
+        except (OSError, ValueError):
+            return 0
+        return sid
+
+    def path(self, seg_id: int) -> str | None:
+        """段 wav 的绝对路径,已被环形覆盖/不存在 → None。"""
+        p = self._path(seg_id)
+        if seg_id <= 0 or not os.path.exists(p):
+            return None
+        return p
+
+    def read_b64(self, seg_id: int) -> str | None:
+        p = self.path(seg_id)
+        if p is None:
+            return None
+        try:
+            with open(p, "rb") as fh:
+                return base64.b64encode(fh.read()).decode("ascii")
+        except OSError:
+            return None
+
+
+def _read_wav_16k(path: str) -> np.ndarray:
+    """Read a mono 16k s16le wav → float32 [-1,1]. Best-effort: non-16k is accepted
+    as-is (the self-test wav is generated at 16k, so this is only a guard rail)."""
+    with wave.open(path, "rb") as w:
+        frames = w.readframes(w.getnframes())
+        ch = w.getnchannels()
+    arr = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    if ch > 1:
+        arr = arr.reshape(-1, ch).mean(axis=1)
+    return arr
+
+
+# --------------------------------------------------------------------------- #
 # Daemon 核心
 # --------------------------------------------------------------------------- #
 class Daemon:
@@ -300,17 +461,30 @@ class Daemon:
         self.mic_dbfs = -99.0                    # 最近一块 PCM 的 RMS 电平
         self.mic_peak_dbfs = -99.0               # LEVEL_PEAK_S 窗口内的峰值
         self.mic_peak_ts = 0.0
+        self.vad_chunks = 0                       # since-boot 成功喂入的实时块
+        self.vad_errors = 0                       # accept_waveform 异常数
+        self.vad_last_error: str | None = None
+        self._vad_error_ts = 0.0
 
         # 音频设备(按名发现,失败置 None → /health audio:missing)
         self.cap_card: str | None = None
         self.play_card: str | None = None
         self.audio_ok = False
 
+        # MCP01 摘机 keepalive:采集期间把 USB 话机拉出待机(待机时麦克风增益掉 ~30dB,
+        # 跌到 Silero 门限以下)。hidraw 设备按 vid:pid 定位,路径会随拔插漂移故不缓存死。
+        self._hidraw: str | None = None
+        self._offhook_task: asyncio.Task | None = None
+
         # 子进程句柄
         self._arecord: asyncio.subprocess.Process | None = None
         self._cap_task: asyncio.Task | None = None
         self._cur_ffmpeg: asyncio.subprocess.Process | None = None
         self._cur_aplay: asyncio.subprocess.Process | None = None
+        # 转写台段回放(板上 aplay):独立于对话播放句柄。seg_playing 起时闸 DEBUG 采集,
+        # 与对话播报半双工同语义 —— 播完 +HALF_DUPLEX_RESUME 才恢复喂 VAD。
+        self._seg_aplay: asyncio.subprocess.Process | None = None
+        self.seg_playing = False
 
         # 轮次/朗读任务
         self.turn_task: asyncio.Task | None = None
@@ -325,14 +499,47 @@ class Daemon:
         self._audio_was_broken = False
         self._probe_warn_ts = 0.0
 
-        # 模型(启动时加载)
-        self.rec = None                          # SenseVoice OfflineRecognizer
-        self.vad = None                          # Silero VAD
-        self.tts = None                          # Melo OfflineTts
-        self.asr_loaded = False
-        self.tts_local_loaded = False
+        # 统一 config(desired state)。缺失/损坏 → 内置默认,照常起(不因 config 起不来)。
+        self.config, self.config_source = vconfig.load_config()
+
+        # 引擎宿主(进程内模式,P0a 定谳)。引擎只管模型生命周期 + 同步推理原语;
+        # 采集/VAD/generation/子进程/edge->melo 熔断仍归 daemon(§5.1)。
+        self.asr = vengines.OfflineAsr()         # sensevoice
+        self.melo = vengines.MeloTts()           # 本地 Melo(edge 兜底也用它)
+        self.vad = None                          # VadEngine(daemon 所有,可切换)
+        # 音频前端(全局,不属 preset pair):当前 VAD 描述 + 数字增益。ephemeral 标记
+        # 表示调试态临时改动未落盘 —— 退出 DEBUG 时从 config 还原(与 tts/asr 同语义)。
+        self.vad_desc = vconfig.current_vad(self.config)
+        self.audio_gain_db = vconfig.current_audio_gain(self.config)
+        self._frontend_ephemeral = False
         self._asr_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
         self._tts_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="melo")
+
+        # 运行引擎 = 当前 preset pair 的投影(SWITCHING/ephemeral 才偏离,见 switch 执行器)
+        _pair = vconfig.current_pair(self.config)
+        self.asr_engine = _pair["asr"]                       # "sensevoice"
+        self.tts_engine = _pair["tts"].get("engine", "edge") # "edge" | "melo"
+        self.edge_voice = _pair["tts"].get("voice") or EDGE_VOICE
+
+        # 切换执行器(全局串行) + ephemeral 覆盖(调试态不落盘) + 状态机快照
+        self.switcher = vswitch.EngineSwitcher()
+        self.override = vswitch.EphemeralOverride()
+        self._job_seq = 0
+        self._switch_prev_state = IDLE
+
+        # asr 转写台独立增量环(不挤 200 条 feed 环)
+        self.debug_tail = vswitch.TailRing(maxlen=200)
+
+        # ASR 段级观测:since-boot 计数器 + 最近段音频回放存储
+        self.asr_stats = vobs.AsrStats()
+        self.seg_store = SegStore(SEG_DIR)
+
+        # Vision 播报桥(板端后台任务) + caption 去重(限长从 config 读)
+        self.vision_task: asyncio.Task | None = None
+        self.caption_dedup = vswitch.CaptionDedup(limit=self._vision_limit())
+
+        # 当前轮 id(feed 事件按 turn_id 聚合气泡)
+        self.turn_id = 0
 
         # edge-tts 熔断
         self.edge_fail_streak = 0
@@ -346,9 +553,14 @@ class Daemon:
         self.last_error: dict | None = None
 
     # -- 事件发布(SSE + /feed 环形缓冲同源) ---------------------------- #
+    def brain_name(self) -> str:
+        return vconfig.current_preset_name(self.config)
+
     def emit(self, etype: str, **fields) -> None:
         self.feed_seq += 1
-        ev = {"type": etype, "seq": self.feed_seq, "ts": round(time.time(), 3)}
+        ev = {"type": etype, "seq": self.feed_seq, "ts": round(time.time(), 3),
+              "generation": self.generation, "brain": self.brain_name(),
+              "turn_id": self.turn_id}
         ev.update(fields)
         self.feed_ring.append(ev)
         if etype == "error":
@@ -367,6 +579,46 @@ class Daemon:
     def refresh_deadline(self, window_s: float | None = None) -> None:
         w = WINDOW_S if window_s is None else window_s
         self.deadline = time.time() + w
+
+    def _vision_limit(self) -> int:
+        """Vision 播报朗读字数上限(config vision_speak_limit,Python len)。"""
+        try:
+            return max(1, int(self.config.get("vision_speak_limit", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    # -- ASR 段级观测:每个 VAD 段一条事件 + 计数 + 存音频 ---------------- #
+    @staticmethod
+    def _seg_meta(samples: np.ndarray) -> tuple[float, float, float]:
+        """段的 (dur_s, peak_dbfs, rms_dbfs)。samples 是 float32 归一化 [-1,1]。"""
+        n = int(getattr(samples, "size", 0) or 0)
+        if n == 0:
+            return 0.0, -99.0, -99.0
+        peak = float(np.max(np.abs(samples)))
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        return round(n / 16000.0, 2), vobs.dbfs(peak), vobs.dbfs(rms)
+
+    def _record_seg(self, samples: np.ndarray, outcome: str,
+                    text: str | None = None, *, to_debug: bool,
+                    emit_feed: bool = True) -> int:
+        """一段观测:存 wav → 计数 → 发事件。DEBUG 态发 debug_tail(转写台显示);
+        对话态发 feed(type:asr_seg),只在非 accepted 时发(accepted 已有 user_text)。"""
+        dur_s, peak, rms = self._seg_meta(samples)
+        seg_id = self.seg_store.save(samples)
+        self.asr_stats.record(outcome)
+        if to_debug:
+            ev = self.debug_tail.append(
+                "seg", text or "", seg_id=seg_id, outcome=outcome,
+                dur_s=dur_s, peak_dbfs=peak, rms_dbfs=rms)
+            self.emit("asr_debug", tail_seq=ev["seq"], text=text or "",
+                      outcome=outcome, seg_id=seg_id)
+        elif emit_feed and outcome != vobs.ACCEPTED:
+            fields = {"seg_id": seg_id, "outcome": outcome, "dur_s": dur_s,
+                      "peak_dbfs": peak, "rms_dbfs": rms}
+            if text:
+                fields["text"] = text
+            self.emit("asr_seg", **fields)
+        return seg_id
 
     # -- 子进程回收工具 -------------------------------------------------- #
     @staticmethod
@@ -429,9 +681,11 @@ class Daemon:
             # 声卡上电默认音量只有 29%(-20dB):播报听不见、麦克风能量不够触发
             # VAD。ALSA 混音器设置不随重启保留(alsactl store 要 root),所以每次
             # 发现设备后由 daemon 自己拉到位。控件名对 MCP01 实测:PCM=播放,Mic=采集。
+            # Mic 拧满:MCP01 的 USB Mic Capture Volume 量程 -28dB~0dB 只衰减无增益,
+            # 满档(100%)白捡约 4dB。仍不足的部分靠 config audio.gain_db 数字补。
             for args in (["sset", "PCM,0", "90%", "unmute"],
                          ["sset", "PCM,1", "90%"],
-                         ["sset", "Mic", "85%", "cap"]):
+                         ["sset", "Mic", "100%", "cap"]):
                 try:
                     proc = await asyncio.create_subprocess_exec(
                         "amixer", "-c", self.cap_card, *args,
@@ -466,6 +720,62 @@ class Daemon:
     # ------------------------------------------------------------------ #
     # 采集:arecord 常驻(state != IDLE 期间),320ms 块喂 VAD
     # ------------------------------------------------------------------ #
+    # -- MCP01 off-hook keepalive -------------------------------------------- #
+    MCP01_VID = "17ef"
+    MCP01_PID = "a03b"
+
+    @staticmethod
+    def _read_sys(path: str) -> str | None:
+        try:
+            with open(path, "r") as fh:
+                return fh.read().strip().lower()
+        except OSError:
+            return None
+
+    def _find_hidraw(self) -> str | None:
+        """Locate the MCP01 hidraw node by vid:pid (never hardcode hidrawN — it drifts on
+        replug). idVendor/idProduct sit two levels up from the hidraw's device link."""
+        base = "/sys/class/hidraw"
+        try:
+            names = os.listdir(base)
+        except OSError:
+            return None
+        for name in names:
+            vid = self._read_sys(os.path.join(base, name, "device/../../idVendor"))
+            pid = self._read_sys(os.path.join(base, name, "device/../../idProduct"))
+            if vid == self.MCP01_VID and pid == self.MCP01_PID:
+                return f"/dev/{name}"
+        return None
+
+    def _write_offhook(self, on: bool) -> bool:
+        """Write the off-hook HID report. Silent on failure — a missing device is already
+        surfaced as 'audio missing'; don't spam a second error stream."""
+        dev = self._hidraw or self._find_hidraw()
+        self._hidraw = dev
+        if dev is None:
+            return False
+        try:
+            fd = os.open(dev, os.O_WRONLY)
+            try:
+                os.write(fd, vswitch.offhook_report(on))
+            finally:
+                os.close(fd)
+            return True
+        except OSError:
+            self._hidraw = None            # path may have drifted; re-find next time
+            return False
+
+    async def _offhook_keepalive(self) -> None:
+        """Re-assert off-hook every 10s while capturing (the device falls back to idle on
+        its own timeout otherwise)."""
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                await loop.run_in_executor(None, self._write_offhook, True)
+                await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            return
+
     async def start_capture(self) -> None:
         if self._cap_task and not self._cap_task.done():
             return
@@ -474,10 +784,25 @@ class Daemon:
             if not self.audio_ok:
                 return
         self._cap_task = asyncio.create_task(self._capture_loop())
+        if self._offhook_task is None or self._offhook_task.done():
+            self._offhook_task = asyncio.create_task(self._offhook_keepalive())
 
     async def stop_capture(self) -> None:
         t = self._cap_task
         self._cap_task = None
+        ot = self._offhook_task
+        self._offhook_task = None
+        if ot and not ot.done():
+            ot.cancel()
+            try:
+                await ot
+            except (asyncio.CancelledError, Exception):
+                pass
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._write_offhook, False)
+        except Exception:                                    # noqa: BLE001
+            pass
         self._kill(self._arecord)
         await self._reap(self._arecord)
         self._arecord = None
@@ -538,12 +863,12 @@ class Daemon:
             await self.discover_audio()
             await asyncio.sleep(0.3)                            # 限速重启
 
-    def _note_level(self, pcm) -> None:
+    def _note_level(self, x) -> None:
         """本块 RMS -> dBFS,并保留最近 LEVEL_PEAK_S 秒的最大值。峰值才是有用的
-        那个数:说话是断续的,平均会被静音段拉平。"""
-        if pcm.size == 0:
+        那个数:说话是断续的,平均会被静音段拉平。x 是已归一化并已加数字增益的 float32
+        —— 电平表显示的必须是 VAD/ASR 实际听到的(增益后)幅度,而非原始采集。"""
+        if x.size == 0:
             return
-        x = pcm.astype(np.float32) / 32768.0
         rms = float(np.sqrt(np.mean(x * x)))
         self.mic_dbfs = float(20.0 * np.log10(max(rms, 1e-9)))
         now = time.time()
@@ -553,13 +878,22 @@ class Daemon:
 
     def _handle_chunk(self, data: bytes) -> None:
         """一块 PCM。LISTENING 走正常截句;SPEAKING 开麦做打断检测;其余丢弃。"""
+        # 归一化 + 数字增益(gain_db=0 时为恒等,零行为变化)。增益必须在电平表与 VAD
+        # 之前统一施加,这样用户看到的电平就是 VAD/ASR 实际听到的幅度。
+        samples = vvad.apply_gain(
+            np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0,
+            self.audio_gain_db)
         # 电平遥测:在闸门之前算,丢弃期也照报——"麦克风到底听没听见我"是排查
         # ASR 不出字的第一个问题,而这台 MCP01 带硬件降噪门(静时输出近似静音,
         # ALSA 增益调了没用),光看波形本底判断不了,必须有说话时的实测值。
-        self._note_level(np.frombuffer(data, dtype=np.int16))
+        self._note_level(samples)
         listening = (self.state == LISTENING and time.time() >= self.mic_resume_ts)
         barge = (BARGE_IN and self.state == SPEAKING)
-        if not (listening or barge):
+        # 转写台:截句 → 转写,不进大脑不触发 TTS。段回放期(seg_playing)及其 250ms 半
+        # 双工余量内闸掉采集,免把板上放的段自己截回来。
+        debug = (self.state == DEBUG and not self.seg_playing
+                 and time.time() >= self.mic_resume_ts)
+        if not (listening or barge or debug):
             # 丢弃期间保持 VAD 干净,避免把机器人自己的话截成段
             if self.vad is not None:
                 try:
@@ -569,15 +903,19 @@ class Daemon:
             return
         if self.vad is None:
             return
-        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
         try:
-            self.vad.accept_waveform(samples)
-        except Exception:
+            segs = self.vad.feed(samples)
+            self.vad_chunks += 1
+        except Exception as exc:                              # noqa: BLE001
+            # VAD 是语音链路的闸门，这里不能把异常伪装成“没说话”。
+            self.vad_errors += 1
+            self.vad_last_error = f"{type(exc).__name__}: {exc}"
+            now = time.time()
+            if now - self._vad_error_ts >= 60.0:
+                self._vad_error_ts = now
+                self.emit("error", message=f"vad accept failed: {self.vad_last_error}")
             return
-        while not self.vad.empty():
-            seg = self.vad.front.samples
-            self.vad.pop()
-            seg_arr = np.array(seg, dtype=np.float32)
+        for seg_arr in segs:
             # 只在 LISTENING 起轮;拿到段立刻改 THINKING 停止再截句(单轮保证)
             if self.state == LISTENING and (self.turn_task is None or self.turn_task.done()):
                 self.set_state(THINKING)
@@ -587,16 +925,14 @@ class Daemon:
                     and (self._barge_task is None or self._barge_task.done())):
                 self._barge_task = asyncio.create_task(
                     self._barge_check(self.generation, seg_arr))
+            elif self.state == DEBUG:
+                asyncio.create_task(self._asr_debug_transcribe(seg_arr))
 
     # ------------------------------------------------------------------ #
     # ASR → 校验 → 起轮
     # ------------------------------------------------------------------ #
     def _asr_sync(self, samples: np.ndarray) -> str:
-        stream = self.rec.create_stream()
-        stream.accept_waveform(16000, samples)
-        self.rec.decode_stream(stream)
-        text = stream.result.text or ""
-        return _TAG_RE.sub("", text).strip()
+        return self.asr.transcribe(samples)
 
     async def _asr_then_turn(self, gen: int, samples: np.ndarray) -> None:
         loop = asyncio.get_running_loop()
@@ -610,14 +946,32 @@ class Daemon:
             return
         if gen != self.generation:
             return
-        # 过短 / 纯语气词 → 丢弃不上 LLM
-        stripped = re.sub(r"\s+", "", text)
-        if len(stripped) < 2 or stripped in _FILLER:
+        # 段级观测:分类 outcome、计数、存段音频。非 accepted 上 feed(asr_seg),
+        # accepted 已有 user_text —— 别刷屏。
+        outcome = vobs.classify_segment(text)
+        self._record_seg(samples, outcome, text, to_debug=False)
+        if outcome != vobs.ACCEPTED:      # 空解码 / 语气词 / 过短 → 不上 LLM
             self.set_state(LISTENING)
             self.refresh_deadline()
             return
+        self.turn_id += 1
         self.emit("user_text", text=text)
         await self.run_turn(gen, text)
+
+    async def _asr_debug_transcribe(self, samples: np.ndarray) -> None:
+        """转写台:VAD 段 → ASR → 独立增量环(不进大脑、不触发 TTS、不 barge)。
+        每段都上转写台,连解码为空(empty_asr)的段也显示 —— 这正是「截到段却没出字」
+        的可见化,附 outcome/电平/段音频回放 id。"""
+        loop = asyncio.get_running_loop()
+        try:
+            text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
+        except Exception as exc:                                 # noqa: BLE001
+            self.emit("error", message=f"asr_debug failed: {exc}")
+            return
+        if self.state != DEBUG:
+            return
+        outcome = vobs.classify_segment(text)
+        self._record_seg(samples, outcome, text, to_debug=True)
 
     # ------------------------------------------------------------------ #
     # barge-in:SPEAKING 中检出的语音段 → 能量门 → ASR → 回声/停止词判别
@@ -646,10 +1000,14 @@ class Daemon:
         return False
 
     async def _barge_check(self, gen: int, samples: np.ndarray) -> None:
+        # 能量/长度门在 ASR 之前丢弃的段计 gate(存音频可回放,但 SPEAKING 期不上
+        # feed 免刷屏)。
         if len(samples) < int(BARGE_MIN_S * 16000):
+            self._record_seg(samples, vobs.GATE, to_debug=False, emit_feed=False)
             return
         rms = float(np.sqrt(np.mean(samples * samples)))
         if rms < BARGE_MIN_RMS:
+            self._record_seg(samples, vobs.GATE, to_debug=False, emit_feed=False)
             return
         loop = asyncio.get_running_loop()
         try:
@@ -677,6 +1035,7 @@ class Daemon:
             except Exception:
                 pass
         self.refresh_deadline()
+        self.turn_id += 1
         self.emit("user_text", text=text)
         self.turn_task = asyncio.create_task(self.run_turn(self.generation, text))
 
@@ -825,7 +1184,9 @@ class Daemon:
             await self.discover_audio()     # 设备刚回来时当句即恢复,不等巡检
         backend = None
         breaker_open = time.time() < self.breaker_until
-        if not breaker_open and FFMPEG:
+        # tts_engine=="melo" → 纯本地 Melo(单独引擎);"edge" → edge 含 melo 兜底+熔断。
+        use_edge = self.tts_engine == "edge"
+        if use_edge and not breaker_open and FFMPEG:
             ok = await self._edge_play(gen, sentence)
             if ok:
                 backend = "edge"
@@ -851,6 +1212,54 @@ class Daemon:
                 self.vad.reset()
             except Exception:
                 pass
+
+    async def play_seg(self, seg_id: int) -> dict:
+        """转写台段回放:板上(MCP01 音响)aplay 放段 wav(16k mono s16le)。段不存在
+        → 404;音响不可用 → 409;aplay 非零 → 500(非零必报错,不装成功)。latest-wins:
+        新请求先 kill 在放的旧 aplay。播放期 seg_playing 起闸 DEBUG 采集,播完设半双工
+        余量恢复。返回 dict 带可选 status 供 HTTP 层取用。"""
+        path = self.seg_store.path(seg_id)
+        if path is None:
+            return {"error": "segment not found", "id": seg_id, "status": 404}
+        if not (self.audio_ok and self.play_card):
+            return {"error": "音响不可用", "id": seg_id, "status": 409}
+        # latest-wins:前一段还在放就打断(被 kill 的旧任务在其 finally 里不动共享态)
+        if self._seg_aplay is not None and self._seg_aplay.returncode is None:
+            self._kill(self._seg_aplay)
+            await self._reap(self._seg_aplay)
+        self._seg_aplay = None
+        self.seg_playing = True
+        ap = None
+        try:
+            ap = await asyncio.create_subprocess_exec(
+                "aplay", "-D", self.play_dev(),
+                "-r", "16000", "-f", "S16_LE", "-c", "1", "-q", path,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            self._seg_aplay = ap
+            rc = await asyncio.wait_for(ap.wait(), timeout=30.0)
+            if rc == 0:
+                return {"ok": True, "id": seg_id}
+            if rc < 0:            # 负码 = 被 latest-wins/关停 SIGKILL,不是设备故障
+                return {"ok": False, "superseded": True, "id": seg_id}
+            self._playback_dead(rc)   # 正码 = aplay 自身失败(设备失效),不装成功
+            return {"error": f"aplay exited rc={rc}", "id": seg_id, "status": 500}
+        except Exception as exc:                     # noqa: BLE001
+            self._kill(ap)
+            self.emit("error", message=f"seg play failed: {exc}")
+            return {"error": str(exc), "id": seg_id, "status": 500}
+        finally:
+            await self._reap(ap)
+            # 只有仍持有本句柄(未被 latest-wins 接管)才复位闸门,否则会误放行正在放的新段
+            if self._seg_aplay is ap:
+                self._seg_aplay = None
+                self.seg_playing = False
+                self.mic_resume_ts = time.time() + HALF_DUPLEX_RESUME
+                if self.vad is not None:
+                    try:
+                        self.vad.reset()
+                    except Exception:
+                        pass
 
     async def _edge_play(self, gen: int, text: str) -> bool:
         """edge-tts 流式 mp3 → ffmpeg 解码 s16le@24k → aplay。首包 1s、整句 5s 超时。"""
@@ -889,7 +1298,7 @@ class Daemon:
                     pass
             pump = asyncio.create_task(_pump())
 
-            comm = edge_tts.Communicate(text, EDGE_VOICE)
+            comm = edge_tts.Communicate(text, self.edge_voice)
             it = comm.stream().__aiter__()
             got_audio = False
             first = True
@@ -934,14 +1343,11 @@ class Daemon:
             self._after_playback()
 
     def _melo_sync(self, text: str) -> np.ndarray:
-        audio = self.tts.generate(text, sid=0, speed=1.0)
-        samp = np.asarray(audio.samples, dtype=np.float32)
-        pcm = np.clip(samp, -1.0, 1.0)
-        return (pcm * 32767.0).astype(np.int16)
+        return self.melo.synth(text)
 
     async def _melo_play(self, gen: int, text: str) -> bool:
         """本地 Melo:float32@44100 → int16 → aplay -r 44100。合成丢 executor。"""
-        if self.tts is None or not self.audio_ok:
+        if not self.melo.loaded or not self.audio_ok:
             return False
         loop = asyncio.get_running_loop()
         ap = None
@@ -983,7 +1389,7 @@ class Daemon:
                 continue
             try:
                 import edge_tts
-                comm = edge_tts.Communicate("好", EDGE_VOICE)
+                comm = edge_tts.Communicate("好", self.edge_voice)
                 async for chunk in comm.stream():
                     if chunk.get("type") == "audio" and chunk.get("data"):
                         self.breaker_until = 0.0        # 恢复
@@ -1037,7 +1443,16 @@ class Daemon:
         await self.stop_capture()
 
     async def do_say(self, text: str) -> None:
-        """调试直接播报,走完整 TTS 通道,可被 interrupt 立停。"""
+        """调试直接播报,走完整 TTS 通道,可被 interrupt 立停。
+        latest-wins:新 say 先取消在途 say(kill aplay/ffmpeg + gen++ 令旧回调过期),
+        修此前连发 /say 两路 aplay 叠播的缺陷。"""
+        if self.say_task and not self.say_task.done():
+            prev = self.state
+            await self._abort_playback()          # gen++,停旧播放,cancel 旧 say/turn
+            gen = self.generation
+            self.set_state(SPEAKING)
+            self.say_task = asyncio.create_task(self._say_run(gen, text, prev))
+            return
         gen = self.generation
         prev = self.state
         self.set_state(SPEAKING)
@@ -1083,41 +1498,18 @@ class Daemon:
     # 启动时加载模型 + Hermes 会话
     # ------------------------------------------------------------------ #
     async def load_models(self) -> None:
-        import sherpa_onnx as so
         loop = asyncio.get_running_loop()
 
-        def _load():
-            rec = so.OfflineRecognizer.from_sense_voice(
-                model=os.path.join(MODELS, "sense-voice/model.int8.onnx"),
-                tokens=os.path.join(MODELS, "sense-voice/tokens.txt"),
-                num_threads=4, use_itn=True, language="zh",
-            )
-            cfg = so.VadModelConfig()
-            cfg.silero_vad.model = os.path.join(MODELS, "silero_vad.onnx")
-            cfg.silero_vad.threshold = 0.5
-            cfg.silero_vad.min_silence_duration = 0.55
-            cfg.silero_vad.min_speech_duration = 0.25
-            cfg.silero_vad.max_speech_duration = 20
-            cfg.sample_rate = 16000
-            vad = so.VoiceActivityDetector(cfg, buffer_size_in_seconds=30)
-            tc = so.OfflineTtsConfig()
-            base = os.path.join(MODELS, "vits-melo-tts-zh_en")
-            tc.model.vits.model = os.path.join(base, "model.onnx")
-            tc.model.vits.lexicon = os.path.join(base, "lexicon.txt")
-            tc.model.vits.tokens = os.path.join(base, "tokens.txt")
-            tc.model.vits.dict_dir = os.path.join(base, "dict")
-            tc.model.num_threads = 4
-            tc.rule_fsts = ",".join(
-                os.path.join(base, f) for f in ("date.fst", "number.fst", "phone.fst")
-            )
-            tts = so.OfflineTts(tc)
-            tts.generate("好", sid=0, speed=1.0)      # 预热
-            return rec, vad, tts
+        desc = self.vad_desc
 
-        self.rec, self.vad, self.tts = await loop.run_in_executor(None, _load)
-        self.asr_loaded = True
-        self.tts_local_loaded = True
-        print("[voice-daemon] models loaded (ASR+VAD+Melo)", flush=True)
+        def _load():
+            self.asr.load()                          # SenseVoice(引擎宿主)
+            self.melo.load()                         # Melo(含预热)
+            # 当前 config 选中的 VAD 引擎。默认 silero + 默认参数 ⇒ 与 P2.7 前逐字节一致。
+            return vvad.make_vad(desc["engine"], desc, MODELS)
+
+        self.vad = await loop.run_in_executor(None, _load)
+        print(f"[voice-daemon] models loaded (ASR+VAD:{desc['engine']}+Melo)", flush=True)
 
     async def ensure_hermes_session(self) -> None:
         """启动时建 voice 会话;已存在(409/其它)视为成功,GET 确认。"""
@@ -1144,14 +1536,649 @@ class Daemon:
         except Exception as exc:
             print(f"[voice-daemon] hermes session setup failed: {exc}", flush=True)
 
+    # ------------------------------------------------------------------ #
+    # 切换执行器(全局串行,单轴,报真实 applied,不承诺原子回滚)§5.2
+    # ------------------------------------------------------------------ #
+    def new_job_id(self) -> str:
+        self._job_seq += 1
+        return f"job-{self._job_seq}"
+
+    def applied_engines(self) -> dict:
+        """实际加载/运行的引擎(applied 状态)。"""
+        return {"asr": self.asr_engine, "tts_engine": self.tts_engine,
+                "edge_voice": self.edge_voice if self.tts_engine == "edge" else None}
+
+    def brain_drift(self) -> dict | None:
+        """desired 大脑(config.json 当前 preset 的 provider/model)vs applied(实际
+        config.yaml 的 model.provider/default)。人手改了 yaml 就在这里现形(§5.5)。
+        yaml 读不了 → None(不报假漂移)。key 值不涉及,只比 provider/model 名。"""
+        try:
+            with open(HERMES_YAML, "r", encoding="utf-8") as fh:
+                data = vbrain._yaml().load(fh.read())
+            model = data.get("model") if isinstance(data, dict) else None
+            applied_provider = (model or {}).get("provider")
+            applied_model = (model or {}).get("default")
+        except Exception:                                    # noqa: BLE001
+            return None
+        want_provider = vbrain.PROVIDER_PREFIX + vconfig.current_preset_name(self.config)
+        want_model = vconfig.current_preset(self.config).get("model")
+        if applied_provider != want_provider or applied_model != want_model:
+            return {"desired": {"provider": want_provider, "model": want_model},
+                    "applied": {"provider": applied_provider, "model": applied_model}}
+        return None
+
+    def drift(self) -> dict:
+        """desired(config pair)与 applied(实际运行)的差异;ephemeral 覆盖也算漂移。"""
+        d = vconfig.compute_drift(vconfig.current_pair(self.config),
+                                  self.applied_engines())
+        if self.override.active():
+            d["ephemeral"] = self.override.get()
+        bd = self.brain_drift()
+        if bd:
+            d["brain"] = bd
+        return d
+
+    def _vad_enums(self) -> list:
+        """vad 引擎表 + 本板实测可用性(sherpa 是否带 ten_vad / webrtcvad 是否装了 /
+        模型是否在盘)。不可用的引擎 GUI 置灰并拒绝切换。"""
+        avail = vvad.availability(MODELS)
+        out = []
+        for e in vconfig.enums()["vad"]:
+            e = dict(e)
+            e["available"] = bool(avail.get(e["id"], False))
+            out.append(e)
+        return out
+
+    def config_view(self) -> dict:
+        """GET /config:全量 desired + applied + drift + 各轴枚举(含 edge 音色表 + vad
+        引擎可用性)+ capabilities(profile mcp_servers 键名)。"""
+        enums = vconfig.enums()
+        enums["vad"] = self._vad_enums()
+        return {"desired": self.config, "applied": self.applied_engines(),
+                "drift": self.drift(), "enums": enums,
+                "capabilities": hermes_capabilities(),
+                "source": self.config_source}
+
+    async def _drain_pools(self) -> None:
+        """等推理池在途任务跑完(单 worker → no-op 排在其后),防推理中卸载 use-after-free。"""
+        loop = asyncio.get_running_loop()
+        for pool in (self._asr_pool, self._tts_pool):
+            try:
+                await loop.run_in_executor(pool, lambda: None)
+            except Exception:
+                pass
+
+    async def _apply_tts(self, tts_value) -> bool:
+        """切运行 TTS 引擎。edge 兜底与 melo 单独都需要 Melo 模型常驻。"""
+        loop = asyncio.get_running_loop()
+        engine = tts_value.get("engine") if isinstance(tts_value, dict) else tts_value
+        if engine not in vconfig.TTS_ENGINES:
+            raise ValueError(f"unknown tts engine: {engine}")
+        if not self.melo.loaded:
+            await loop.run_in_executor(None, self.melo.load)
+        self.tts_engine = engine
+        if engine == "edge" and isinstance(tts_value, dict) and tts_value.get("voice"):
+            self.edge_voice = tts_value["voice"]
+        return True
+
+    async def _apply_asr(self, asr_value) -> bool:
+        """切运行 ASR 引擎。P0b 仅 sensevoice —— 不拆当前唯一引擎;P3 在此 unload+load+trim。"""
+        loop = asyncio.get_running_loop()
+        name = asr_value.get("asr") if isinstance(asr_value, dict) else asr_value
+        if name not in vconfig.ASR_ENGINES:
+            raise ValueError(f"unknown asr engine: {name}")
+        if not self.asr.loaded:
+            await loop.run_in_executor(None, self.asr.load)
+        self.asr_engine = name
+        return True
+
+    def _apply_config_pair_runtime(self) -> None:
+        """把运行引擎拉回 config pair(退出 DEBUG / 清 ephemeral 覆盖时)。"""
+        pair = vconfig.current_pair(self.config)
+        self.asr_engine = pair["asr"]
+        self.tts_engine = pair["tts"].get("engine", "edge")
+        if pair["tts"].get("voice"):
+            self.edge_voice = pair["tts"]["voice"]
+
+    async def switch_engine(self, axis: str, value, ephemeral: bool,
+                            job_id: str) -> None:
+        """唯一切换路径(HTTP 层已 try_begin 抢到锁)。冻结→drain→卸旧/载新→
+        成功落盘(或 ephemeral 只切运行)→报真实 applied(可能 degraded)。"""
+        prev_pair = vconfig.effective_pair(self.config, self.override.get())
+        prev_engine = prev_pair["tts"]["engine"] if axis == "tts" else prev_pair["asr"]
+        target = value.get("engine") if isinstance(value, dict) else value
+        self._switch_prev_state = self.state
+        self.emit("job", job_id=job_id, phase="start", axis=axis, target=target,
+                  ephemeral=bool(ephemeral))
+        new_loaded = False
+        old_reloaded = False
+        try:
+            # 冻结:中断在途轮次/播放(gen++、interrupt),再 drain 推理池
+            await self._abort_playback()
+            self.set_state(SWITCHING)
+            await self._drain_pools()
+            try:
+                if axis == "tts":
+                    new_loaded = await self._apply_tts(value)
+                elif axis == "asr":
+                    new_loaded = await self._apply_asr(value)
+                else:
+                    raise ValueError(f"axis {axis} not switchable")
+            except Exception as exc:                             # noqa: BLE001
+                self.emit("error", message=f"switch {axis} failed: {exc}")
+                new_loaded = False
+                try:                                             # 尽力重载旧引擎
+                    if axis == "tts":
+                        old_reloaded = await self._apply_tts(prev_pair["tts"])
+                    elif axis == "asr":
+                        old_reloaded = await self._apply_asr(prev_pair["asr"])
+                except Exception:                                # noqa: BLE001
+                    old_reloaded = False
+            result = vswitch.resolve_switch(prev_engine, target, new_loaded,
+                                            old_reloaded)
+            if result["persist"] and not ephemeral:
+                self.config = vconfig.apply_axis(self.config, axis, value)
+                try:
+                    vconfig.save_config(self.config)
+                except OSError as exc:
+                    self.emit("error", message=f"config save failed: {exc}")
+                self.override.clear()      # 落盘后 config 即真相,清调试覆盖
+            elif result["status"] == "ok" and ephemeral:
+                self.override.set(axis, value)  # 调试态:只切运行引擎不落盘
+            self.emit("job", job_id=job_id, phase="done", axis=axis,
+                      status=result["status"], applied=result["applied"],
+                      drift=self.drift())
+        finally:
+            # 恢复状态机:调试态回 DEBUG(续采集),否则回 IDLE(切换已中断对话)
+            if self._switch_prev_state == DEBUG:
+                self.set_state(DEBUG)
+                await self.start_capture()
+            else:
+                self.set_state(IDLE)
+                await self.stop_capture()
+            self.switcher.end()
+
+    # ------------------------------------------------------------------ #
+    # VAD 切换:先卸后载(MB 级,不做 malloc_trim 大动作),复用切换执行器序。§5.2
+    # HTTP 层已校验引擎可用 + try_begin 抢锁。失败保旧 VAD,报真实 applied。
+    # ------------------------------------------------------------------ #
+    async def switch_vad(self, value, ephemeral: bool, job_id: str) -> None:
+        target = value.get("engine")
+        self._switch_prev_state = self.state
+        self.emit("job", job_id=job_id, phase="start", axis="vad", target=target,
+                  ephemeral=bool(ephemeral))
+        prev_vad, prev_desc = self.vad, self.vad_desc
+        loop = asyncio.get_running_loop()
+        status = "degraded"
+        applied = None
+        try:
+            await self._abort_playback()
+            self.set_state(SWITCHING)
+            try:
+                new_vad = await loop.run_in_executor(
+                    None, vvad.make_vad, target, value, MODELS)
+                self.vad = new_vad
+                self.vad_desc = vconfig.normalize_vad(value)
+                status, applied = "ok", target
+            except Exception as exc:                          # noqa: BLE001
+                self.emit("error", message=f"switch vad failed: {exc}")
+                self.vad, self.vad_desc = prev_vad, prev_desc  # 保旧 VAD,通路不断
+                status, applied = "reverted", prev_desc.get("engine")
+            if status == "ok" and not ephemeral:
+                self.config = vconfig.apply_axis(self.config, "vad", value)
+                try:
+                    vconfig.save_config(self.config)
+                except OSError as exc:
+                    self.emit("error", message=f"config save failed: {exc}")
+                self._frontend_ephemeral = False
+            elif status == "ok" and ephemeral:
+                self._frontend_ephemeral = True
+            self.emit("job", job_id=job_id, phase="done", axis="vad",
+                      status=status, applied=applied, drift=self.drift())
+        finally:
+            if self._switch_prev_state == DEBUG:
+                self.set_state(DEBUG)
+                await self.start_capture()
+            else:
+                self.set_state(IDLE)
+                await self.stop_capture()
+            self.switcher.end()
+
+    def apply_audio_gain(self, gain_db, ephemeral: bool) -> float:
+        """数字增益即时生效(无需重建 VAD/推理池,不走切换执行器)。ephemeral=调试态不落盘,
+        退出 DEBUG 还原;否则落盘。返回实际生效值。"""
+        gain = vconfig.clamp_gain(gain_db)
+        self.audio_gain_db = gain
+        if ephemeral:
+            self._frontend_ephemeral = True
+        else:
+            self.config = vconfig.apply_axis(self.config, "audio", {"gain_db": gain})
+            try:
+                vconfig.save_config(self.config)
+            except OSError as exc:
+                self.emit("error", message=f"config save failed: {exc}")
+        return gain
+
+    async def restore_frontend(self) -> None:
+        """退出 DEBUG:把音频前端(VAD + 增益)从 ephemeral 改动还原回 config。VAD 引擎/
+        参数变了才重建。与 tts/asr 的 _apply_config_pair_runtime 同语义。"""
+        if not self._frontend_ephemeral:
+            return
+        self._frontend_ephemeral = False
+        self.audio_gain_db = vconfig.current_audio_gain(self.config)
+        want = vconfig.current_vad(self.config)
+        if want == self.vad_desc:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            self.vad = await loop.run_in_executor(
+                None, vvad.make_vad, want["engine"], want, MODELS)
+            self.vad_desc = want
+        except Exception as exc:                              # noqa: BLE001
+            self.emit("error", message=f"restore vad failed: {exc}")
+
+    # ------------------------------------------------------------------ #
+    # 大脑下发:Hermes yaml 补丁事务(§5.5)。HTTP 层已做前置校验并 try_begin。
+    # 流程:备份 → 补丁 → restart → 就绪轮询 → session 重建 → 真实探针 →
+    # 过则落盘+应用 pair;败则按备份还原、重启、再探针旧模型,全程 feed 回报。
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _atomic_write(path: str, text: str) -> None:
+        d = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".cfg.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    @staticmethod
+    async def _systemctl_restart(unit: str) -> int:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "--user", "restart", unit,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await proc.communicate()
+        return proc.returncode if proc.returncode is not None else -1
+
+    async def _hermes_wait_ready(self, timeout: float) -> bool:
+        """轮询网关 /health 直到 <400 或超时(重启后端口就绪 ≠ 模型可用,后者靠探针)。"""
+        headers = {}
+        if HERMES_KEY:
+            headers["Authorization"] = f"Bearer {HERMES_KEY}"
+        deadline = time.time() + timeout
+        async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=3)) as sess:
+            while time.time() < deadline:
+                try:
+                    async with sess.get(f"{HERMES_BASE}/health",
+                                        headers=headers) as r:
+                        if r.status < 400:
+                            return True
+                except aiohttp.ClientError:
+                    pass
+                await asyncio.sleep(0.5)
+        return False
+
+    async def _brain_probe(self, timeout: float) -> tuple[bool, str]:
+        """真实 1-token completion 探针:临时 session、极短提示,打到当前 provider。
+        任一 assistant token/completed 即通过;error/HTTP/超时即失败(带原因)。
+        端口 200 但错 key/错模型名会在这里被抓住(§5.5 验收门核心)。"""
+        sess_id = f"probe-{int(time.time() * 1000)}"
+        jhead = {}
+        if HERMES_KEY:
+            jhead["Authorization"] = f"Bearer {HERMES_KEY}"
+        shead = dict(jhead)
+        shead["Accept"] = "text/event-stream"
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout_cfg) as sess:
+                try:
+                    async with sess.post(f"{HERMES_BASE}/api/sessions",
+                                         json={"id": sess_id}, headers=jhead) as r:
+                        await r.text()
+                except aiohttp.ClientError:
+                    pass
+                ok, reason = False, "no completion"
+                try:
+                    url = f"{HERMES_BASE}/api/sessions/{sess_id}/chat/stream"
+                    # 关键:Hermes 网关把 provider 的 HTTP 4xx(错模型名/错 key)伪装成
+                    # assistant.completed,content 是 "HTTP 400: ..." 错误串,零 delta、
+                    # 零 output token,且不发 error 事件。所以「过」必须要求真实产出:
+                    # 收到过 assistant.delta,或 completed 且 usage.output_tokens>0。
+                    saw_delta = False
+                    completed_content = None
+                    completed_seen = False
+                    out_tokens = None
+                    async with sess.post(url, json={"message": "回复:好"},
+                                         headers=shead) as resp:
+                        if resp.status >= 400:
+                            body = (await resp.text())[:160]
+                            return False, f"HTTP {resp.status}: {body}"
+                        async for evt, data in self._iter_sse(resp):
+                            if evt == "assistant.delta" and data.get("delta"):
+                                saw_delta = True
+                            elif evt == "assistant.completed":
+                                completed_seen = True
+                                completed_content = data.get("content")
+                            elif evt == "run.completed":
+                                completed_seen = True
+                                out_tokens = (data.get("usage") or {}).get(
+                                    "output_tokens")
+                                break
+                            elif evt == "error":
+                                return False, str(data.get("message",
+                                                           "provider error"))[:160]
+                            elif evt == "done":
+                                break
+                    if saw_delta or (completed_seen and (out_tokens or 0) > 0):
+                        ok, reason = True, "ok"
+                    else:
+                        # 伪装失败:把 completed 里的错误串原样报出(通常带 HTTP 4xx)
+                        ok = False
+                        reason = str(completed_content
+                                     or "empty completion (0 output tokens)")[:160]
+                finally:
+                    try:
+                        async with sess.delete(
+                                f"{HERMES_BASE}/api/sessions/{sess_id}",
+                                headers=jhead) as r:
+                            await r.text()
+                    except aiohttp.ClientError:
+                        pass
+                return ok, reason
+        except asyncio.TimeoutError:
+            return False, f"timeout >{timeout:g}s"
+        except Exception as exc:                             # noqa: BLE001
+            return False, f"probe error: {exc}"
+
+    async def _revert_brain(self, orig_text: str, prev_name: str,
+                            job_id: str, reason: str) -> None:
+        """按备份还原 yaml、重启网关、重建 session、再探针旧模型,feed 报出原因。"""
+        try:
+            self._atomic_write(HERMES_YAML, orig_text)
+        except OSError as exc:
+            self.emit("error", message=f"yaml restore failed: {exc}")
+        await self._systemctl_restart(HERMES_UNIT)
+        await self._hermes_wait_ready(HERMES_READY_TIMEOUT)
+        await self.ensure_hermes_session()
+        ok, preason = await self._brain_probe(HERMES_PROBE_TIMEOUT)
+        self.emit("job", job_id=job_id, phase="reverted", axis="brain",
+                  status="reverted", preset=prev_name, reason=reason,
+                  old_probe=("ok" if ok else preason), drift=self.drift())
+
+    async def switch_brain(self, preset_name: str, job_id: str) -> None:
+        presets = self.config.get("presets") or {}
+        preset = presets.get(preset_name)
+        prev_name = vconfig.current_preset_name(self.config)
+        self._switch_prev_state = self.state
+        self.emit("job", job_id=job_id, phase="start", axis="brain",
+                  target=preset_name)
+        orig_text = None
+        try:
+            await self._abort_playback()
+            self.set_state(SWITCHING)
+            self.emit("job", job_id=job_id, phase="precheck", axis="brain",
+                      target=preset_name)
+            with open(HERMES_YAML, "r", encoding="utf-8") as fh:
+                orig_text = fh.read()
+            h8 = hashlib.sha256(orig_text.encode("utf-8")).hexdigest()[:8]
+            bak_path = f"{HERMES_YAML}.{h8}.bak"
+            try:
+                if not os.path.exists(bak_path):
+                    self._atomic_write(bak_path, orig_text)
+            except OSError as exc:
+                self.emit("error", message=f"backup failed: {exc}")
+            try:
+                new_text = vbrain.plan_yaml_patch(orig_text, preset_name, preset)
+            except vbrain.BrainError as exc:
+                self.emit("job", job_id=job_id, phase="reverted", axis="brain",
+                          status="error", reason=f"patch refused: {exc}")
+                return
+            self.emit("job", job_id=job_id, phase="patch", axis="brain",
+                      target=preset_name)
+            self._atomic_write(HERMES_YAML, new_text)
+            self.emit("job", job_id=job_id, phase="restart", axis="brain",
+                      target=preset_name)
+            rc = await self._systemctl_restart(HERMES_UNIT)
+            if not await self._hermes_wait_ready(HERMES_READY_TIMEOUT):
+                await self._revert_brain(
+                    orig_text, prev_name, job_id,
+                    f"gateway not ready in {HERMES_READY_TIMEOUT:g}s (rc={rc})")
+                return
+            await self.ensure_hermes_session()
+            self.emit("job", job_id=job_id, phase="probe", axis="brain",
+                      target=preset_name)
+            ok, reason = await self._brain_probe(HERMES_PROBE_TIMEOUT)
+            if not ok:
+                await self._revert_brain(orig_text, prev_name, job_id,
+                                         f"probe failed: {reason}")
+                return
+            self.config = vconfig.apply_axis(
+                self.config, "brain", {"kind": "hermes", "preset": preset_name})
+            try:
+                vconfig.save_config(self.config)
+            except OSError as exc:
+                self.emit("error", message=f"config save failed: {exc}")
+            self._apply_config_pair_runtime()
+            self.override.clear()
+            self.emit("job", job_id=job_id, phase="done", axis="brain",
+                      status="ok", preset=preset_name, drift=self.drift(),
+                      capabilities=hermes_capabilities())
+        except Exception as exc:                             # noqa: BLE001
+            if orig_text is not None:
+                await self._revert_brain(orig_text, prev_name, job_id,
+                                         f"unexpected: {exc}")
+            else:
+                self.emit("job", job_id=job_id, phase="reverted", axis="brain",
+                          status="error", reason=f"unexpected: {exc}")
+        finally:
+            if self._switch_prev_state == DEBUG:
+                self.set_state(DEBUG)
+                await self.start_capture()
+            else:
+                self.set_state(IDLE)
+                await self.stop_capture()
+            self.switcher.end()
+
+    # ------------------------------------------------------------------ #
+    # Vision 模型切换(P2.6):代理 vlm-daemon POST /model,进度/结局转成 job feed。
+    # 切模型只重启 llama-server(与对话用的 hermes 无关),故不冻结状态机/不打断对话。
+    # switcher 锁串行化(HTTP 层已 try_begin);vlm 侧另有 busy 标志防并发。
+    # ------------------------------------------------------------------ #
+    async def switch_vision(self, model_id: str, job_id: str) -> None:
+        self.emit("job", job_id=job_id, phase="start", axis="vision",
+                  target=model_id)
+        token = _load_vlm_token()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            self.emit("job", job_id=job_id, phase="restart", axis="vision",
+                      target=model_id)
+            async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=VLM_MODEL_TIMEOUT)) as sess:
+                async with sess.post(f"{VLM_BASE}/model",
+                                     json={"id": model_id}, headers=headers) as r:
+                    try:
+                        data = await r.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        data = {"status": "error",
+                                "error": f"vlm HTTP {r.status}: {(await r.text())[:160]}"}
+            status = data.get("status")
+            if status == "ok":
+                self.config = vconfig.apply_axis(
+                    self.config, "vision", {"model": model_id})
+                try:
+                    vconfig.save_config(self.config)
+                except OSError as exc:
+                    self.emit("error", message=f"config save failed: {exc}")
+                self.emit("job", job_id=job_id, phase="done", axis="vision",
+                          status="ok", active=data.get("active"),
+                          load_s=data.get("load_s"))
+            else:
+                # reverted / degraded / error — surface the real vlm outcome
+                self.emit("job", job_id=job_id, phase="reverted", axis="vision",
+                          status=status or "error",
+                          reason=data.get("error") or data.get("reason"),
+                          active=data.get("active"),
+                          old_probe=data.get("old_probe"))
+        except Exception as exc:                             # noqa: BLE001
+            self.emit("job", job_id=job_id, phase="reverted", axis="vision",
+                      status="error", reason=f"vlm unreachable: {exc}")
+        finally:
+            self.switcher.end()
+
+    # ------------------------------------------------------------------ #
+    # 转写台 DEBUG 态开关 §5.4
+    # ------------------------------------------------------------------ #
+    async def set_debug(self, on: bool) -> None:
+        if on:
+            if self.state in (LISTENING, THINKING, SPEAKING):
+                # 与对话互斥:先内部停对话并向 feed 广播,再进 DEBUG
+                await self.do_stop()
+                self.emit("debug", status="took_over", message="对话被转写台终止")
+            self.debug_tail.clear()
+            self.set_state(DEBUG)
+            await self.start_capture()
+        else:
+            if self.state == DEBUG:
+                self.set_state(IDLE)
+                await self.stop_capture()
+            # 退出 DEBUG:ephemeral 引擎改动自动还原为 config pair;音频前端(VAD+增益)同理
+            self._apply_config_pair_runtime()
+            self.override.clear()
+            await self.restore_frontend()
+
+    # ------------------------------------------------------------------ #
+    # Vision 播报桥(板端后台任务)§5.6
+    # ------------------------------------------------------------------ #
+    def _vision_can_speak(self) -> bool:
+        if self.state in (DEBUG, SWITCHING, THINKING):
+            return False
+        if self.turn_task and not self.turn_task.done():   # 对话进行中,对话优先
+            return False
+        if self.say_task and not self.say_task.done():     # 正在播上一条,丢弃新帧不排队
+            return False
+        return True
+
+    async def set_vision_speak(self, on: bool) -> None:
+        if on and (self.vision_task is None or self.vision_task.done()):
+            self.caption_dedup = vswitch.CaptionDedup(limit=self._vision_limit())
+            self.vision_task = asyncio.create_task(self._vision_bridge_loop())
+            self.emit("vision", status="on")
+        elif not on and self.vision_task and not self.vision_task.done():
+            self.vision_task.cancel()
+            self.vision_task = None
+            self.emit("vision", status="off")
+
+    async def _vision_bridge_loop(self) -> None:
+        """轮询 vlm caption(先 POST watch 保活,1.5s 间隔),seq/frame_ts 去重 + >120 截断,
+        经 say 走 latest-wins;对话/DEBUG 时暂停;vlm 不可达静默重试不刷错误。"""
+        token = _load_vlm_token()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        last_watch = 0.0
+        try:
+            async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=8)) as sess:
+                while True:
+                    try:
+                        now = time.time()
+                        if now - last_watch > 30.0:      # 保活:周期 promote watch
+                            try:
+                                async with sess.post(
+                                        f"{VLM_BASE}/state",
+                                        json={"state": "watch"}, headers=headers) as r:
+                                    await r.read()
+                                last_watch = now
+                            except aiohttp.ClientError:
+                                pass
+                        async with sess.get(f"{VLM_BASE}/caption",
+                                            headers=headers) as r:
+                            cap = await r.json() if r.status < 400 else None
+                        text = self.caption_dedup.accept(cap) if cap else None
+                        if text and self._vision_can_speak():
+                            self.emit("vision_caption", text=text)
+                            await self.do_say(text)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:                    # noqa: BLE001
+                        pass                             # vlm 不可达:静默重试
+                    await asyncio.sleep(1.5)
+        except asyncio.CancelledError:
+            return
+
+    # ------------------------------------------------------------------ #
+    # 一键回环自检:已知人声 wav 直接喂 VAD+ASR 全链(不用麦克风)§P2.5
+    # ------------------------------------------------------------------ #
+    def _selftest_sync(self) -> tuple[int, str, bool]:
+        """在 asr_pool 里跑:读测试 wav → (数字增益) → 独立 VAD 截段 → 逐段 ASR → 拼接。
+        走当前选中的 VAD 引擎 + 当前增益(与在线通路一致),独立实例绝不碰 daemon 的在线
+        VAD 状态。无段则整段兜底解码 —— 这是「验证 VAD 效果」的一键途径。
+        逐块采样 vad.active,回报是否真实翻转过(证明 in-speech 状态对该引擎生效)。"""
+        samples = vvad.apply_gain(_read_wav_16k(SELFTEST_WAV), self.audio_gain_db)
+        vad = vvad.make_vad(self.vad_desc["engine"], self.vad_desc, MODELS)
+        texts: list[str] = []
+        n = 0
+        active_seen = False
+        step = int(0.32 * 16000)
+
+        def _run(segs) -> None:
+            nonlocal n
+            for seg in segs:
+                n += 1
+                texts.append(self.asr.transcribe(seg))
+
+        for i in range(0, len(samples), step):
+            _run(vad.feed(samples[i:i + step]))
+            active_seen = active_seen or vad.active
+        _run(vad.flush())
+        asr_text = "".join(t for t in texts if t).strip()
+        if not asr_text:                                     # 没截出段 → 整段兜底
+            asr_text = self.asr.transcribe(samples)
+        return n, asr_text, active_seen
+
+    async def run_selftest(self) -> dict:
+        if not os.path.exists(SELFTEST_WAV):
+            return {"error": f"selftest wav missing: {SELFTEST_WAV}", "pass": False}
+        if not self.asr.loaded:
+            return {"error": "asr engine not loaded", "pass": False}
+        expected = SELFTEST_DEFAULT_TEXT
+        try:
+            with open(SELFTEST_TXT, "r", encoding="utf-8") as fh:
+                t = fh.read().strip()
+                if t:
+                    expected = t
+        except OSError:
+            pass
+        loop = asyncio.get_running_loop()
+        try:
+            segs, asr_text, active_seen = await loop.run_in_executor(
+                self._asr_pool, self._selftest_sync)
+        except Exception as exc:                             # noqa: BLE001
+            self.emit("error", message=f"selftest failed: {exc}")
+            return {"error": f"selftest failed: {exc}", "pass": False}
+        ratio = round(vobs.similarity(asr_text, expected), 3)
+        ok = ratio >= 0.5
+        result = {"vad_segments": segs, "asr_text": asr_text,
+                  "expected": expected, "ratio": ratio, "pass": ok,
+                  "vad_engine": self.vad_desc.get("engine"),
+                  "vad_active_seen": bool(active_seen),
+                  "gain_db": round(self.audio_gain_db, 1)}
+        self.emit("selftest", **result)
+        return result
+
     def health(self) -> dict:
         return {
             "state": self.state,
             "audio": "ok" if self.audio_ok else "missing",
             "capture_card": self.cap_card,
             "playback_card": self.play_card,
-            "asr_loaded": self.asr_loaded,
-            "tts_local_loaded": self.tts_local_loaded,
+            "asr_loaded": self.asr.loaded,
+            "tts_local_loaded": self.melo.loaded,
             "edge_breaker": time.time() < self.breaker_until,
             "ffmpeg": bool(FFMPEG),
             "hermes_key": bool(HERMES_KEY),
@@ -1163,6 +2190,25 @@ class Daemon:
             "mem_rss_mb": _rss_mb(),
             "last_error": self.last_error,
             "uptime": round(time.time() - START_TS, 1),
+            "turn_id": self.turn_id,
+            # ASR 段级统计(daemon 启动起累计):VAD 截段总数 + 各结局分布
+            "asr_stats": self.asr_stats.snapshot(),
+            "vad_stats": {"chunks": self.vad_chunks, "errors": self.vad_errors,
+                          "last_error": self.vad_last_error},
+            # VAD 圆点:当前是否处于开段中(在听)。GUI 据此点绿灯。
+            "vad_active": bool(self.vad.active) if self.vad is not None else False,
+            "vad_engine": self.vad_desc.get("engine"),
+            "audio_gain_db": round(self.audio_gain_db, 1),
+            # 统一 config 三态 + 引擎状态(desired/applied/drift)
+            "desired": {"brain": self.config.get("brain"),
+                        "vision_speak": bool(self.config.get("vision_speak")),
+                        "vision_speak_limit": self._vision_limit(),
+                        "pair": vconfig.current_pair(self.config)},
+            "applied": self.applied_engines(),
+            "drift": self.drift(),
+            "engines": {"asr_loaded": self.asr.loaded, "melo_loaded": self.melo.loaded,
+                        "tts_engine": self.tts_engine, "edge_voice": self.edge_voice},
+            "vision_speak": bool(self.vision_task and not self.vision_task.done()),
         }
 
 
@@ -1247,20 +2293,189 @@ async def h_simulate(request: web.Request) -> web.Response:
     if not text:
         return web.json_response({"error": "text required"}, status=400)
     gen = DAEMON.generation
+    DAEMON.turn_id += 1
     DAEMON.emit("user_text", text=text)
     DAEMON.turn_task = asyncio.create_task(DAEMON.run_turn(gen, text))
     return web.json_response({"ok": True})
 
 
+async def h_config_get(request: web.Request) -> web.Response:
+    """GET /config → 全量 desired + applied + drift + 各轴枚举(含 edge 音色表)。"""
+    return web.json_response(DAEMON.config_view())
+
+
+async def h_config_post(request: web.Request) -> web.Response:
+    """POST /config:按轴整体替换。engine 轴(asr/tts)→ 202+job(进度走 feed);
+    vision_speak → 立即落盘 + 起停桥;brain → P2(400)。"""
+    body = await _json_body(request)
+    axis = body.get("axis")
+    value = body.get("value")
+    ephemeral = bool(body.get("ephemeral"))
+    if axis == "brain":
+        return web.json_response({"error": "brain switch uses POST /brain"},
+                                 status=400)
+    if axis == "vision_speak":
+        DAEMON.config = vconfig.apply_axis(DAEMON.config, "vision_speak", value)
+        try:
+            vconfig.save_config(DAEMON.config)
+        except OSError as exc:
+            return web.json_response({"error": f"config save failed: {exc}"},
+                                     status=500)
+        await DAEMON.set_vision_speak(bool(value))
+        return web.json_response({"ok": True, "vision_speak": bool(value)})
+    if axis == "vision_speak_limit":
+        DAEMON.config = vconfig.apply_axis(DAEMON.config, "vision_speak_limit", value)
+        try:
+            vconfig.save_config(DAEMON.config)
+        except OSError as exc:
+            return web.json_response({"error": f"config save failed: {exc}"},
+                                     status=500)
+        DAEMON.caption_dedup.limit = DAEMON._vision_limit()   # 即时对在跑的桥生效
+        return web.json_response({"ok": True,
+                                  "vision_speak_limit": DAEMON._vision_limit()})
+    if axis == "vision":
+        model_id = value.get("model") if isinstance(value, dict) else value
+        if not model_id or not isinstance(model_id, str):
+            return web.json_response(
+                {"error": "vision axis needs value {model:<id>}"}, status=400)
+        job_id = DAEMON.new_job_id()
+        if not DAEMON.switcher.try_begin(job_id):
+            return web.json_response(
+                {"error": "switch in progress", "job_id": DAEMON.switcher.job_id},
+                status=409)
+        asyncio.create_task(DAEMON.switch_vision(model_id, job_id))
+        return web.json_response({"job_id": job_id, "state": "switching"}, status=202)
+    if axis == "audio":
+        gain = value.get("gain_db") if isinstance(value, dict) else value
+        applied = DAEMON.apply_audio_gain(gain, ephemeral)
+        return web.json_response({"ok": True, "gain_db": applied,
+                                  "ephemeral": ephemeral})
+    if axis == "vad":
+        engine = value.get("engine") if isinstance(value, dict) else value
+        if engine not in vconfig.VAD_ENGINES:
+            return web.json_response({"error": f"unknown vad engine: {engine}"},
+                                     status=400)
+        # 不可用引擎明确拒绝,不静默换别的(硬纪律)。
+        if not vvad.availability(MODELS).get(engine):
+            return web.json_response(
+                {"error": f"vad engine unavailable on this board: {engine}"},
+                status=400)
+        job_id = DAEMON.new_job_id()
+        if not DAEMON.switcher.try_begin(job_id):
+            return web.json_response(
+                {"error": "switch in progress", "job_id": DAEMON.switcher.job_id},
+                status=409)
+        asyncio.create_task(DAEMON.switch_vad(value, ephemeral, job_id))
+        return web.json_response({"job_id": job_id, "state": "switching"}, status=202)
+    if axis not in ("asr", "tts"):
+        return web.json_response({"error": f"unknown axis: {axis}"}, status=400)
+    job_id = DAEMON.new_job_id()
+    if not DAEMON.switcher.try_begin(job_id):
+        return web.json_response(
+            {"error": "switch in progress", "job_id": DAEMON.switcher.job_id},
+            status=409)
+    asyncio.create_task(DAEMON.switch_engine(axis, value, ephemeral, job_id))
+    return web.json_response({"job_id": job_id, "state": "switching"}, status=202)
+
+
+async def h_brain(request: web.Request) -> web.Response:
+    """POST /brain {preset}:大脑 preset 切换 → 202+job(流程见 §5.5,进度走 feed)。
+    前置(同步、拒则不建 job):preset 存在、state∈{IDLE,DEBUG}、preset 校验过、
+    key_env 在 .env 存在非空。任一不过 → 400/409 明确原因,key 值永不出现。"""
+    body = await _json_body(request)
+    preset_name = body.get("preset")
+    presets = DAEMON.config.get("presets") or {}
+    if preset_name not in presets:
+        return web.json_response({"error": f"unknown preset: {preset_name}"},
+                                 status=400)
+    if DAEMON.state not in (IDLE, DEBUG):
+        return web.json_response(
+            {"error": "先停对话再切大脑", "state": DAEMON.state}, status=409)
+    preset = presets[preset_name]
+    try:
+        vbrain.validate_preset(preset_name, preset)
+    except vbrain.BrainError as exc:
+        return web.json_response({"error": f"preset invalid: {exc}"}, status=400)
+    key_env = preset.get("key_env")
+    if not _hermes_env_has(key_env):
+        return web.json_response(
+            {"error": f"{key_env} 未在 {HERMES_ENV} 配置或为空 —— 先手工写入 key 再切"},
+            status=409)
+    job_id = DAEMON.new_job_id()
+    if not DAEMON.switcher.try_begin(job_id):
+        return web.json_response(
+            {"error": "switch in progress", "job_id": DAEMON.switcher.job_id},
+            status=409)
+    asyncio.create_task(DAEMON.switch_brain(preset_name, job_id))
+    return web.json_response({"job_id": job_id, "state": "switching"}, status=202)
+
+
+async def h_asr_debug(request: web.Request) -> web.Response:
+    """POST /asr_debug {on:1|0}:进/出 DEBUG 转写台(与对话互斥)。"""
+    body = await _json_body(request)
+    on = body.get("on")
+    on = str(on).lower() not in ("0", "false", "no", "none", "") if on is not None else True
+    await DAEMON.set_debug(on)
+    return web.json_response({"state": DAEMON.state, "debug": DAEMON.state == DEBUG})
+
+
+async def h_asr_debug_tail(request: web.Request) -> web.Response:
+    """GET /asr_debug/tail?since=<seq> → 转写增量(独立环,不挤 200 条 feed 环)。"""
+    try:
+        since = int(request.query.get("since", "0"))
+    except ValueError:
+        since = 0
+    return web.json_response(DAEMON.debug_tail.since(since))
+
+
+async def h_asr_debug_seg(request: web.Request) -> web.Response:
+    """GET /asr_debug/seg?id=<seg_id> → {wav_b64}(16k mono wav base64)。段已被环形
+    覆盖/不存在 → 404。供转写台段行「▶ 听」回放。"""
+    try:
+        sid = int(request.query.get("id", "0"))
+    except ValueError:
+        sid = 0
+    b64 = DAEMON.seg_store.read_b64(sid)
+    if b64 is None:
+        return web.json_response({"error": "segment not found", "id": sid},
+                                 status=404)
+    return web.json_response({"wav_b64": b64})
+
+
+async def h_asr_debug_seg_play(request: web.Request) -> web.Response:
+    """POST /asr_debug/seg_play {id} → 板上 aplay 放段(机器人音响),播放期闸采集防回录。
+    段不存在 404;音响不可用 409;aplay 非零 500。供转写台段行「▶ 听」板上播。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        sid = int(body.get("id", 0))
+    except (ValueError, TypeError):
+        sid = 0
+    result = await DAEMON.play_seg(sid)
+    status = result.pop("status", 200)
+    return web.json_response(result, status=status)
+
+
+async def h_selftest(request: web.Request) -> web.Response:
+    """POST /selftest → 已知人声 wav 喂 VAD+ASR 全链(绕过麦克风),返回
+    {vad_segments, asr_text, expected, ratio, pass}。MCP01 不在也能跑。"""
+    return web.json_response(await DAEMON.run_selftest())
+
+
 async def h_feed(request: web.Request) -> web.Response:
-    """GET /feed?since=<seq> → {events:[...], last_seq:N}。since 缺省=0 返回全部现存。
-    GUI 走 Rust 代理无法直连 SSE,以 2-3Hz 轮询增量。"""
+    """GET /feed?since=<seq> → {events:[...], last_seq:N, oldest_seq:N}。since 缺省=0
+    返回全部现存;oldest_seq 让 GUI 检测事件丢失(环被覆盖)。GUI 走 Rust 代理无法
+    直连 SSE,以 2-3Hz 轮询增量。"""
     try:
         since = int(request.query.get("since", "0"))
     except ValueError:
         since = 0
     events = [e for e in DAEMON.feed_ring if e["seq"] > since]
-    return web.json_response({"events": events, "last_seq": DAEMON.feed_seq})
+    oldest = DAEMON.feed_ring[0]["seq"] if DAEMON.feed_ring else 0
+    return web.json_response({"events": events, "last_seq": DAEMON.feed_seq,
+                              "oldest_seq": oldest})
 
 
 async def h_events(request: web.Request) -> web.StreamResponse:
@@ -1302,6 +2517,14 @@ def make_app() -> web.Application:
     app.router.add_post("/interrupt", h_interrupt)
     app.router.add_post("/say", h_say)
     app.router.add_post("/simulate", h_simulate)
+    app.router.add_get("/config", h_config_get)
+    app.router.add_post("/config", h_config_post)
+    app.router.add_post("/brain", h_brain)
+    app.router.add_post("/asr_debug", h_asr_debug)
+    app.router.add_get("/asr_debug/tail", h_asr_debug_tail)
+    app.router.add_get("/asr_debug/seg", h_asr_debug_seg)
+    app.router.add_post("/asr_debug/seg_play", h_asr_debug_seg_play)
+    app.router.add_post("/selftest", h_selftest)
     app.router.add_get("/feed", h_feed)
     app.router.add_get("/events", h_events)
     return app
@@ -1311,16 +2534,28 @@ async def _on_start(app: web.Application) -> None:
     await DAEMON.discover_audio()
     await DAEMON.load_models()
     await DAEMON.ensure_hermes_session()
+    # 启动恢复:config.json 大脑 preset 与 config.yaml 模型不一致(人手改/崩溃残局)
+    # → 只报 drift 不自动选边(§5.5)。
+    _bd = DAEMON.brain_drift()
+    if _bd:
+        DAEMON.emit("drift", axis="brain", desired=_bd["desired"],
+                    applied=_bd["applied"],
+                    message="config.json 大脑与 config.yaml 模型不一致,待人处置")
+        print(f"[voice-daemon] brain drift at startup: {_bd}", flush=True)
     app["tasks"] = [
         asyncio.create_task(DAEMON.deadline_loop()),
         asyncio.create_task(DAEMON.audio_watch_loop()),
         asyncio.create_task(DAEMON.breaker_probe_loop()),
     ]
+    # config 里 vision_speak=true 则起板端播报桥(不依赖 GUI 哪个 Tab 可见)
+    if DAEMON.config.get("vision_speak"):
+        await DAEMON.set_vision_speak(True)
 
 
 async def _on_cleanup(app: web.Application) -> None:
     await DAEMON._abort_playback()
     await DAEMON.stop_capture()
+    await DAEMON.set_vision_speak(False)
     for t in app.get("tasks", []):
         t.cancel()
 

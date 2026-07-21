@@ -1,0 +1,5 @@
+# MCP01 USB speakerphone (17ef:a03b) HID control endpoint. voice-daemon writes an
+# Off-Hook output report to /dev/hidraw* to take the device out of idle — idle drops
+# the mic ~30dB and Silero stops detecting speech. World-writable so the jetson user
+# service can open it without root (same rationale as 56-orbbec-usb.rules).
+KERNEL=="hidraw*", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="a03b", MODE="0666"

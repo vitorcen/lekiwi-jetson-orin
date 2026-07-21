@@ -11,8 +11,12 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-BOARD = pathlib.Path(__file__).resolve().parents[1] / 'board' / 'home' / 'jetson'
-sys.path[:0] = [str(BOARD), str(BOARD / 'ros2')]
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BOARD = ROOT / 'board' / 'home' / 'jetson'
+# voice/ holds the pure logic modules (voice_config / voice_switching); expose them
+# so `import voice_config` works off-board with no sherpa/aiohttp.
+sys.path[:0] = [str(BOARD), str(BOARD / 'ros2'), str(ROOT / 'voice'),
+                str(ROOT / 'vlm')]
 
 
 class _Node:

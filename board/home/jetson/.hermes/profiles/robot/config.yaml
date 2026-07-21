@@ -1,43 +1,83 @@
-# LeKiwi robot profile — Hermes v0.18.2 (e598cef8), fields verified against source.
-# Security: toolset trimming is layer 1 of 4 (profile → MCP schema → base_host arbiter → e-stop).
-
 model:
-  provider: "custom:deepseek"
-  default: "deepseek-v4-flash"
-
+  provider: custom:mimo
+  default: mimo-v2.5
 providers:
   deepseek:
-    api: "https://api.deepseek.com"
-    key_env: "DEEPSEEK_API_KEY"
-    default_model: "deepseek-v4-flash"
-    transport: "openai_chat"
-
+    api: https://api.deepseek.com
+    key_env: DEEPSEEK_API_KEY
+    default_model: deepseek-v4-flash
+    transport: openai_chat
+  mimo:
+    api: https://api.xiaomimimo.com/v1
+    key_env: XIAOMI_API_KEY
+    default_model: mimo-v2.5
+    transport: openai_chat
 agent:
   max_turns: 40
   api_max_retries: 3
-  # Kill-list applied last, overrides everything: no shell, no file writes,
-  # no browser, no self-scheduling, no skill installation.
-  disabled_toolsets: [terminal, file, browser, cronjob, skills_hub]
-
-platform_toolsets:
-  cli: [web, vision, todo, skills]
-
+  disabled_toolsets:
+  - terminal
+  - file
+  - browser
+  - cronjob
+  - skills_hub
 skills:
   creation_nudge_interval: 0
-
-# Read-only vision MCP (vlm_look / vlm_last_caption / vlm_health).
-# Captions are untrusted observations — never a motion trigger (plan §safety).
+_config_version: 33
+platform_toolsets:
+  cli:
+  - web
+  - vision
+  - todo
+  - skills
 mcp_servers:
   vlm:
     command: /home/jetson/work/lekiwi-jetson-orin/vlm/.venv/bin/python
-    args: ["/home/jetson/work/lekiwi-jetson-orin/vlm/mcp_server.py"]
+    args:
+    - /home/jetson/work/lekiwi-jetson-orin/vlm/mcp_server.py
     timeout: 60
     max_tool_calls: 50
-  # Drive: layer-2 schema hard-clamp (≤0.15 m/s, ≤2 s, 0.3 s cooldown); the
-  # base_host 0.5 s watchdog backstops a dead MCP. Mounted 2026-07-19 with the
-  # owner supervising; unattended operation still gated on base_host v2 arbiter.
   drive:
     command: /home/jetson/work/lekiwi-jetson-orin/vlm/.venv/bin/python
-    args: ["/home/jetson/work/lekiwi-jetson-orin/drive/mcp_server.py"]
+    args:
+    - /home/jetson/work/lekiwi-jetson-orin/drive/mcp_server.py
     timeout: 30
     max_tool_calls: 30
+
+# ── Security ──────────────────────────────────────────────────────────
+# Secret redaction is ON by default — strings that look like API keys,
+# tokens, and passwords are masked in tool output, logs, and chat
+# responses before the model or user ever sees them. Set redact_secrets
+# to false to disable (e.g. when developing the redactor itself).
+# tirith pre-exec scanning is enabled by default when the tirith binary
+# is available. Configure via security.tirith_* keys or env vars
+# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
+#
+# security:
+#   redact_secrets: true
+#   tirith_enabled: true
+#   tirith_path: "tirith"
+#   tirith_timeout: 5
+#   tirith_fail_open: true
+
+# ── Fallback Model ────────────────────────────────────────────────────
+# Automatic provider failover when primary is unavailable.
+# Uncomment and configure to enable. Triggers on rate limits (429),
+# overload (529), service errors (503), or connection failures.
+#
+# Supported providers:
+#   openrouter   (OPENROUTER_API_KEY)  — routes to any model
+#   openai-codex (OAuth — hermes auth) — OpenAI Codex
+#   nous         (OAuth — hermes auth) — Nous Portal
+#   zai          (ZAI_API_KEY)         — Z.AI / GLM
+#   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
+#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
+#   minimax      (MINIMAX_API_KEY)     — MiniMax
+#   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
+#   bedrock      (AWS IAM / boto3)     — AWS Bedrock (Converse API)
+#
+# For custom OpenAI-compatible endpoints, add base_url and key_env.
+#
+# fallback_model:
+#   provider: openrouter
+#   model: anthropic/claude-sonnet-4
