@@ -80,9 +80,10 @@ input[type=text] {
   background: #161a26; color: #cdd6f4; border: 1px solid #31344b;
   border-radius: 6px; padding: 5px 9px; font: 13px ui-monospace, monospace;
 }
-/* One width for every board-IP box across the 4 tabs: fits 255.255.255.255
-   without the field sprawling. Ports get their own, narrower, width. */
-#ip, #vip, #voip, #rosip { width: 130px; }
+/* One width for every board-IP box across the tabs: fits a 15-char IPv4 like
+   255.255.255.255 (e.g. 192.168.13.189) without clipping. Ports get their own,
+   narrower, width. */
+#ip, #vip, #voip, #rosip { width: 156px; }
 #port, #rosport { width: 66px; }
 /* Vision service controls: keep buttons + autostart checkbox on one row. */
 .svcbtns { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
@@ -144,6 +145,9 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 .panel h2 { margin: 0 0 4px; font-size: 15px; font-weight: 700; }
 .panel h2 .en { font-size: 12px; font-weight: 400; color: #6b7394; margin-left: 8px; }
 .tip { font-size: 12.5px; color: #8b93b5; margin: 4px 0 16px; }
+/* A tip inside a packed control row: break onto its own full-width line instead
+   of being squeezed into a sliver by the flex siblings. */
+.watchrow .tip { flex-basis: 100%; margin: 2px 0 0; }
 #keypad.focus + * , #keypad.focus { }
 
 /* ---- keypad ---- */
@@ -273,7 +277,7 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 #vmeta b { font-weight: 600; color: #a3abcc; font-variant-numeric: tabular-nums; }
 
 /* caption feed + controls */
-.watchrow { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.watchrow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
 #vlmWatchBtn { border-radius: 7px; padding: 6px 18px; white-space: nowrap; }
 #vlmWatchBtn.live { background: #1e3a2f; color: #7ee2a8; border-color: #2f5e48; }
 #vlmWatchBtn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -281,13 +285,73 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .askrow { display: flex; gap: 8px; margin-bottom: 4px; }
 #vlmAsk { flex: 1; font: 13px system-ui, "Noto Sans CJK SC", sans-serif; }
 #readPanel button.primary { border-radius: 7px; padding: 6px 18px; }
-#capfeed, #vofeed {
+#capfeed, #vofeed, #vlAsrFeed, #vlTtsFeed {
   margin-top: 10px; max-height: 420px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px;
 }
-#aListenBtn, #aIntBtn { border-radius: 7px; padding: 6px 18px; white-space: nowrap; }
-#aListenBtn.live { background: #1e3a2f; color: #7ee2a8; border-color: #2f5e48; }
-#aListenBtn:disabled, #aIntBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+#aListenBtn, #aIntBtn, #vlAsrBtn, #vlTtsBtn { border-radius: 7px; padding: 6px 18px; white-space: nowrap; }
+#aListenBtn.live, #vlAsrBtn.live { background: #1e3a2f; color: #7ee2a8; border-color: #2f5e48; }
+#aListenBtn:disabled, #aIntBtn:disabled, #vlAsrBtn:disabled, #vlTtsBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Agent 大脑条 (read-only this phase; switching is P2) ---- */
+#brainbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: #12162080; border: 1px solid #1c2030; border-radius: 10px;
+  padding: 10px 16px; margin-bottom: 16px;
+}
+#brainbar .bblab { font-size: 13px; font-weight: 600; color: #a3abcc; }
+#aBrainSel {
+  background: #161a26; color: #cdd6f4; border: 1px solid #31344b;
+  border-radius: 6px; padding: 5px 9px; font: 13px system-ui, "Noto Sans CJK SC", sans-serif;
+}
+#aBrainSel:disabled { opacity: 0.7; cursor: not-allowed; }
+#brainbar .bbpair { font: 12.5px ui-monospace, monospace; color: #a6c8ff; }
+#brainbar .bbcap {
+  font: 11.5px ui-monospace, monospace; color: #f9e2af;
+  background: #2a2410; border: 1px solid #4a4020; border-radius: 999px; padding: 1px 8px;
+}
+#brainbar .bbstat { font-size: 12.5px; }
+#brainbar .bbstat.info { color: #a6c8ff; }
+#brainbar .bbstat.ok   { color: #a6e3a1; }
+#brainbar .bbstat.bad  { color: #f38ba8; }
+/* per-bubble answerer badge in the Agent feed */
+.brainbadge {
+  font: 10px ui-monospace, monospace; color: #89b4fa;
+  background: #16233d; border: 1px solid #2a3a5a; border-radius: 999px; padding: 0 6px;
+}
+
+/* ---- Voice 设备状态条 ---- */
+#voicedevbar {
+  display: flex; align-items: center; gap: 10px 18px; flex-wrap: wrap;
+  background: #12162080; border: 1px solid #1c2030; border-radius: 10px;
+  padding: 10px 16px; margin-bottom: 16px; font-size: 12.5px;
+}
+.vdcell { display: flex; align-items: center; gap: 8px; color: #a3abcc; white-space: nowrap; }
+.vdcell .vdico { font-size: 14px; }
+.vdcell .vdlab { color: #a3abcc; }
+.vdcell b { font: 600 12px ui-monospace, monospace; color: #cbe0ff; font-variant-numeric: tabular-nums; min-width: 6ch; }
+.vdpeak { font: 11px ui-monospace, monospace; color: #6b7394; }
+.vdmeter { width: 90px; height: 8px; border-radius: 4px; background: #1c2030; overflow: hidden; flex: none; }
+.vdfill { display: block; height: 100%; width: 0; background: #7ea6e0; transition: width .25s, background .25s; }
+.vdfill.hot { background: #7ee2a8; }
+.vdhint { flex-basis: 100%; font-size: 12px; color: #f9e2af; }
+/* VAD 圆点:静音灰 / 在听绿(呼吸)/ 刚截断黄闪 */
+.vaddot { font-size: 13px; line-height: 1; }
+.vaddot.live { animation: vadpulse 1.1s ease-in-out infinite; }
+.vaddot.flash { animation: none; }
+@keyframes vadpulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* ---- Voice ASR / TTS 调试布局 ---- */
+#voicelabwrap { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1000px) { #voicelabwrap { grid-template-columns: 1fr; } }
+#vlTtsText { flex: 1; font: 13px system-ui, "Noto Sans CJK SC", sans-serif; }
+#vlAsrEngine, #vlTtsEngine, #vlTtsVoice {
+  background: #161a26; color: #cdd6f4; border: 1px solid #31344b;
+  border-radius: 6px; padding: 4px 8px; font: 12.5px system-ui, "Noto Sans CJK SC", sans-serif;
+}
+/* live partial transcript row: dashed accent so it reads as not-yet-committed */
+.cap-partial { border-left-color: #f9e2af; border-left-style: dashed; }
+.cap-partial .capmsg { color: #f9e2af; }
 #aIntBtn { background: #171b2d; color: #f9e2af; border: 1px solid #262b3d; cursor: pointer; }
 #aWin { text-align: center; }
 #aSay { flex: 1; font: 13px system-ui, "Noto Sans CJK SC", sans-serif; }
@@ -310,6 +374,18 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .cap-answer .capmsg { color: #cbe0ff; }
 .cap-error { border-left-color: #f38ba8; }
 .cap-error .capmsg { color: #f38ba8; }
+/* ASR segment rows: outcome-colored left border + inline outcome badge + ▶ button */
+.cap-seg .captext { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.cap-seg .capmeta { flex-basis: 100%; margin-bottom: 1px; }
+.segbadge { font: 11px ui-monospace, monospace; color: #9aa2bf;
+  border: 1px solid #2c3350; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+.seg-accepted { border-left-color: #a6e3a1; }
+.seg-accepted .segbadge { color: #a6e3a1; border-color: #33502c; }
+.seg-empty_asr { border-left-color: #f38ba8; }
+.seg-empty_asr .segbadge { color: #f38ba8; border-color: #50333a; }
+.seg-filler, .seg-too_short { border-left-color: #f9e2af; }
+.seg-filler .segbadge, .seg-too_short .segbadge { color: #f9e2af; border-color: #504a2c; }
+.seg-gate { border-left-color: #6b7394; }
 @media (max-width: 560px) { .caprow { flex-direction: column; } .capthumb { width: 100%; flex: none; } }
 
 /* ===================== 底部通用日志 ===================== */

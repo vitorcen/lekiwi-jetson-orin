@@ -771,6 +771,15 @@ async fn vlm_caption(ip: String) -> Result<String, String> {
         .map_err(|e| format!("vlm task failed: {e}"))?
 }
 
+/// List installed VLM models (id, disk_mb, usable, active) for the model dropdown.
+/// The actual switch goes through the voice-daemon /config vision job, not here.
+#[tauri::command]
+async fn vlm_models(ip: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || vlm_get_text(&ip, "/models", 6))
+        .await
+        .map_err(|e| format!("vlm task failed: {e}"))?
+}
+
 /// Fetch the latest frame plus its metadata headers (X-Fps measured capture
 /// rate, X-Frame-Ts capture wall time). Returns JSON {b64, fps, frame_ts}; the
 /// frontend drops b64 into `img.src = "data:image/jpeg;base64,<...>"` and shows
@@ -874,7 +883,10 @@ fn voice_auth() -> Result<String, String> {
 /// Generic GET proxy: path is fixed by the frontend (health/feed/state only).
 #[tauri::command]
 async fn voice_get(ip: String, path: String) -> Result<String, String> {
-    if !(path == "/health" || path == "/state" || path.starts_with("/feed")) {
+    if !(path == "/health" || path == "/state" || path.starts_with("/feed")
+        || path == "/config" || path.starts_with("/asr_debug/tail")
+        || path.starts_with("/asr_debug/seg"))
+    {
         return Err(format!("bad path: {path}"));
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -896,7 +908,10 @@ async fn voice_get(ip: String, path: String) -> Result<String, String> {
 /// for none); the daemon validates it, we just forward.
 #[tauri::command]
 async fn voice_post(ip: String, path: String, body: String) -> Result<String, String> {
-    if !matches!(path.as_str(), "/listen" | "/stop" | "/interrupt" | "/say" | "/simulate") {
+    if !matches!(path.as_str(),
+        "/listen" | "/stop" | "/interrupt" | "/say" | "/simulate"
+        | "/config" | "/brain" | "/asr_debug" | "/asr_debug/seg_play" | "/selftest")
+    {
         return Err(format!("bad path: {path}"));
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -987,6 +1002,7 @@ fn main() {
             vlm_service,
             vlm_frame,
             vlm_caption,
+            vlm_models,
             vlm_describe,
             vlm_set_state,
             voice_get,

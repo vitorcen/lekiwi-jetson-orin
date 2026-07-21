@@ -3,7 +3,8 @@
 import { S } from './state.js';
 import { onLeaveZmq } from './zmq.js';
 import { onEnterVision, onLeaveVision } from './vision.js';
-import { onEnterVoice, onLeaveVoice } from './voice.js';
+import { onEnterVoice, onLeaveVoice } from './voicelab.js';
+import { onEnterAgent, onLeaveAgent } from './agent.js';
 import { onEnterRos, onLeaveRos } from './ros.js';
 import './leader.js';
 import './log.js';
@@ -24,10 +25,14 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   // enter promotes to watch + starts polling, leave stands it back down.
   if (prev === 'vision' && S.page !== 'vision') onLeaveVision();
   if (S.page === 'vision' && prev !== 'vision') onEnterVision();
-  // Voice: polling only — the conversation window itself lives on the daemon
-  // and survives tab switches (no dead-man on purpose).
+  // Voice (device / ASR / TTS debug page): polling only — /health level meter
+  // and the ASR transcription tail. No session state, purely a debug console.
   if (prev === 'voice' && S.page !== 'voice') onLeaveVoice();
   if (S.page === 'voice' && prev !== 'voice') onEnterVoice();
+  // Agent (Hermes chat, formerly the voice page): polling only — the
+  // conversation window lives on the daemon and survives tab switches.
+  if (prev === 'agent' && S.page !== 'agent') onLeaveAgent();
+  if (S.page === 'agent' && prev !== 'agent') onEnterAgent();
   // ROS preview: read-only rosbridge subscriptions, socket bound to visibility.
   if (prev === 'ros' && S.page !== 'ros') onLeaveRos();
   if (S.page === 'ros' && prev !== 'ros') onEnterRos();

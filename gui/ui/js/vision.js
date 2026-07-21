@@ -142,6 +142,71 @@ function addCaption(text, latencyMs, kind, frameB64) {
   while (feed.childElementCount > 200) feed.removeChild(feed.lastChild);
 }
 
+// ---- VLM model switch ----------------------------------------------------
+
+let switchingModel = false;   // a model switch is mid-flight (poll, don't repaint)
+
+// Populate the dropdown from GET /models (via the vlm daemon). Disabled options
+// for models without a paired mmproj; the active one is selected. Skipped while
+// a switch is in flight so the poller owns the <select> then.
+async function loadModels() {
+  const sel = $('vlmModel');
+  if (!sel || !invoke || switchingModel) return;
+  try {
+    const r = JSON.parse(await invoke('vlm_models', { ip: curIp() }));
+    const models = r.models || [];
+    sel.innerHTML = '';
+    for (const m of models) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      const mb = m.disk_mb != null ? ` (${m.disk_mb}MB)` : '';
+      opt.textContent = m.id + mb + (m.usable ? '' : ' · 缺 mmproj');
+      opt.disabled = !m.usable;
+      opt.selected = !!m.active;
+      sel.append(opt);
+    }
+    sel.disabled = !online || models.length === 0;
+  } catch { /* offline / transient — leave the dropdown as-is */ }
+}
+
+// Change -> switch via the voice-daemon /config vision job (it drives the vlm
+// daemon POST /model and forwards progress to its feed). We don't subscribe to
+// that feed here; instead we poll /models until active flips or we time out.
+$('vlmModel') && ($('vlmModel').onchange = async () => {
+  const sel = $('vlmModel');
+  const id = sel.value;
+  if (!invoke || !id) return;
+  switchingModel = true;
+  sel.disabled = true;
+  addCaption(`切换视觉模型到 ${id}…（冷加载需时,请稍候）`, null, 'ask');
+  try {
+    // voice-daemon proxy (port 8092 on the same board); returns 202 + job_id.
+    await invoke('voice_post', {
+      ip: curIp(), path: '/config',
+      body: JSON.stringify({ axis: 'vision', value: { model: id } }),
+    });
+  } catch (e) {
+    addCaption('切换请求失败: ' + e, null, 'error');
+    switchingModel = false; sel.disabled = false; loadModels(); return;
+  }
+  const deadline = Date.now() + 150000;   // > llama cold-load ceiling
+  let done = false;
+  while (Date.now() < deadline) {
+    await sleep(3000);
+    try {
+      const r = JSON.parse(await invoke('vlm_models', { ip: curIp() }));
+      const act = (r.models || []).find(m => m.active);
+      if (act) {
+        if (act.id === id) { addCaption(`已切换到 ${id}`, null, 'answer'); done = true; break; }
+        if (!r.busy) { addCaption(`切换未生效,仍为 ${act.id}（可能已还原,见语音日志）`, null, 'error'); done = true; break; }
+      }
+    } catch { /* daemon restarting llama — keep polling */ }
+  }
+  if (!done) addCaption('切换超时,请检查板端 llama-server', null, 'error');
+  switchingModel = false;
+  loadModels();
+});
+
 // ---- polling loops -------------------------------------------------------
 
 async function pollHealth() {
@@ -237,6 +302,7 @@ function goOnline() {
   healthTimer = setInterval(pollHealth, HEALTH_MS);
   const btn = $('vlmWatchBtn'); if (btn) btn.disabled = false;
   framePump();   // start the camera feed (CPU only)
+  loadModels();  // fill the model dropdown once the daemon answers
 }
 
 function goOffline() {
@@ -252,6 +318,7 @@ function goOffline() {
     if (el && lastHealthErr) el.title = '最后一次失败: ' + lastHealthErr;
   metaOffline();
   const btn = $('vlmWatchBtn'); if (btn) btn.disabled = true;
+  const sel = $('vlmModel'); if (sel && !switchingModel) sel.disabled = true;
   $('vlmImg').classList.remove('live');
   $('vidplaceholder').style.display = '';
 }

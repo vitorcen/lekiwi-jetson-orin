@@ -1,4 +1,5 @@
-// Voice tab: Hermes real-time voice chat via the voice-daemon HTTP API.
+// Agent tab (formerly the voice tab): Hermes real-time voice chat via the
+// voice-daemon HTTP API. Page id is #page-agent, data-page="agent".
 //
 // Same trust boundary as vision.js: the Rust backend owns the bearer token,
 // we only poll Tauri commands (voice_get/voice_post) and paint. The daemon
@@ -25,13 +26,18 @@ let vstate = 'idle';        // daemon state machine mirror
 let deadline = 0;           // 常开窗口 server-side deadline (epoch s), 0 = none
 let curAnswer = null;       // the assistant bubble currently receiving deltas
 
+// brain strip state
+let brainSwitching = false; // a /brain job is in flight (select frozen)
+let brainJob = null;        // current job_id we are tracking
+let brainPreset = null;     // last-known selected preset (to revert on failure)
+
 function curIp() { return ($('voip') && $('voip').value.trim()) || '127.0.0.1'; }
 
 // ---- feed rendering ------------------------------------------------------
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
-function addRow(text, kind) {
+function addRow(text, kind, brain) {
   const feed = $('vofeed');
   if (!feed) return null;
   const t = new Date();
@@ -42,6 +48,12 @@ function addRow(text, kind) {
   const meta = document.createElement('div');
   meta.className = 'capmeta';
   meta.textContent = `${pad2(t.getHours())}:${pad2(t.getMinutes())}:${pad2(t.getSeconds())}`;
+  if (brain) {   // 角标:哪个大脑答的话(feed 事件带 brain 字段时)
+    const badge = document.createElement('span');
+    badge.className = 'brainbadge';
+    badge.textContent = brain;   // untrusted; textContent only
+    meta.append(' ', badge);
+  }
   const msg = document.createElement('div');
   msg.className = 'capmsg';
   msg.textContent = text;   // untrusted model/ASR output
@@ -65,7 +77,7 @@ function handleEvent(ev) {
       addRow('🗣 ' + ev.text, 'ask');
       break;
     case 'assistant_delta':
-      if (!curAnswer) curAnswer = addRow('', 'answer');
+      if (!curAnswer) curAnswer = addRow('', 'answer', ev.brain);
       if (curAnswer) curAnswer.textContent += ev.delta || '';
       break;
     case 'tool':
@@ -86,6 +98,51 @@ function handleEvent(ev) {
     case 'barge_in':
       addRow('✋ 打断' + (ev.action === 'stop' ? '(停止)' : '') + ': ' + (ev.text || ''), 'sys');
       break;
+    case 'drift':
+      if (ev.axis === 'brain') addRow('⚠ ' + (ev.message || '大脑配置漂移'), 'error');
+      break;
+    case 'job':
+      if (ev.axis === 'brain') handleBrainJob(ev);
+      break;
+  }
+}
+
+// ---- brain switch job tracking ------------------------------------------
+const BRAIN_PHASE_TXT = {
+  start: '开始切换…', precheck: '前置校验…', patch: '下发补丁…',
+  restart: '重启网关…', probe: '探针验证…',
+};
+
+function setBrainStatus(txt, cls) {
+  const el = $('aBrainStatus');
+  if (!el) return;
+  el.textContent = txt || '';
+  el.className = 'bbstat' + (cls ? ' ' + cls : '');
+  el.style.display = txt ? '' : 'none';
+}
+
+function handleBrainJob(ev) {
+  if (ev.phase in BRAIN_PHASE_TXT) {
+    brainSwitching = true;
+    const sel = $('aBrainSel');
+    if (sel) sel.disabled = true;
+    setBrainStatus('⏳ ' + BRAIN_PHASE_TXT[ev.phase], 'info');
+    return;
+  }
+  if (ev.phase === 'done') {
+    brainSwitching = false; brainJob = null;
+    setBrainStatus('✓ 已切换到 ' + (ev.preset || ''), 'ok');
+    addRow('🧠 大脑已切换到 ' + (ev.preset || ''), 'sys');
+    setTimeout(() => setBrainStatus(''), 4000);
+    refreshBrain();
+  } else if (ev.phase === 'reverted') {
+    brainSwitching = false; brainJob = null;
+    const reason = ev.reason || '未知原因';
+    setBrainStatus('✗ 切换失败,已还原', 'bad');
+    addRow('⚠ 大脑切换失败已还原:' + reason
+      + (ev.old_probe ? '(旧模型探针 ' + ev.old_probe + ')' : ''), 'error');
+    setTimeout(() => setBrainStatus(''), 8000);
+    refreshBrain();   // snaps the dropdown back to the reverted preset
   }
 }
 
@@ -125,6 +182,73 @@ function paintState() {
   } else if (st && !online) st.textContent = '服务离线';
 }
 
+// ---- brain strip (read-only this phase; switching is P2) ------------------
+// Populated from GET /config. The endpoint may not exist yet (added by the
+// daemon P0b work) — any failure just leaves the strip in its neutral state.
+
+function ttsDesc(tts) {
+  if (!tts) return '—';
+  if (typeof tts === 'string') return tts;
+  return tts.engine + (tts.voice ? '(' + tts.voice + ')' : '');
+}
+
+function renderBrain(cfg) {
+  const desired = (cfg && cfg.desired) || cfg || {};
+  const presets = desired.presets || {};
+  const brain = desired.brain || {};
+  const caps = (cfg && cfg.capabilities) || [];
+  brainPreset = brain.preset || null;
+  const sel = $('aBrainSel');
+  if (sel) {
+    sel.innerHTML = '';
+    for (const name of Object.keys(presets)) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name;   // untrusted config; textContent only
+      if (name === brain.preset) o.selected = true;
+      sel.append(o);
+    }
+    if (!Object.keys(presets).length) {
+      const o = document.createElement('option');
+      o.textContent = brain.preset || '—';
+      sel.append(o);
+    }
+    // frozen while a switch is running or the daemon is offline
+    sel.disabled = !online || brainSwitching;
+  }
+  // capability badges from the profile (mcp_servers keys) — same for every cloud
+  // preset since capability comes from the profile, not the model (🛞 = drive).
+  const capEl = $('aBrainCap');
+  if (capEl) {
+    const has = caps.length > 0;
+    capEl.textContent = has
+      ? (caps.includes('drive') ? '🛞 ' : '') + caps.join(' · ')
+      : '';
+    capEl.style.display = has ? '' : 'none';
+  }
+  const pairEl = $('aBrainPair');
+  if (pairEl) {
+    const cur = presets[brain.preset];
+    const pair = cur && cur.pair;
+    pairEl.textContent = pair
+      ? `搭配 ASR ${pair.asr || '—'} · TTS ${ttsDesc(pair.tts)}`
+      : '搭配 —';
+  }
+  const drift = $('aBrainDrift');
+  if (drift) {
+    const d = cfg && cfg.drift;
+    const has = d && (Array.isArray(d) ? d.length : Object.keys(d).length);
+    drift.style.display = has ? '' : 'none';
+  }
+}
+
+async function refreshBrain() {
+  if (!invoke) return;
+  try {
+    renderBrain(JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/config' })));
+  } catch { /* /config not up yet — leave the strip neutral */ }
+}
+
 // ---- polling -------------------------------------------------------------
 
 async function pollHealth() {
@@ -159,6 +283,7 @@ function goOnline() {
   healthTimer = setInterval(pollHealth, HEALTH_MS);
   if (!feedTimer) feedTimer = setInterval(pollFeed, FEED_MS);
   refreshSvcAuto();
+  refreshBrain();
   paintState();
 }
 
@@ -176,7 +301,7 @@ function goOffline() {
 // only stops the polling, never the session.
 
 function startActive() {
-  if (active || S.page !== 'voice') return;
+  if (active || S.page !== 'agent') return;
   active = true;
   online = false;
   healthTimer = setInterval(pollHealth, PROBE_MS);
@@ -192,8 +317,8 @@ function stopActive() {
   paintState();
 }
 
-export function onEnterVoice() { startActive(); }
-export function onLeaveVoice() { stopActive(); }
+export function onEnterAgent() { startActive(); }
+export function onLeaveAgent() { stopActive(); }
 
 // ---- wiring --------------------------------------------------------------
 
@@ -241,6 +366,32 @@ $('aSayBtn').onclick = async () => {
   catch (e) { addRow('播报失败: ' + e, 'error'); }
 };
 $('aSay').addEventListener('keydown', e => { if (e.key === 'Enter') $('aSendBtn').click(); });
+
+// 切大脑: POST /brain {preset} → 202 + job; progress/result arrive via the feed
+// 'job' events (handleBrainJob). A synchronous 409/400 (precheck reject: not idle,
+// missing key_env, invalid preset) rejects here → revert the dropdown + show why.
+$('aBrainSel') && ($('aBrainSel').onchange = async e => {
+  const sel = e.target;
+  const preset = sel.value;
+  if (!invoke || !online || brainSwitching || preset === brainPreset) return;
+  brainSwitching = true;
+  brainJob = null;
+  sel.disabled = true;
+  setBrainStatus('⏳ 提交切换…', 'info');
+  try {
+    const r = JSON.parse(await invoke('voice_post', {
+      ip: curIp(), path: '/brain', body: JSON.stringify({ preset }),
+    }));
+    if (r && r.error) throw new Error(r.error);
+    if (r && r.job_id) brainJob = r.job_id;   // then feed 'job' events drive it
+  } catch (err) {
+    brainSwitching = false;
+    setBrainStatus('✗ ' + err, 'bad');
+    addRow('⚠ 切换被拒:' + err, 'error');
+    setTimeout(() => setBrainStatus(''), 8000);
+    refreshBrain();   // snaps the dropdown back to the current preset
+  }
+});
 
 // Service control buttons + boot-autostart checkbox (mirrors vision.js).
 for (const [id, action, label] of [
