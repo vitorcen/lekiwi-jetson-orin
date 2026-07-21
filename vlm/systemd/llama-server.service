@@ -6,10 +6,17 @@ After=network.target
 Type=simple
 # Resident VLM backend. Loopback only: the vlm-daemon (on 8090) is the sole
 # client; nothing else should reach the model server directly.
+#
+# Model paths are parameterized via an EnvironmentFile so the vlm-daemon can swap
+# the model (rewrite the file atomically + restart this unit). systemd expands
+# ${VLM_MODEL}/${VLM_MMPROJ} as one whole argument each (paths have no spaces),
+# NOT word-split like a shell $VAR. install.sh seeds the file with the shipped
+# Qwen3-VL-2B pair if it is missing.
+EnvironmentFile=%h/.config/lekiwi/llama-model.env
 ExecStart=%h/work/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8091 \
-    -m %h/models/vlm/Qwen3-VL-2B-Instruct-Q4_K_M.gguf \
-    --mmproj %h/models/vlm/mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf \
+    -m ${VLM_MODEL} \
+    --mmproj ${VLM_MMPROJ} \
     -ngl 99 -c 4096 -fa on --no-webui
 Restart=on-failure
 RestartSec=3

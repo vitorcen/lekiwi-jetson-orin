@@ -9,9 +9,15 @@ Jetson Orin Nano 8GB 上的三层视觉守护栈，为 Hermes 语音大脑提供
 ## 三层结构
 
 1. **llama-server**（`systemd/llama-server.service`）— llama.cpp 常驻 VLM 后端
-   - 模型 `~/models/vlm/Qwen3-VL-2B-Instruct-Q4_K_M.gguf` + mmproj `mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf`
-   - 仅监听 `127.0.0.1:8091`（loopback），`-ngl 99 -c 4096 --no-webui`
+   - 模型路径**参数化**：unit 用 `EnvironmentFile=~/.config/lekiwi/llama-model.env` 读
+     `${VLM_MODEL}`/`${VLM_MMPROJ}`（systemd 把 `${VAR}` 当**整体一个参数**展开，不 word-split；
+     路径无空格）。`install.sh` 在该文件缺失时才写入,默认指向 shipped 的
+     `~/models/vlm/Qwen3-VL-2B-Instruct-Q4_K_M.gguf` + `mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf`。
+   - 仅监听 `127.0.0.1:8091`（loopback），`-ngl 99 -c 4096 -fa on --no-webui`
    - **需要 CUDA 版 llama-server 二进制**（`~/work/llama.cpp/build/bin/llama-server`）。二进制不存在时 `install.sh` 不会启用该单元。
+   - **换模型**：vlm-daemon 的 `POST /model` 原子重写该 env 文件 + `systemctl --user restart llama-server`
+     → 轮 llama `/health` 就绪（默认 90s，冷加载 3.4GB 慢）→ 真实推理探针（有帧走视觉,无帧走
+     1-token 文本）→ 过则保留,败则还原旧 env 再重启再探针（**绝不留板子无视觉**）。
 2. **vlm-daemon**（`daemon.py` → `systemd/vlm-daemon.service`）— 主守护，HTTP API `0.0.0.0:8090`
    - **连续抓帧**：有 `/frame.jpg` 轮询时起一个常驻 ffmpeg 读 MJPEG（`-c:v copy`→管道，按
      FFD8/FFD9 切帧），只留最新一帧 + `frame_ts` + 近 2s 实测 fps；**10s 无 `/frame.jpg`
@@ -83,7 +89,7 @@ Jetson Orin Nano 8GB 上的三层视觉守护栈，为 Hermes 语音大脑提供
 
 | 方法 | 路径 | 返回 |
 |------|------|------|
-| GET  | `/health` | `{state, llama_up, camera:{device,last_ok}, camera_fps, capture_on, last_caption_ts, stale_reason, last_error, uptime}` |
+| GET  | `/health` | `{state, llama_up, model, model_switch_busy, camera:{device,last_ok}, camera_fps, capture_on, last_caption_ts, stale_reason, last_error, uptime}`（`model`=当前 env 指向的模型 id） |
 | GET  | `/frame.jpg` | 最新 JPEG；响应头 `X-Frame-Ts`（抓帧墙钟）+ `X-Fps`（实测帧率）。轮询会开启/续命连续抓帧，不升级 state |
 | GET  | `/caption` | 共享槽：`{text, frame_ts, latency_ms, seq, frame_b64, stale_reason}`；无则 404 `{error:"no caption yet", stale_reason}` |
 | GET  | `/captions` | query `n`（默认 8，上限 16）；`{captions:[{seq,frame_ts,text,age_seconds}…]（最新在前）, stale_reason}` |
@@ -91,6 +97,8 @@ Jetson Orin Nano 8GB 上的三层视觉守护栈，为 Hermes 语音大脑提供
 | POST | `/look` | body `{prompt?, max_age_s?}`；get-or-refresh，返回 `{…caption…, cached, stale_reason}`（见上节语义） |
 | POST | `/describe` | body `{prompt?}`；隔离 VQA，返回 `{text, frame_ts, latency_ms, frame_b64, stale_reason}`（失败带 `error`）。**不写共享槽**。有界 latest-wins 队列 |
 | POST | `/state` | body `{state?:"idle"\|"watch", interval?:秒}`，两字段皆可单独给；`interval` 单独发即在线改解读周期（不打断当前状态），钳到 1–300s。返回 `{state, interval}` |
+| GET  | `/models` | 扫 `~/models/vlm/*.gguf`（排除 `mmproj` 前缀）；`{models:[{id,file,mmproj,disk_mb,usable,active}…], active_file, busy}`。`usable=false`=配不到 mmproj（仍列出）；`active`=当前 env 指向 |
+| POST | `/model` | body `{id}`，**同步**切换（冷加载可 90s+,调用方拿真实结局）。成功 `{status:"ok", active, load_s, probe}`；失败还原旧模型 `{status:"reverted"\|"degraded", error, active, old_probe}`。未知 id→404,无 mmproj→400,并发切换→409 |
 
 - `camera_fps`：近 2s 实测抓帧帧率，连续抓帧关闭时为 `0`。`capture_on`：连续抓帧是否常驻。
 - `frame_b64`：**被解读那一帧**的缩略图（ffmpeg 缩到 ~320px 宽的 JPEG，base64），供 GUI

@@ -19,11 +19,14 @@ import asyncio
 import base64
 import json
 import os
+import tempfile
 import time
 from collections import deque
 
 from aiohttp import web
 import aiohttp
+
+import vlm_models
 
 # --------------------------------------------------------------------------- #
 # Config (all overridable via env; sane defaults for this board)
@@ -67,6 +70,16 @@ MAX_TOKENS = int(_env("VLM_MAX_TOKENS", "80"))
 INFER_WIDTH = int(_env("VLM_INFER_WIDTH", "640"))  # frame width sent to the VLM
 LOOK_MAX_AGE = float(_env("VLM_LOOK_MAX_AGE", "5.0"))  # /look get-or-refresh default
 CAPTION_RING = int(_env("VLM_CAPTION_RING", "16"))    # shared-slot ring buffer size
+
+# Model switch: llama-server reads model paths from this EnvironmentFile; the
+# daemon swaps a model by rewriting it (atomic) + restarting the unit, then
+# polling llama /health and running a real-inference probe before committing.
+MODELS_DIR = os.path.expanduser(_env("VLM_MODELS_DIR", "~/models/vlm"))
+LLAMA_ENV_FILE = os.path.expanduser(
+    _env("VLM_LLAMA_ENV", "~/.config/lekiwi/llama-model.env"))
+LLAMA_UNIT = _env("VLM_LLAMA_UNIT", "llama-server")
+LLAMA_READY_TIMEOUT = float(_env("VLM_LLAMA_READY_TIMEOUT", "90"))  # cold 3.4GB load is slow
+MODEL_PROBE_TIMEOUT = float(_env("VLM_MODEL_PROBE_TIMEOUT", "30"))
 
 START_TS = time.time()
 
@@ -122,6 +135,9 @@ class Daemon:
 
         # llama single-flight (never hit the server concurrently)
         self._llama_lock = asyncio.Lock()
+
+        # model switch: reject concurrent /model calls (simple busy flag -> 409)
+        self.model_switch_busy = False
 
         # coalescing: two independent latest-wins batches by sink, so a VQA
         # ("answer") request can never collapse into a shared scene-caption
@@ -613,6 +629,154 @@ class Daemon:
         except Exception:
             return False
 
+    # -- model switch: env-file rewrite + unit restart + real probe + revert -- #
+    def active_model_file(self) -> str | None:
+        """VLM_MODEL path named by the current llama env file, or None."""
+        try:
+            with open(LLAMA_ENV_FILE, "r", encoding="utf-8") as fh:
+                return vlm_models.parse_env(fh.read()).get("VLM_MODEL")
+        except OSError:
+            return None
+
+    def active_model_id(self) -> str | None:
+        return vlm_models.active_model_id(self.active_model_file()) or MODEL_NAME
+
+    @staticmethod
+    def _atomic_write(path: str, text: str) -> None:
+        d = os.path.dirname(path) or "."
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".llama-model.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    @staticmethod
+    async def _restart_llama() -> int:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "--user", "restart", LLAMA_UNIT,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await proc.communicate()
+        return proc.returncode if proc.returncode is not None else -1
+
+    async def _llama_wait_ready(self, timeout: float) -> bool:
+        """Poll llama /health until 200 or timeout (cold model load is slow)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if await self.llama_up():
+                return True
+            await asyncio.sleep(1.0)
+        return False
+
+    async def _text_probe(self, timeout: float) -> tuple[bool, str]:
+        """1-token text completion straight to llama — proves the model loaded and
+        infers even when no camera frame is available."""
+        payload = {"model": MODEL_NAME, "max_tokens": 1,
+                   "messages": [{"role": "user", "content": "回复:好"}]}
+        url = LLAMA_URL + "/v1/chat/completions"
+        cfg = aiohttp.ClientTimeout(total=timeout)
+        try:
+            async with self._llama_lock:
+                async with aiohttp.ClientSession(timeout=cfg) as sess:
+                    async with sess.post(url, json=payload) as resp:
+                        body = await resp.text()
+                        if resp.status != 200:
+                            return False, f"HTTP {resp.status}: {body[:160]}"
+                        data = json.loads(body)
+                        data["choices"][0]["message"]  # raises if malformed
+                        return True, "ok (text)"
+        except asyncio.TimeoutError:
+            return False, f"timeout >{timeout:g}s"
+        except Exception as exc:                             # noqa: BLE001
+            return False, f"{type(exc).__name__}: {exc}"
+
+    async def _model_probe(self, timeout: float) -> tuple[bool, str]:
+        """Real inference on the freshly loaded model: prefer a live/one-shot
+        camera frame (true vision path), fall back to a 1-token text probe when
+        there is no frame. Passes only on real produced output."""
+        jpeg = None
+        try:
+            if self.capture_on and self.last_frame is not None:
+                jpeg = self.last_frame
+            else:
+                jpeg = await self.grab_frame()
+        except Exception:                                    # noqa: BLE001
+            jpeg = None
+        if jpeg is not None:
+            res = await self._llama_caption(jpeg, "用一句话描述画面")
+            if res.get("error"):
+                return False, f"{res['error']}: {res.get('detail', '')}"[:160]
+            if res.get("text"):
+                return True, "ok (vision)"
+            return False, "empty caption"
+        return await self._text_probe(timeout)
+
+    async def switch_model(self, model_id: str) -> dict:
+        """Swap the llama model: validate -> write env -> restart -> wait ready ->
+        real probe. On failure restore the previous env, restart, re-probe the old
+        model and report the REAL outcome (never leave the board sightless).
+        Returns a dict; `http` (popped by the handler) carries the status code."""
+        models = vlm_models.list_models(MODELS_DIR, self.active_model_file())
+        target = next((m for m in models if m["id"] == model_id), None)
+        if target is None:
+            return {"status": "error", "error": f"unknown model: {model_id}",
+                    "http": 404}
+        if not target["usable"]:
+            return {"status": "error",
+                    "error": f"model has no paired mmproj: {model_id}", "http": 400}
+        prev_env = None
+        try:
+            with open(LLAMA_ENV_FILE, "r", encoding="utf-8") as fh:
+                prev_env = fh.read()
+        except OSError:
+            prev_env = None
+        # the model we'd fall back to — captured BEFORE the env is overwritten
+        prev_model_id = vlm_models.active_model_id(
+            vlm_models.parse_env(prev_env or "").get("VLM_MODEL"))
+
+        t0 = time.time()
+        self._atomic_write(LLAMA_ENV_FILE,
+                           vlm_models.build_env(target["file"], target["mmproj"]))
+        rc = await self._restart_llama()
+        ready = await self._llama_wait_ready(LLAMA_READY_TIMEOUT)
+        load_s = round(time.time() - t0, 1)
+        if ready:
+            ok, reason = await self._model_probe(MODEL_PROBE_TIMEOUT)
+        else:
+            ok, reason = False, f"llama not ready in {LLAMA_READY_TIMEOUT:g}s (rc={rc})"
+        if ok:
+            print(f"[vlm-daemon] switched model -> {model_id} in {load_s}s ({reason})",
+                  flush=True)
+            return {"status": "ok", "active": model_id, "load_s": load_s,
+                    "probe": reason, "http": 200}
+
+        # failure: restore old env + restart + re-probe the old model
+        old_id = prev_model_id or MODEL_NAME
+        restored = False
+        if prev_env is not None:
+            try:
+                self._atomic_write(LLAMA_ENV_FILE, prev_env)
+                restored = True
+            except OSError:
+                restored = False
+        await self._restart_llama()
+        old_ready = await self._llama_wait_ready(LLAMA_READY_TIMEOUT)
+        old_ok, old_reason = (await self._model_probe(MODEL_PROBE_TIMEOUT)
+                              if old_ready else (False, "old model not ready"))
+        status = "reverted" if (restored and old_ok) else "degraded"
+        print(f"[vlm-daemon] model switch to {model_id} FAILED ({reason}); "
+              f"{status}, old={old_id} probe={'ok' if old_ok else old_reason}",
+              flush=True)
+        return {"status": status, "error": reason, "active": old_id,
+                "old_probe": ("ok" if old_ok else old_reason), "http": 200}
+
 
 DAEMON = Daemon()
 
@@ -639,6 +803,8 @@ async def h_health(request: web.Request) -> web.Response:
         "state": d.state,
         "watch_interval": d.watch_interval,
         "llama_up": await d.llama_up(),
+        "model": d.active_model_id(),
+        "model_switch_busy": d.model_switch_busy,
         "camera": {"device": CAMERA_DEV, "last_ok": d.last_grab_ok},
         "camera_fps": d.current_fps(),      # measured; 0 when capture off
         "capture_on": d.capture_on,
@@ -790,6 +956,37 @@ async def h_describe(request: web.Request) -> web.Response:
     return web.json_response(res)
 
 
+async def h_models(request: web.Request) -> web.Response:
+    """List models under MODELS_DIR (mmproj paired, size measured, active marked)."""
+    active = DAEMON.active_model_file()
+    return web.json_response({
+        "models": vlm_models.list_models(MODELS_DIR, active),
+        "active_file": active,
+        "busy": DAEMON.model_switch_busy,
+    })
+
+
+async def h_model_post(request: web.Request) -> web.Response:
+    """Switch the llama model to {id}. Synchronous (cold load can take 90s+): the
+    caller gets the real outcome. Rejects concurrent switches with 409."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return web.json_response({"error": "invalid json"}, status=400)
+    model_id = body.get("id")
+    if not model_id or not isinstance(model_id, str):
+        return web.json_response({"error": "id (model id) required"}, status=400)
+    if DAEMON.model_switch_busy:
+        return web.json_response({"error": "model switch in progress"}, status=409)
+    DAEMON.model_switch_busy = True
+    try:
+        res = await DAEMON.switch_model(model_id)
+    finally:
+        DAEMON.model_switch_busy = False
+    status = res.pop("http", 200)
+    return web.json_response(res, status=status)
+
+
 async def h_state(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -826,6 +1023,8 @@ def make_app() -> web.Application:
     app.router.add_post("/describe", h_describe)
     app.router.add_post("/look", h_look)
     app.router.add_post("/state", h_state)
+    app.router.add_get("/models", h_models)
+    app.router.add_post("/model", h_model_post)
     return app
 
 

@@ -32,6 +32,24 @@ else
     echo "[install] token already present"
 fi
 
+# 3b. llama model env file (parameterizes llama-server.service) ------------- #
+# The unit reads model paths from ~/.config/lekiwi/llama-model.env so the daemon
+# can swap models by rewriting this file + restarting the unit. Seed it (only if
+# missing) pointing at the shipped Qwen3-VL-2B pair — same "don't clobber a
+# hand-picked value" rule as the board config.
+LLAMA_ENV_DIR="$HOME/.config/lekiwi"
+LLAMA_ENV="$LLAMA_ENV_DIR/llama-model.env"
+if [ ! -s "$LLAMA_ENV" ]; then
+    mkdir -p "$LLAMA_ENV_DIR"
+    {
+        echo "VLM_MODEL=$HOME/models/vlm/Qwen3-VL-2B-Instruct-Q4_K_M.gguf"
+        echo "VLM_MMPROJ=$HOME/models/vlm/mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf"
+    } > "$LLAMA_ENV"
+    echo "[install] seeded llama model env -> $LLAMA_ENV"
+else
+    echo "[install] llama model env already present ($LLAMA_ENV)"
+fi
+
 # 4. systemd user units ---------------------------------------------------- #
 mkdir -p "$UNIT_DIR"
 cp -f "$HERE/systemd/vlm-daemon.service" "$UNIT_DIR/vlm-daemon.service"
