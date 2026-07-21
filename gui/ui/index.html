@@ -313,9 +313,7 @@
         <label class="ivlabel" title="数字增益 dB(0=不变):MCP01 采集偏低时补足,两种模式都生效">增益
           <input type="number" id="vlAudioGain" min="0" max="30" step="1" style="width:4.5em">
         </label>
-        <button id="vlAsrBtn" class="primary" disabled>开始转写</button>
-        <button id="vlAsrClear" class="minibtn" title="清空下方转写(仅本机显示)">清空</button>
-        <span class="tip">转写<b>不进大脑、不触发播报</b>;开启会终止对话。改动<b>临时</b>,「存」才落盘。</span>
+        <span class="tip">转写<b>不进大脑、不触发播报</b>;开启会终止对话。改动<b>临时</b>,「保存」才落盘。</span>
       </div>
       <!-- VAD 模式参数(一级=VAD+离线 时显示) -->
       <div class="watchrow" id="vlVadRow">
@@ -334,16 +332,20 @@
         <label class="ivlabel" title="前置回溯(秒):把段起点前这么久音频一并纳入,修「起音掐头」。默认0.45">前置
           <input type="text" inputmode="decimal" id="vlVadPreRoll" style="width:5em">
         </label>
-        <button id="vlVadSave" class="minibtn" title="把离线引擎 + VAD 参数 + 增益落盘">存</button>
-        <span class="tip">VAD 切段喂上面二级选的离线引擎。改动<b>临时</b>,「存」写入 config。</span>
+        <span class="tip">VAD 切段喂上面二级选的离线引擎。改动<b>临时</b>,「保存」写入 config。</span>
       </div>
       <!-- 流式模式参数(一级=流式 时显示;默认 VAD 模式,先隐藏) -->
       <div class="watchrow" id="vlStreamRow" style="display:none">
         <label class="ivlabel" title="端点静音(秒):停顿这么久判为一句结束。小=收句快易切断,大=稳但慢。默认1.2">端点静音
           <input type="text" inputmode="decimal" id="vlStreamSilence" style="width:5em">
         </label>
-        <button id="vlStreamSave" class="minibtn" title="把流式模型 + 端点静音 + 增益落盘(存参)">存</button>
-        <span class="tip">流式<b>自带端点(免VAD)</b>,边说边出字(带「流式」徽章)。精度通常低于离线,换响应感。改动临时,「存」落盘。</span>
+        <span class="tip">流式<b>自带端点(免VAD)</b>,边说边出字(带「流式」徽章)。精度通常低于离线,换响应感。改动临时,「保存」落盘。</span>
+      </div>
+      <!-- 操作行:两种模式共用,保存 = 上面模式+参数整套落盘 -->
+      <div class="watchrow">
+        <button id="vlAsrBtn" class="primary" disabled>开始转写</button>
+        <button id="vlAsrClear" class="minibtn" title="清空下方转写(仅本机显示)">清空</button>
+        <button id="vlSaveAll" class="minibtn savebtn" title="按当前识别模式落盘:VAD模式=离线引擎+VAD参数+增益(并记住模式=VAD);流式=模型+端点静音+增益(记住模式=流式)">保存</button>
       </div>
       <div id="vlAsrFeed"></div>
     </section>
@@ -369,13 +371,16 @@
         <label class="ivlabel" id="vlTtsVoiceWrap">音色
           <select id="vlTtsVoice"></select>
         </label>
-        <button id="vlTtsSave" class="minibtn" title="把当前引擎/音色写回当前搭配(落盘)">保存为当前搭配</button>
       </div>
       <div class="askrow">
         <input id="vlTtsText" type="text" placeholder="输入要试听的文本…回车即播">
-        <button id="vlTtsBtn" class="primary" disabled>播报</button>
       </div>
-      <span class="tip">改引擎/音色为<b>临时覆盖</b>(不落盘,退出调试自动还原);「保存为当前搭配」才写回 pair。</span>
+      <span class="tip">改引擎/音色为<b>临时覆盖</b>(不落盘,退出调试自动还原);「保存」才写回 pair。</span>
+      <!-- 操作行:与 ASR 台同布局,按钮统一在最下面 -->
+      <div class="watchrow">
+        <button id="vlTtsBtn" class="primary" disabled>播报</button>
+        <button id="vlTtsSave" class="minibtn savebtn" title="把当前引擎/音色写回当前搭配(落盘)">保存</button>
+      </div>
       <div id="vlTtsFeed"></div>
     </section>
   </div>

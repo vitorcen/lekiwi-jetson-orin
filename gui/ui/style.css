@@ -113,6 +113,10 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
   border-radius: 7px; padding: 5px 12px; font-size: 13px; cursor: pointer;
 }
 .minibtn:hover { background: #262e45; }
+/* 保存 — the one persistence action on the ASR station: green accent so it reads as
+   "commit", distinct from the quiet session controls around it. */
+.savebtn { background: #1e3a2a; color: #9fe6b8; border-color: #2f6b45; font-weight: 600; }
+.savebtn:hover { background: #265239; }
 /* Caption cadence input, inline with the 开始解读 button. */
 .ivlabel { font-size: 13px; color: #a9b4d8; white-space: nowrap; }
 .ivlabel input { width: 56px; }

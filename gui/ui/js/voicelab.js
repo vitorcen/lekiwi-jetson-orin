@@ -764,21 +764,25 @@ $('vlAudioGain') && ($('vlAudioGain').onchange = () => {
   postConfig({ axis: 'audio', value: { gain_db: curGain() }, ephemeral: true },
              '临时增益: ' + curGain() + ' dB', 'vlAsrFeed');
 });
-// 存(VAD 模式): 落盘 离线引擎(二级) + VAD 引擎/参数 + 增益。
-$('vlVadSave') && ($('vlVadSave').onclick = () => {
-  postConfig({ axis: 'asr', value: $('vlModelSel').value }, '', 'vlAsrFeed');   // 离线引擎
-  postConfig({ axis: 'vad', value: curVad() }, '已存离线引擎+VAD+增益', 'vlAsrFeed');
-  postConfig({ axis: 'audio', value: { gain_db: curGain() } });
+// 保存(唯一按钮,一级行): 按当前识别模式落盘整套识别配置。识别模式本身也持久化
+// (stream.enabled) —— 否则存过流式后切回 VAD,重开永远回到流式。
+$('vlSaveAll') && ($('vlSaveAll').onclick = () => {
+  if (recMode() === 'stream') {
+    postConfig({ axis: 'stream', value: curStream() }, '', 'vlAsrFeed');
+    postConfig({ axis: 'audio', value: { gain_db: curGain() } },
+               '已保存 流式模式+模型+端点+增益', 'vlAsrFeed');
+  } else {
+    postConfig({ axis: 'asr', value: $('vlModelSel').value }, '', 'vlAsrFeed');
+    postConfig({ axis: 'vad', value: curVad() }, '已保存 VAD模式+离线引擎+参数+增益', 'vlAsrFeed');
+    postConfig({ axis: 'audio', value: { gain_db: curGain() } });
+    postConfig({ axis: 'stream', value: { enabled: false } });   // 模式=VAD 持久化
+  }
 });
 
 // ---- 流式参数(端点静音临时改;「存」落盘 流式模型+端点+增益,存参) ----------
 $('vlStreamSilence') && ($('vlStreamSilence').onchange = () => {
   postConfig({ axis: 'stream', value: curStream(), ephemeral: true },
              '临时改端点静音: ' + curStream().endpoint_silence_s + 's', 'vlAsrFeed');
-});
-$('vlStreamSave') && ($('vlStreamSave').onclick = () => {
-  postConfig({ axis: 'stream', value: curStream() }, '', 'vlAsrFeed');
-  postConfig({ axis: 'audio', value: { gain_db: curGain() } }, '已存流式模型+端点+增益', 'vlAsrFeed');
 });
 
 // 播报: audition through POST /say; echo backend + first-byte if the daemon
