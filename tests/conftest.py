@@ -36,13 +36,22 @@ def _stub(name, **attrs):
 rclpy = _stub('rclpy')
 rclpy.node = _stub('rclpy.node', Node=_Node)
 _stub('sensor_msgs')
-_stub('sensor_msgs.msg', LaserScan=MagicMock(), CompressedImage=MagicMock())
+_stub('sensor_msgs.msg', LaserScan=MagicMock(), CompressedImage=MagicMock(),
+      Imu=MagicMock())
 _stub('diagnostic_msgs')
 _stub('diagnostic_msgs.msg', DiagnosticArray=MagicMock(),
       DiagnosticStatus=MagicMock(), KeyValue=MagicMock())
 _stub('serial', Serial=MagicMock())
-_stub('zmq', PULL=7, RCVHWM=23, POLLIN=1, NOBLOCK=1,
-      Context=MagicMock(), Poller=MagicMock(), Again=Exception)
+_stub('zmq', PULL=7, RCVHWM=23, POLLIN=1, NOBLOCK=1, PUSH=8, SUB=2, REQ=3,
+      REP=4, SUBSCRIBE=6, LINGER=17, SNDHWM=23, SNDTIMEO=28, RCVTIMEO=27,
+      Context=MagicMock(), Poller=MagicMock(), Again=Exception,
+      ZMQError=Exception)
+# drive/mcp_server.py pure logic (imu math) — stub the mcp SDK it imports.
+mcp = _stub('mcp')
+mcp.server = _stub('mcp.server', Server=MagicMock())
+sys.modules['mcp.server.stdio'] = _stub('mcp.server.stdio',
+                                        stdio_server=MagicMock())
+_stub('mcp.types', TextContent=MagicMock(), Tool=MagicMock())
 _stub('cv2', applyColorMap=MagicMock(), imencode=MagicMock(),
       COLORMAP_JET=2, CAP_V4L2=200, VideoCapture=MagicMock(),
       VideoWriter_fourcc=MagicMock(), IMWRITE_JPEG_QUALITY=1,

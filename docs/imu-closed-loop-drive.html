@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMU 闭环运动控制:让 LLM 控车距离/方向更准 · 设计方案</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  a{color:var(--accent-dk)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+<h1>IMU 闭环运动控制:让 LLM 控车距离/方向更准</h1>
+<p class="sub">LeKiwi 三轮全向底盘 · Jetson Orin Nano 8GB · 2026-07-22 · Claude + codex&nbsp;gpt-5.6-sol 双模型头脑风暴定稿 · 关键代码断言已逐条核实</p>
+</header>
+
+<div class="tldr">
+<h2>TL;DR</h2>
+<ul>
+<li><strong>数据结构错了才是根因:LLM 该提交「目标」(转 90°/走 1 米),不该自己拼「速度 × 时间」</strong>。开环 <code>drive_move(v,ω,t)</code> 的距离误差来自加减速斜坡、打滑、地面差异,LLM 端无法修。</li>
+<li><strong>闭环放独立 ROS2 controller,不塞进 MCP、不污染 base_host</strong>。MCP 变薄适配器只交目标;base_host 只补齐它本来就欠的:sync-write、latest-only、applied ack、最终钳位。</li>
+<li><strong>纯 IMU(无轮 odom)能闭环的只有 yaw</strong>:相对转向 ±2–3° 可期;平移距离闭不了,加速度二次积分是坑(0.01g 偏置 10 秒漂 4.9 米),不做。</li>
+<li><strong>先修地基(P0)</strong>:实测核实 base_host 每速度帧逐轮 <code>txrx</code> ≈72ms &gt; 20Hz 周期 50ms,且队列逐帧执行陈旧命令——不修这两条,任何闭环都是在对着被延迟/丢弃的命令加力。</li>
+<li>路线:P0 修命令链 → P1 <code>turn_by</code> yaw 闭环 → P1.5 直行航向保持 → P2 轮 odom(sync-read ≥30Hz) → P3 <code>move_by(dx,dy)</code> → P4 受限 sequence。磁力计标定 MVP 阶段不做。</li>
+</ul>
+</div>
+
+<h2>1 · 现状与问题</h2>
+<p>LLM 控车现走 <code>drive/mcp_server.py</code> 的 <code>drive_move(vx,vy,omega,duration)</code>:开环速度 × 时间,
+硬钳位 |v|≤0.15m/s、|ω|≤30°/s、≤2s,20Hz 重发 + 刹车帧 + 冷却 + 互斥。<code>imu_read</code>(2026-07-22 上线)
+已能读姿态/航向/气压,但只是快照观测,不参与控制。</p>
+<table>
+<tr><th>误差来源</th><th>影响</th><th>LLM 端可修吗</th></tr>
+<tr><td>加减速斜坡吃距离</td><td>0.15m/s × 2s 名义 0.3m,实际短 10–20%</td><td>否——斜坡形状 LLM 不可见</td></tr>
+<tr><td>全向轮平移时偏航</td><td>「直行」走成斜线/香蕉线</td><td>否——需要实时 yaw 反馈</td></tr>
+<tr><td>ω × t 开环旋转</td><td>「转 90°」±10° 起步,地毯更差</td><td>否</td></tr>
+<tr><td>地面差异(硬地/地毯)</td><td>同一指令不同距离</td><td>理论可标定系数,实践 LLM 会算错</td></tr>
+<tr><td>多步任务误差累积</td><td>三步之后位置已不可信</td><td>否——一步 5% 三步 15%</td></tr>
+</table>
+<p>结论:让语言模型兼职底盘控制器是数据结构层面的错误。该消灭的是
+「LLM → 速度帧 → 时间到停」这条开环链,换成「LLM 交目标 → 控制器带反馈执行 → 返回实测结果」。</p>
+
+<h2>2 · 地基先修:base_host 命令链(P0,闭环前置条件)</h2>
+<p>codex 审查点出、并经本仓库代码逐条核实的四个问题——<strong>不修它们,闭环控制器会对着
+被延迟或被丢弃的命令持续加力</strong>:</p>
+<table>
+<tr><th>#</th><th>问题(已核实)</th><th>位置</th><th>后果</th></tr>
+<tr><td>1</td><td>每个速度帧对 3 个轮子<strong>逐个</strong> <code>txrx</code>:每轮 4ms sleep + <code>read(64)</code>(应答只有 ~6 字节,pyserial 等满 20ms 超时)≈ 24ms,3 轮 ≈ <strong>72ms &gt; 20Hz 周期 50ms</strong></td><td><code>base_host.py</code> <code>txrx()</code> / <code>drive()</code></td><td>队列必然积压,停车帧排在旧速度帧后面</td></tr>
+<tr><td>2</td><td>poll 排空队列时<strong>逐帧执行</strong>旧命令,不是每源只留最新帧</td><td>主循环 recv 段</td><td>陈旧帧继续驱动轮子并喂 watchdog</td></tr>
+<tr><td>3</td><td>MCP 返回的 <code>frames_sent</code> 只代表进了 ZMQ 发送缓冲,<strong>不代表经仲裁写到了轮子</strong></td><td><code>drive/mcp_server.py</code></td><td>闭环控制器不知道自己的命令是否生效(pad/GUI HOLD 窗口内 MCP 帧被静默丢弃)</td></tr>
+<tr><td>4</td><td>vx、vy <strong>分量各自钳位</strong> 0.15:对角平移模长实际 0.212m/s</td><td><code>drive/mcp_server.py</code></td><td>若安全定义是 |v|≤0.15,应钳向量范数</td></tr>
+</table>
+<p>P0 改法(与 <a href="ros2-integration-plan.html">ROS2 集成计划</a>已定稿的协议升级同一件事,不是新增工程):</p>
+<ul>
+<li>三轮速度一次 <strong>broadcast sync-write</strong>(STS 协议原生支持,无逐舵机应答);位置一次 sync-read。串口 1Mbps 带宽从来不是瓶颈,事务模型才是。</li>
+<li>ZMQ 命令带 <code>seq + 单调 ts + TTL</code>;每源 <strong>latest-only</strong>,陈旧帧直接丢。</li>
+<li>base_host 对外发布 <code>owner / applied_seq / motion_on / ts</code>——控制器由此知道「我的命令是否被采用」。</li>
+<li>最终速度/加速度钳位下沉到 base_host 仲裁之后,对 pad/gui/ros/mcp 全源生效;平移按<strong>向量模长</strong>钳。</li>
+</ul>
+
+<h2>3 · 闭环放哪层</h2>
+<table>
+<tr><th>方案</th><th>优点</th><th>致命伤</th><th>判断</th></tr>
+<tr><td>(a) MCP 进程内 20Hz 控制线程</td><td>改动最小,可快速验证控制算法</td><td>IMU 反馈绕 ROS2→rosbridge→WebSocket;生命周期与 LLM 会话耦合;不知道命令是否被仲裁采用;人接管时可能继续追误差</td><td>只配当一次性实验,不是产品架构</td></tr>
+<tr><td>(b) base_host 内做闭环</td><td>独占串口可直读轮计数,离执行器最近</td><td>把高层控制、串口、机械臂、仲裁、安全全塞一个进程;控制器 bug 可拖死 watchdog</td><td>不做</td></tr>
+<tr><td>(c) <strong>独立 ROS2 motion_controller</strong>(推荐)</td><td>直接订阅 /imu/data 零 rosbridge 延迟;天然支持 goal/cancel/result;进程崩溃由 base_host 0.5s watchdog 兜底停车;后续接轮 odom/EKF/Nav2 顺路</td><td>多一个节点 + 必须先有 P0 的 applied ack</td><td>✅</td></tr>
+</table>
+<pre><code>LLM
+ → MCP(薄适配器):提交目标 turn_by / move_by
+ → ROS2 motion_controller:订阅 /imu/data(后续 /odom),P 控制 + 终止判据
+ → ZMQ 速度帧 (src=mcp, seq, ttl)
+ → base_host:仲裁 → 最终钳位 → 安全门 → sync-write 三轮
+ → 状态回流:owner + applied_seq + 轮反馈</code></pre>
+<p>闭环链路年龄预算(P0 修完后):IMU 25Hz 采样 0–40ms + ROS2 传输数 ms + 控制周期 40–50ms +
+ZMQ/仲裁/sync-write 数 ms → <strong>常态 &lt;80ms,p95 &lt;120ms</strong>。rosbridge 只许传「目标/结果」,
+不许进 20Hz 反馈主链。</p>
+
+<h2>4 · 给 LLM 的工具面设计</h2>
+<h3>MVP 三件套</h3>
+<pre><code>turn_by(angle_deg)     # >0 左转(逆时针), <0 右转;以当前姿态为零点,不依赖上电朝向
+motion_stop()          # 取消当前自动运动,幂等;不宣称能压过人工控制
+motion_status()        # goal 状态 / 实测已转角度 / owner / 反馈新鲜度</code></pre>
+<ul>
+<li>速度、加速度、容差由服务器固定,<strong>不给 LLM 调</strong>——参数越少越难用错。</li>
+<li>保留 <code>drive_move</code> 兼容现有调用者(Never break userspace),但工具描述降格为「低层调试接口」,引导 LLM 用目标式工具。它同时是 <strong>IMU 失效时的显式降级路径</strong>:开环速度×时间不依赖 IMU/rosbridge/ROS,IMU 挂了照样能走;pad/GUI 遥控直连 base_host,更是全程不受影响。</li>
+<li><code>motion_status</code> 必须带 <code>imu_ok</code>(反馈新鲜度):闭环工具因 <code>sensor_stale</code> 拒绝后,LLM 据此确认 IMU 不可用,再<strong>明知故用</strong> <code>drive_move</code> 开环执行并向用户声明「这步是估的」——降级永远由 LLM 显式选择并如实播报,禁止的只是闭环工具<em>内部</em>偷偷退化成按时间跑还谎称成功。</li>
+<li>结果返回「目标值 + 实测变化 + 最终误差 + 耗时 + 执行 owner」——把「ZMQ 发送成功」叫「执行成功」的时代到此为止。</li>
+</ul>
+<h3>有轮 odom 之后</h3>
+<pre><code>move_by(dx_m, dy_m)    # body frame(该步开始时):dx>0 前进, dy>0 左移;钳 hypot(dx,dy)
+turn_to(yaw_deg)       # REP-103 yaw(逆时针+),自动最短路径;仅同一 IMU epoch 内有效
+execute_motion(steps)  # 受限序列,见 §8</code></pre>
+<div class="box warn"><strong>接口符号地雷</strong>
+<code>imu_read</code> 返回的 <code>heading_deg</code> 是顺时针罗盘制,底盘 theta 是逆时针 REP-103——
+两套符号同时喂 LLM 必出符号事故。目标式工具统一只用 REP-103 yaw;<code>turn_to</code> 不叫
+<code>heading</code>。IMU 重启(epoch 变)后旧的绝对目标必须拒绝。</div>
+<h3>busy / 抢断语义</h3>
+<ul>
+<li>全局唯一自动运动 goal,<strong>不排队</strong>;busy 时返回 <code>busy + active_goal_id</code>。</li>
+<li>pad/GUI 接管 → 控制器立即以 <code>preempted_by_human</code> 结束,<strong>绝不</strong>在 HOLD 窗口过后偷偷续跑;人工接管后必须重新提交目标。</li>
+<li>状态枚举不能只有成功/失败:<code>succeeded / busy / canceled / preempted / blocked / sensor_stale / no_progress / timeout / controller_fault</code>——每个都是 LLM 能理解并据此重规划的信号。</li>
+</ul>
+
+<h2>5 · 无轮 odom 时,纯 IMU 的能与不能</h2>
+<table>
+<tr><th>✅ 能闭环</th><th>❌ 闭不了</th></tr>
+<tr><td>相对 yaw 转向(turn_by)</td><td>平移距离(只能 v×t 估计,结果须标记 <code>distance_estimated=true</code>)</td></tr>
+<tr><td>平移时航向保持(直行不跑歪——单项收益最大)</td><td>横向漂移、打滑后的真实位置</td></tr>
+<tr><td>倾斜/碰撞/静止检测</td><td>基于未标定磁场的绝对朝北</td></tr>
+<tr><td>校验轮 odom 的旋转方向与漂移(P2 起互检)</td><td>加速度二次积分当里程计</td></tr>
+</table>
+<div class="box err"><strong>加速度积分,死心</strong>
+0.01g 恒偏置 → 10 秒位置误差 0.5×0.098×10² ≈ <strong>4.9 米</strong>;1° 倾角误差把重力投影成
+0.17m/s² 假加速度;再叠轮振 + 25Hz 采样。它只配做短时「动没动」检测。</div>
+<h3>yaw 闭环控制律(P 控制,不要积分项)</h3>
+<pre><code>error = shortest_angle(target - current_yaw)
+omega_cmd = clamp(kp * error)          # + 角加速度限幅 + 近目标减速
+# 成功判据: |error| < 2° 且 |gyro_z| 足够小,连续 3–5 帧
+# 0.5s 无有效进展 → no_progress 停车
+# 积分项在静摩擦/被人工压制/轮卡住时只会积累灾难——不加</code></pre>
+<p>精度预期(先按此对外承诺,实测后再收紧):30°/s 时 25Hz 每帧转 1.2°,末段降到 8–10°/s 每帧
+0.3–0.4°;带减速段 + 稳定窗口,硬地重复误差 <strong>±2–3° 合理,对外按 ±5°</strong> 讲。
+±30/±90/±180° 各测 5–10 次、硬地和地毯分开,达不到就看数据,不拍脑袋调 PID。</p>
+
+<h2>6 · 轮 odom(P2):直接上 sync-read 30Hz,不做低频逐轮读</h2>
+<ul>
+<li>0.15m/s 下 5Hz 反馈每周期已走 3cm;30Hz 只 5mm——终点减速与异常检测质变。</li>
+<li>一次 sync-read 三轮 2 字节位置,指令+应答几十字节,1Mbps 下线速 &lt;1ms。贵的是现在的固定 sleep + 超时读 + 逐舵机事务,不是带宽。</li>
+<li>4096 counts/圈、轮周长 ~0.314m,分辨率远非瓶颈;打滑和采样延迟才是。</li>
+<li>软件展开多圈计数(STS3215 掉电不存),检测跳变/重启/采样空洞;先分别验证轮 odom 与 IMU,再谈 EKF——<strong>EKF 不是掩盖坏标定的化妆品</strong>。</li>
+<li>机械臂命令降频、合并,轮控制周期优先调度(同一条 1Mbps 串口还挂着 SO-101 六舵机)。</li>
+</ul>
+
+<h2>7 · 标定顺序(不是「先校磁力计」)</h2>
+<table>
+<tr><th>#</th><th>项目</th><th>要点</th></tr>
+<tr><td>1</td><td>时序与坐标系</td><td>IMU 安装轴/yaw 符号/±180° 跨界;/imu/data 实际频率与消息年龄;MCP 发帧→base_host 实际应用的端到端延迟</td></tr>
+<tr><td>2</td><td>gyro 量程(现为±2000dps 假设)</td><td>慢速 360° 旋转,gyro_z 积分 vs 融合 yaw vs 外部量角,正反转多速度;量程错不改变模块融合四元数,但影响停止判据与后续 EKF</td></tr>
+<tr><td>3</td><td>yaw 稳定性与电磁干扰</td><td>断扭矩/通电保持/三轮跑/机械臂动/Orin 高负载 各录 10–30min,看漂移、突跳、是否随电机电流变——<strong>动态硬铁比静态漂移危险</strong></td></tr>
+<tr><td>4</td><td>转向实测</td><td>±30/±90/±180° 各 5–10 次,记录超调/稳定时间/左右不对称,硬地+地毯</td></tr>
+<tr><td>5</td><td>轮反馈与几何</td><td>计数符号/过零展开/重启跳变;纯 vx、纯 vy、纯 ω 分开跑;标定有效轮半径与底盘半径;负载/地毯差异记为误差范围,别急着做自动 fallback profile</td></tr>
+<tr><td>6</td><td>磁力计</td><td><strong>MVP 不做</strong>:turn_by 不需要绝对北;校 raw mag 未必能改模块内部融合;9 个舵机的动态磁扰不是八字校准能修的。若融合 yaw 随轮电流跳变→让模块进 6 轴模式,不是给坏磁场套滤波器</td></tr>
+</table>
+
+<h2>8 · 安全:闭环的新风险</h2>
+<p>开环错误跑一段就停;<strong>闭环错误会永远坚持错误方向</strong>——控制器持续纠错是新增风险的根。必须加:</p>
+<ul>
+<li>单目标上限:最大角度/距离/执行时间;超时即 <code>timeout</code> 停车。</li>
+<li>IMU 消息年龄 &gt;120–200ms → 立停当前自动目标;quaternion 无效、yaw 突跳、IMU epoch 变 → 立停。<strong>不允许「IMU 坏了就退化按时间跑」的 fallback</strong>。</li>
+<li><code>applied_seq</code> 超时或 owner 不是本控制器 → 以 <code>preempted</code> 结束。</li>
+<li>有命令但 yaw/odom 无进展 → <code>blocked</code>;误差反复过零/振荡过多 → 停车,不是调参硬顶。</li>
+<li>控制器进程退出 → base_host 0.5s watchdog 兜底(第 3 层不变)。</li>
+</ul>
+<h3>雷达净空 gate</h3>
+<p>要进,但位置守住原计划:<strong>base_host 仲裁之后</strong>、带 TTL 的裁决、覆盖所有速度源(不只挡 ROS)。
+分两步:yaw MVP 有人监督时可先不做发布门槛(限低速 + 清空旋转包络);任何超过现有 0.3m
+单次风险包络的 move_by / sequence / 无人值守任务,<strong>必须先有 gate</strong>。gate 按速度方向算扫掠区
+(前/后/横移分向检查;旋转用整车外接圆,臂伸出时扩 footprint;含制动距离+余量;/scan 超时即停),
+并明说 2D 雷达看不见桌面、悬空物、透明物和悬崖——别把它包装成完整避障。</p>
+
+<h2>9 · 组合任务:先多次调用,后受限 sequence</h2>
+<p><strong>MVP 阶段让 LLM 多次调用</strong>:每步可观察、可停止、易定位错误,错误恢复语义天然
+(读 motion_status → 按实际位置重新规划)。轮 odom 与错误语义稳定后,再提供原子
+<code>execute_motion</code>:</p>
+<pre><code>{"steps": [
+  {"op": "move_by", "dx_m": 1.0, "dy_m": 0.0},
+  {"op": "turn_by", "angle_deg": -90},
+  {"op": "move_by", "dx_m": 0.5, "dy_m": 0.0}
+]}</code></pre>
+<ul>
+<li>只允许 <code>move_by / turn_by / wait</code>——不支持脚本、循环、条件。</li>
+<li>执行前一次性验证每步与总距离/总角度/总时间;≤8 步。</li>
+<li>全序列持同一运动 lease;任一步失败立即停车,后续不执行;返回 <code>completed_steps / failed_step / reason / measured_pose_delta</code>。</li>
+<li><strong>绝不从失败点自动恢复</strong>——LLM 先读状态再生成新计划。</li>
+</ul>
+<div class="box warn"><strong>自然语言歧义不归 sequence 管</strong>
+「前进 1 米右转 90 度回来」——「回来」是倒退 1 米还是回到原点?sequence 只执行明确计划;
+涉及返回原点,LLM 应先复述路径或要求确认(SOUL.md 运动守则已有「含糊先确认」)。
+waypoint 现在不做:没有可靠 /odom,waypoint 只是换名字的开环时间控制。</div>
+
+<h2>10 · 分阶段路线</h2>
+<table>
+<tr><th>阶段</th><th>内容</th><th>验收门</th></tr>
+<tr><td><strong>P0 地基</strong></td><td>三轮 sync-write;每源 latest-only + seq/ts/TTL;发布 owner/applied_seq;最终钳位(含向量模长)下沉 base_host;实测停车延迟</td><td>20Hz 速度帧无积压;停车帧不再排队;MCP 能确认命令被采用</td></tr>
+<tr><td><strong>P1 yaw 闭环 MVP</strong></td><td>独立 ROS2 motion_controller 订阅 /imu/data;MCP 加 turn_by/motion_status,drive_stop 可取消 goal;保留 drive_move</td><td>±30/±90/±180° 硬地重复误差 ≤3°,最坏 ≤5°</td></tr>
+<tr><td><strong>P1.5 航向保持</strong></td><td>平移仍按时间估距,IMU 动态补偿 ω 防跑歪;结果标 <code>distance_estimated=true</code></td><td>1m 直行横向偏差显著小于开环</td></tr>
+<tr><td><strong>P2 轮 odom</strong></td><td>三轮位置 sync-read ≥30Hz;软件展开计数;ROS 节点算正运动学;硬地/地毯 vx/vy/ω 标定</td><td>轮反馈 ≥30Hz、p95&lt;40ms(与 ROS2 计划 P2 同门)</td></tr>
+<tr><td><strong>P3 move_by</strong></td><td>轮 odom 控距离 + IMU 保 yaw;减速/终点稳定/打滑异常;雷达 gate 前保持 0.3m 单次包络</td><td>1m 平移误差 ≤3–5cm(实测定)</td></tr>
+<tr><td><strong>P4 组合任务</strong></td><td>受限 execute_motion;/odom 稳定后再谈相对 waypoint;有定位后才有 navigate_to(map_pose)</td><td>失败即停、无自动续跑经混沌测试</td></tr>
+</table>
+
+<h2>附 · 双模型结论与分歧</h2>
+<ul>
+<li><strong>一致</strong>:先闭环 yaw;LLM 交目标不拼速度帧;磁力计 MVP 不标;加速度积分不做;组合任务先多次调用。</li>
+<li><strong>codex 修正了 Claude 的初始倾向</strong>:Claude 起初倾向「MCP 进程内 20Hz 控制线程」求最小改动;codex 指出反馈绕 rosbridge、生命周期耦合、以及「控制器不知命令是否被仲裁采用」三点,并给出 base_host 串口事务实测级问题(逐轮 txrx ≈72ms)——<strong>P0 是前置条件,不是顺手优化</strong>。Claude 逐条核实代码后采纳:小型 ROS2 yaw controller + 薄 MCP 目标适配器。</li>
+<li><strong>与既有 <a href="ros2-integration-plan.html">ROS2 集成计划</a>零冲突</strong>:P0 的 seq/ts/TTL/latest-only 与计划中的命令协议升级是同一件事;P2 轮 odom 与计划 P2(:5557)同门;雷达 gate 位置(仲裁后、全源生效)与计划的 lekiwi_safety 裁决一致。</li>
+</ul>
+
+</div>
+</body>
+</html>

@@ -19,7 +19,8 @@
 - [S2 语音前端已通](voice-frontend-s2.md) — SenseVoice+edge-tts/Melo,voice/ daemon+GUI 语音 Tab;MCP01 必须长按电源键开机否则麦克风全零
 - [离线 TTS 升级调研](voice-tts-upgrade.md) — melo/kokoro CPU 不实时(实测),matcha-zh-en RTF 0.18 赢家;Qwen3-TTS 走 TRT-Edge-LLM 是质量线;改 TTS 前读
 - [ROS 2 集成计划](ros2-integration-plan.md) — 2026-07-20 定稿经 codex 评审:并行层+安全门下沉 base_host+slam_toolbox/AMCL/DWB;动 ROS 前必读 docs/ros2-integration-plan.html
-- [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
+- [IMU 闭环控车方案](imu-closed-loop-drive-plan.md) — 2026-07-22 P0+P1 已实施:base_host sync-write/latest-only/ack :5557,motion_controller yaw 闭环 + MCP turn_by;待 motion 开关打开做精度实测;动控车前必读 docs/imu-closed-loop-drive.html
+- [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;imu_read 只读 IMU 快照(航向/气压/温度);无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
 - [板端单测](unit-tests-board.md) — tests/ 纯逻辑单测,Mac 上 uv run --with pytest --with numpy pytest tests/ -q;只测纯函数不测胶水,JS 不测
 - [Commit 纪律](commit-discipline.md) — 实施期不 commit 不 amend,留工作区等用户指示收尾
 - [板子账号已改名 jetson](board-account-jetson.md) — 2026-07-20 usermod -l 就地改名;改路径时 grep 扫不到符号链接和 ELF RUNPATH,搬家前必读

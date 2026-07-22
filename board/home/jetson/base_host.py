@@ -7,7 +7,12 @@ but the wheels never need calibration, so this speaks the same ZMQ wire contract
 without any of that:
 
   bind  PULL  tcp://*:5555
+  bind  PUB   tcp://*:5557  (feedback: per-applied-frame ack + 2 Hz state)
   recv  one JSON string per command: {"x.vel": m/s, "y.vel": m/s, "theta.vel": deg/s}
+        optional sender stamps: "src" (pad|gui|ros|mcp), "seq", "ts" (epoch s),
+        "ttl_s" — stamped frames past their TTL are dropped; each poll drains
+        the queue and applies only the newest frame of the winning priority
+        (latest-only), so stale queued velocity never reaches the wheels.
         plus optional arm keys (all default 0, all -1..1):
         "ee.vf"   toward EXTENDED(+) / back toward REST(-)
         "ee.vz"   toward UPRIGHT(+)  / back toward REST(-)
@@ -58,13 +63,33 @@ BAUD = 1000000
 WATCHDOG_S = 0.5
 
 # Base-velocity priority mux (ported from rdk-x5 cmd_vel_mux): the physical
-# gamepad ALWAYS outranks software senders; the human GUI outranks the LLM.
-# A source owns the base for BASE_HOLD_S after its last base frame — pad's
-# release-zero therefore also pins the bus, so holding the pad e-stop
-# suppresses MCP motion. Untagged messages rank as "gui" (legacy binaries).
-BASE_PRIO = {"pad": 0, "gui": 1, "mcp": 2}
-BASE_PRIO_NAME = {0: "pad", 1: "gui", 2: "mcp"}
+# gamepad ALWAYS outranks software senders; the human GUI outranks the LLM;
+# the ROS motion controller sits between them (it executes LLM goals, so it
+# must yield to humans but outrank raw MCP bursts). A source owns the base for
+# BASE_HOLD_S after its last base frame — pad's release-zero therefore also
+# pins the bus, so holding the pad e-stop suppresses MCP motion. Untagged
+# messages rank as "gui" (legacy binaries).
+BASE_PRIO = {"pad": 0, "gui": 1, "ros": 2, "mcp": 3}
+BASE_PRIO_NAME = {0: "pad", 1: "gui", 2: "ros", 3: "mcp"}
 BASE_HOLD_S = 0.5
+
+# Final body-velocity ceiling, applied AFTER arbitration to every source.
+# Above the physical envelope (MAX_RAW over-speed scaling caps wheel linear
+# speed ~0.19 m/s), so no current sender is affected — this only catches
+# insane commands from a buggy/compromised sender. Translation clamps the
+# VECTOR NORM (per-component clamps let a diagonal reach sqrt(2)x the limit).
+BODY_VMAX = 0.35   # m/s
+BODY_WMAX = 90.0   # deg/s
+
+# Feedback PUB (bound on PUB_BIND): one JSON ack per APPLIED base frame
+# {type:"ack", owner, seq, vx, vy, om, ts} + a 2 Hz {type:"state", ...}
+# heartbeat. This is what lets a closed-loop controller know whether its
+# frames were actually applied or muted by a higher-priority source.
+# :5557 per the ROS2 integration plan (base_host feedback channel; wheel-odom
+# frames will ride the same socket later, tagged by "type"). :5556 is taken
+# by pad_teleop's own PUB.
+PUB_BIND = "tcp://*:5557"
+STATE_PERIOD_S = 0.5
 
 # Servo-battery telemetry: the STS3215s run off the WitMotion 11.1 V (3S) pack,
 # so a wheel servo's Present-Voltage register is a stand-in for pack voltage
@@ -142,6 +167,23 @@ def txrx(ser, pkt, wait=0.004):
     return ser.read(64)
 
 
+def sync_write_pkt(addr, per_id):
+    """Broadcast sync-write (instr 0x83) packet: {sid: [data bytes]} — one
+    wire transaction for all servos, no per-servo status replies. This is
+    what keeps a 3-wheel velocity frame ~0.3 ms instead of 3x24 ms of txrx."""
+    ids = sorted(per_id)
+    n = len(per_id[ids[0]])
+    body = [0xFE, (n + 1) * len(ids) + 4, 0x83, addr, n]
+    for sid in ids:
+        body += [sid] + list(per_id[sid])
+    return bytes([0xFF, 0xFF] + body + [cksum(body)])
+
+
+def sync_write(ser, addr, per_id):
+    ser.write(sync_write_pkt(addr, per_id))
+    ser.flush()
+
+
 def write(ser, sid, addr, data):
     body = [sid, len(data) + 3, 0x03, addr] + list(data)
     return txrx(ser, bytes([0xFF, 0xFF] + body + [cksum(body)]))
@@ -168,6 +210,33 @@ def base_blocked(prio_last, p, now):
     (sent a base frame within BASE_HOLD_S). Safety-critical: this is what lets
     the physical pad's stream — including its release-zero — mute the LLM."""
     return any(now - prio_last.get(q, -1.0) < BASE_HOLD_S for q in range(p))
+
+
+def frame_ttl_ok(data, now):
+    """False only when the sender stamped the frame (ts + ttl_s) and it has
+    expired. Unstamped legacy frames always pass — Never break userspace."""
+    ts, ttl = data.get("ts"), data.get("ttl_s")
+    if ts is None or ttl is None:
+        return True
+    try:
+        return now - float(ts) <= float(ttl)
+    except (TypeError, ValueError):
+        return True
+
+
+def clamp_body(vx, vy, om):
+    """Final safety ceiling after arbitration: translation clamped by vector
+    norm (not per component), rotation by BODY_WMAX."""
+    n = math.hypot(vx, vy)
+    if n > BODY_VMAX:
+        vx, vy = vx * BODY_VMAX / n, vy * BODY_VMAX / n
+    return vx, vy, clamp(om, -BODY_WMAX, BODY_WMAX)
+
+
+def current_owner(prio_last, now):
+    """Priority level currently holding the base bus, or None."""
+    held = [p for p, t in prio_last.items() if now - t < BASE_HOLD_S]
+    return min(held) if held else None
 
 
 def solve(vx, vy, omega_deg):
@@ -408,21 +477,18 @@ def ensure_wheel_mode(ser):
 
 
 def drive(ser, speeds):
-    for sid, v in speeds.items():
-        write(ser, sid, ADDR_SPEED, le(raw_speed(v)))
+    sync_write(ser, ADDR_SPEED, {sid: le(raw_speed(v)) for sid, v in speeds.items()})
 
 
 def stop(ser):
-    for sid in WHEELS:
-        write(ser, sid, ADDR_SPEED, le(0))
+    sync_write(ser, ADDR_SPEED, {sid: le(0) for sid in WHEELS})
 
 
 def wheels_torque(ser, on):
     # Cut wheel torque so the base is limp (hand-pushable) when motion is off;
     # re-energize on resume. Always stop() before cutting so the speed register
     # is 0 and re-arming can't lurch on a stale command.
-    for sid in WHEELS:
-        write(ser, sid, ADDR_TORQUE, [1 if on else 0])
+    sync_write(ser, ADDR_TORQUE, {sid: [1 if on else 0] for sid in WHEELS})
 
 
 def main():
@@ -443,9 +509,19 @@ def main():
     # Instead every poll drains the whole queue and arbitrates per message.
     sock.setsockopt(zmq.RCVHWM, 64)
     sock.bind(BIND)
+    pub = ctx.socket(zmq.PUB)
+    pub.setsockopt(zmq.SNDHWM, 16)
+    pub.bind(PUB_BIND)
+
+    def publish(obj):
+        try:
+            pub.send_string(json.dumps(obj), zmq.NOBLOCK)
+        except zmq.Again:
+            pass
+
     poller = zmq.Poller()
     poller.register(sock, zmq.POLLIN)
-    print(f"[base_host] listening on {BIND}", flush=True)
+    print(f"[base_host] listening on {BIND}, feedback on {PUB_BIND}", flush=True)
 
     last_cmd = time.time()
     last_batt = 0.0
@@ -467,9 +543,15 @@ def main():
         stop(ser)
         wheels_torque(ser, False)   # boot latched off -> wheels limp
         print("[base_host] SAFETY: motion output DISABLED (latched)", flush=True)
+    last_state_pub = 0.0
     try:
         while True:
             socks = dict(poller.poll(timeout=50))
+            # Latest-only: the drain loop below arbitrates every queued frame
+            # but APPLIES none — it keeps only the newest frame of the highest
+            # unblocked priority, applied once after the drain. Stale queued
+            # velocity never reaches the wheels and never feeds the watchdog.
+            pending = None            # (prio, vx, vy, om, seq)
             while sock in socks:
                 try:
                     raw = sock.recv_string(zmq.NOBLOCK)
@@ -517,21 +599,16 @@ def main():
                     # Freeze latched glides too, or re-enabling would replay a
                     # relax/mid request queued while the switch was off.
                     relaxing = mid_seek = False
-                if base:
+                if base and frame_ttl_ok(data, now):
                     p = BASE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
-                    if base_blocked(prio_last, p, now):
-                        base = False          # a higher-priority source owns it
-                    else:
+                    if not base_blocked(prio_last, p, now):
                         prio_last[p] = now
                         if p != base_owner:
                             base_owner = p
                             print(f"[base_host] base owner -> "
                                   f"{BASE_PRIO_NAME.get(p, '?')}", flush=True)
-                if base and motion_on:
-                    speeds = solve(vx, vy, om)
-                    drive(ser, speeds)
-                    moving = any(abs(v) > 1 for v in speeds.values())
-                    last_base = now
+                        if pending is None or p <= pending[0]:
+                            pending = (p, vx, vy, om, data.get("seq"))
                 if arm and motion_on and dq is not None and len(dq) == 6:
                     relaxing = False
                     mid_seek = False
@@ -545,10 +622,28 @@ def main():
                 if data.get("arm.mid") or data.get("arm.relax"):
                     last_arm_cmd = now
                 last_cmd = now
+            if pending is not None and motion_on:
+                p, vx, vy, om, seq = pending
+                vx, vy, om = clamp_body(vx, vy, om)
+                speeds = solve(vx, vy, om)
+                drive(ser, speeds)
+                moving = any(abs(v) > 1 for v in speeds.values())
+                last_base = time.time()
+                publish({"type": "ack", "owner": BASE_PRIO_NAME.get(p, "?"),
+                         "seq": seq, "vx": vx, "vy": vy, "om": om,
+                         "moving": moving, "ts": last_base})
             if moving and time.time() - last_base > WATCHDOG_S:
                 stop(ser)
                 moving = False
                 print("[base_host] watchdog: stopped (no command)", flush=True)
+            now_s = time.time()
+            if now_s - last_state_pub >= STATE_PERIOD_S:
+                last_state_pub = now_s
+                own = current_owner(prio_last, now_s)
+                publish({"type": "state",
+                         "owner": BASE_PRIO_NAME.get(own, "none"),
+                         "motion_on": motion_on, "moving": moving,
+                         "ts": now_s})
             # Idle auto-relax: torque holding costs power/heat for nothing, so
             # after ARM_IDLE_RELAX_S without arm input, glide to REST and limp.
             if (arm and motion_on and not arm.relaxed and not relaxing

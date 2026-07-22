@@ -98,3 +98,77 @@ def test_motion_garbage_file_defaults_on(tmp_path, monkeypatch):
     p.write_text("wat\n")
     monkeypatch.setattr(bh, "MOTION_FILE", str(p))
     assert bh.read_motion() is True
+
+
+# ---- sync_write_pkt: broadcast frame layout + checksum -------------------
+
+def test_sync_write_pkt_layout():
+    # 3 wheels, 2 bytes each: FF FF FE len 83 addr n [id d0 d1]*3 cksum
+    pkt = bh.sync_write_pkt(bh.ADDR_SPEED, {7: [1, 2], 8: [3, 4], 9: [5, 6]})
+    assert pkt[:2] == b"\xff\xff"
+    assert pkt[2] == 0xFE                    # broadcast id
+    assert pkt[3] == (2 + 1) * 3 + 4         # length field
+    assert pkt[4] == 0x83                    # sync-write instruction
+    assert pkt[5] == bh.ADDR_SPEED
+    assert pkt[6] == 2                       # bytes per servo
+    assert pkt[7:13] == bytes([7, 1, 2, 8, 3, 4])
+    assert pkt[13:16] == bytes([9, 5, 6])
+    assert pkt[-1] == bh.cksum(list(pkt[2:-1]))
+    assert len(pkt) == 17
+
+
+def test_sync_write_pkt_single_servo():
+    pkt = bh.sync_write_pkt(bh.ADDR_TORQUE, {7: [1]})
+    assert pkt[3] == (1 + 1) * 1 + 4
+    assert pkt[6] == 1
+
+
+# ---- frame_ttl_ok: stamped frames expire, legacy frames never ------------
+
+def test_frame_ttl_unstamped_always_ok():
+    assert bh.frame_ttl_ok({}, 100.0)
+    assert bh.frame_ttl_ok({"ts": 1.0}, 100.0)          # ts without ttl
+    assert bh.frame_ttl_ok({"ttl_s": 0.1}, 100.0)       # ttl without ts
+
+
+def test_frame_ttl_expiry():
+    f = {"ts": 10.0, "ttl_s": 0.2}
+    assert bh.frame_ttl_ok(f, 10.15)
+    assert not bh.frame_ttl_ok(f, 10.25)
+
+
+def test_frame_ttl_garbage_passes():
+    assert bh.frame_ttl_ok({"ts": "wat", "ttl_s": 0.2}, 10.0)
+
+
+# ---- clamp_body: vector-norm final ceiling -------------------------------
+
+def test_clamp_body_vector_norm():
+    vx, vy, om = bh.clamp_body(1.0, 1.0, 0.0)
+    assert math.isclose(math.hypot(vx, vy), bh.BODY_VMAX, rel_tol=1e-9)
+    assert math.isclose(vx, vy, rel_tol=1e-9)            # direction preserved
+
+
+def test_clamp_body_passthrough_inside_limits():
+    assert bh.clamp_body(0.1, -0.1, 30.0) == (0.1, -0.1, 30.0)
+
+
+def test_clamp_body_omega():
+    assert bh.clamp_body(0.0, 0.0, 500.0)[2] == bh.BODY_WMAX
+    assert bh.clamp_body(0.0, 0.0, -500.0)[2] == -bh.BODY_WMAX
+
+
+# ---- current_owner -------------------------------------------------------
+
+def test_current_owner_highest_fresh_wins():
+    now = 100.0
+    assert bh.current_owner({0: now - 0.1, 3: now - 0.1}, now) == 0
+    assert bh.current_owner({3: now - 0.1}, now) == 3
+    assert bh.current_owner({0: now - bh.BASE_HOLD_S - 1}, now) is None
+    assert bh.current_owner({}, now) is None
+
+
+# ---- ros priority sits between gui and mcp -------------------------------
+
+def test_ros_priority_ordering():
+    assert bh.BASE_PRIO["pad"] < bh.BASE_PRIO["gui"] < bh.BASE_PRIO["ros"] < bh.BASE_PRIO["mcp"]

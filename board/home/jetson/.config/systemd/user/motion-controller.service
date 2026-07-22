@@ -1,0 +1,15 @@
+# Yaw closed-loop motion controller: /imu/data feedback -> src=ros velocity
+# frames to base_host :5555. Goal API on local ZMQ REP :5560 (drive MCP).
+# If this process dies mid-goal, base_host's 0.5 s watchdog brakes the base.
+[Unit]
+Description=IMU yaw closed-loop motion controller
+After=imu-10dof.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && exec python3 /home/jetson/ros2/motion_controller.py'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
