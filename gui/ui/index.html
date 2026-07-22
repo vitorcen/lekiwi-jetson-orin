@@ -228,7 +228,14 @@
 
     <!-- 左：视频画面 -->
     <section class="panel" id="vidPanel">
-      <h2>相机画面 <span class="en">Live camera</span></h2>
+      <h2>相机画面 <span class="en">Live camera</span>
+        <label id="vCamPick" title="选相机:前置=头部广角(连续采集);腕部=爪子特写(按需抓帧,约1fps预览)">
+          <select id="vCamSel">
+            <option value="front" selected>前置(头部)</option>
+            <option value="wrist">腕部(爪)</option>
+          </select>
+        </label>
+      </h2>
       <div id="vidbox">
         <img id="vlmImg" alt="camera" draggable="false">
         <div id="vidoverlay">

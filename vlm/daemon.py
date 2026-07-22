@@ -48,6 +48,18 @@ CAMERA_DEV = _env(
 )
 FFMPEG = os.path.expanduser(_env("VLM_FFMPEG", "~/.local/bin/ffmpeg"))
 VIDEO_SIZE = _env("VLM_VIDEO_SIZE", "1280x720")
+# Wrist (gripper) camera: Sunplus "2M" UVC, 640x480 MJPEG (same params the ROS
+# wrist_cam node uses). One-shot grabs only — no continuous capture, no shared
+# caption; the device is otherwise owned on-demand by the ROS node, so a grab
+# can fail with EBUSY while someone subscribes to /wrist_cam/compressed.
+WRIST_CAMERA_DEV = _env(
+    "VLM_WRIST_CAMERA", "/dev/v4l/by-id/usb-XHH-260128-A_2M-video-index0")
+WRIST_VIDEO_SIZE = _env("VLM_WRIST_VIDEO_SIZE", "640x480")
+# camera id -> (v4l2 device, grab size). "front" keeps every existing behaviour.
+CAMERAS = {
+    "front": (CAMERA_DEV, VIDEO_SIZE),
+    "wrist": (WRIST_CAMERA_DEV, WRIST_VIDEO_SIZE),
+}
 # Watch cadence: PERIOD between caption starts, inference time INCLUDED — a
 # 10 s period with 4 s inference sleeps 6 s, so the rate the user picks is the
 # rate they get instead of drifting with model latency. Runtime-settable via
@@ -110,6 +122,10 @@ class Daemon:
         self.last_frame: bytes | None = None
         self.last_frame_ts: float = 0.0
         self.last_grab_ok: bool = False
+        # wrist camera preview cache (one-shot grabs, GUI polls ~1fps; short TTL
+        # so consecutive polls don't reopen the device every time)
+        self.wrist_frame: bytes | None = None
+        self.wrist_frame_ts: float = 0.0
         self.last_caption: dict | None = None   # SHARED slot: DEFAULT_PROMPT scene captions only
         self.last_answer: dict | None = None    # VQA slot: /describe + custom-prompt /look
         self.seq = 0
@@ -220,14 +236,14 @@ class Daemon:
         return {"kind": kind, "detail": e["detail"], "ts": round(e["ts"], 3)}
 
     # -- camera: one-shot grab (idle / capture-off fallback) ------------- #
-    async def grab_frame(self) -> bytes:
-        """Grab a single JPEG via ffmpeg (opens+closes the device). Raises on
-        failure. Updates the frame cache on success. Used only when the
-        continuous capture is off (no device double-open)."""
+    async def _grab_jpeg(self, dev: str, size: str) -> bytes:
+        """Grab one JPEG via ffmpeg from an arbitrary device (opens+closes it).
+        Pure: raises RuntimeError on failure, touches no daemon state — the
+        wrist camera must never dirty the front camera's cache/health."""
         cmd = [
             FFMPEG, "-hide_banner", "-loglevel", "error",
             "-f", "v4l2", "-input_format", "mjpeg",
-            "-video_size", VIDEO_SIZE, "-i", CAMERA_DEV,
+            "-video_size", size, "-i", dev,
             "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1",
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -242,17 +258,35 @@ class Daemon:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            self.last_grab_ok = False
-            self._note_camera_error(f"camera grab timed out after {GRAB_TIMEOUT}s")
-            raise RuntimeError(f"camera grab timed out after {GRAB_TIMEOUT}s")
-
+            raise RuntimeError(
+                f"camera grab timed out after {GRAB_TIMEOUT}s ({dev})")
         if proc.returncode != 0 or not out[:2] == b"\xff\xd8":
-            self.last_grab_ok = False
             msg = err.decode("utf-8", "replace").strip()[:400]
-            detail = f"ffmpeg grab failed rc={proc.returncode}: {msg or 'no jpeg data'}"
-            self._note_camera_error(detail)
-            raise RuntimeError(detail)
+            raise RuntimeError(
+                f"ffmpeg grab failed rc={proc.returncode} ({dev}): "
+                f"{msg or 'no jpeg data'}")
+        return out
 
+    async def get_wrist_frame(self) -> bytes:
+        """Wrist-camera preview frame: cached for 1s (GUI polls ~1fps without
+        reopening the device per poll), else a fresh one-shot grab."""
+        now = time.time()
+        if self.wrist_frame is not None and now - self.wrist_frame_ts <= 1.0:
+            return self.wrist_frame
+        out = await self._grab_jpeg(*CAMERAS["wrist"])
+        self.wrist_frame = out
+        self.wrist_frame_ts = time.time()
+        return out
+
+    async def grab_frame(self) -> bytes:
+        """Front-camera one-shot grab: updates the frame cache + health flags.
+        Used only when the continuous capture is off (no device double-open)."""
+        try:
+            out = await self._grab_jpeg(CAMERA_DEV, VIDEO_SIZE)
+        except RuntimeError as exc:
+            self.last_grab_ok = False
+            self._note_camera_error(str(exc))
+            raise
         self.last_frame = out
         self.last_frame_ts = time.time()
         self.last_grab_ok = True
@@ -449,24 +483,31 @@ class Daemon:
                     "detail": f"{type(exc).__name__}: {exc}",
                 }
 
-    async def caption_once(self, prompt: str) -> dict:
-        """Caption a frame. Reuses the latest continuously-captured frame when
-        capture is live (fresher + faster, no device reopen); one-shot grabs it
-        otherwise. Attaches a downscaled thumbnail of the EXACT interpreted frame
-        as base64 `frame_b64`. Always returns a structured dict carrying
-        frame_ts + latency_ms; never raises."""
+    async def caption_once(self, prompt: str, camera: str = "front") -> dict:
+        """Caption a frame. front: reuses the latest continuously-captured frame
+        when capture is live (fresher + faster, no device reopen), one-shot grabs
+        otherwise. wrist: always a one-shot grab from the gripper camera (no
+        cache involvement either way). Attaches a downscaled thumbnail of the
+        EXACT interpreted frame as base64 `frame_b64`. Always returns a
+        structured dict carrying camera + frame_ts + latency_ms; never raises."""
         t0 = time.time()
         try:
-            if self.capture_on and self.last_frame is not None:
-                jpeg = self.last_frame
-                frame_ts = self.last_frame_ts
+            if camera == "front":
+                if self.capture_on and self.last_frame is not None:
+                    jpeg = self.last_frame
+                    frame_ts = self.last_frame_ts
+                else:
+                    jpeg = await self.grab_frame()
+                    frame_ts = self.last_frame_ts
             else:
-                jpeg = await self.grab_frame()
-                frame_ts = self.last_frame_ts
+                dev, size = CAMERAS[camera]
+                jpeg = await self._grab_jpeg(dev, size)
+                frame_ts = time.time()
         except Exception as exc:  # camera failure -> structured, no crash
             return {
                 "error": "camera grab failed",
                 "detail": str(exc),
+                "camera": camera,
                 "frame_ts": None,
                 "latency_ms": int((time.time() - t0) * 1000),
                 "frame_b64": None,
@@ -478,23 +519,28 @@ class Daemon:
         else:
             self.last_llama_ok_ts = time.time()
         latency_ms = int((time.time() - t0) * 1000)
+        res["camera"] = camera
         res["frame_ts"] = frame_ts
         res["latency_ms"] = latency_ms
         res["frame_b64"] = await self._thumbnail(jpeg)
         return res
 
     # -- coalescing (bounded latest-wins per sink, never stacks) --------- #
-    async def _coalesced(self, sink: str, prompt: str) -> dict:
-        """Run caption_once(prompt) coalesced within `sink` ("shared"|"answer").
-        In-flight + one queued batch; a newer request supersedes the queued
-        prompt and rides the same result. GPU is serialized by _llama_lock."""
+    async def _coalesced(self, sink: str, prompt: str,
+                         camera: str = "front") -> dict:
+        """Run caption_once(prompt, camera) coalesced within `sink`
+        ("shared"|"answer"). In-flight + one queued batch; a newer request
+        supersedes the queued prompt/camera and rides the same result. GPU is
+        serialized by _llama_lock."""
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         batch = self._batches[sink]
         if batch is None:
-            self._batches[sink] = {"prompt": prompt, "futures": [fut]}
+            self._batches[sink] = {"prompt": prompt, "camera": camera,
+                                   "futures": [fut]}
         else:
             batch["prompt"] = prompt
+            batch["camera"] = camera
             batch["futures"].append(fut)
         if not self._running[sink]:
             asyncio.create_task(self._batch_worker(sink))
@@ -508,7 +554,8 @@ class Daemon:
             while self._batches[sink] is not None:
                 batch = self._batches[sink]
                 self._batches[sink] = None
-                res = await self.caption_once(batch["prompt"])
+                res = await self.caption_once(batch["prompt"],
+                                              batch.get("camera", "front"))
                 for f in batch["futures"]:
                     if not f.done():
                         f.set_result(res)
@@ -521,17 +568,23 @@ class Daemon:
         res = await self._coalesced("shared", DEFAULT_PROMPT)
         return self._store_caption(res)
 
-    async def answer(self, prompt: str) -> dict:
+    async def answer(self, prompt: str, camera: str = "front") -> dict:
         """Run a VQA / custom-prompt caption into the ISOLATED answer slot.
         Never touches the shared watch slot, ring, or SSE feed."""
-        res = await self._coalesced("answer", prompt)
+        res = await self._coalesced("answer", prompt, camera)
         self.last_answer = res
         return res
 
-    async def look(self, max_age_s: float, prompt: str | None) -> dict:
+    async def look(self, max_age_s: float, prompt: str | None,
+                   camera: str = "front") -> dict:
         """get-or-refresh. Custom prompt -> isolated fresh answer (never cached).
         Default prompt -> return the shared caption if age <= max_age_s
-        (cached:true, zero GPU), else refresh the shared slot (cached:false)."""
+        (cached:true, zero GPU), else refresh the shared slot (cached:false).
+        Non-front cameras have no shared slot: always a fresh isolated answer."""
+        if camera != "front":
+            res = dict(await self.answer(prompt or DEFAULT_PROMPT, camera))
+            res["cached"] = False
+            return res
         if prompt:
             res = dict(await self.answer(prompt))
             res["cached"] = False
@@ -806,6 +859,8 @@ async def h_health(request: web.Request) -> web.Response:
         "model": d.active_model_id(),
         "model_switch_busy": d.model_switch_busy,
         "camera": {"device": CAMERA_DEV, "last_ok": d.last_grab_ok},
+        "wrist_camera": {"device": WRIST_CAMERA_DEV,
+                         "present": os.path.exists(WRIST_CAMERA_DEV)},
         "camera_fps": d.current_fps(),      # measured; 0 when capture off
         "capture_on": d.capture_on,
         "last_caption_ts": (
@@ -819,7 +874,23 @@ async def h_health(request: web.Request) -> web.Response:
 
 async def h_frame(request: web.Request) -> web.Response:
     # NB: /frame.jpg does NOT count as activity and must NOT promote to watch.
-    # It DOES turn the continuous capture on and refresh its activity clock.
+    # front: turns the continuous capture on + refreshes its activity clock.
+    # wrist: cached one-shot grabs only — never starts the front capture.
+    if request.query.get("camera") == "wrist":
+        try:
+            jpeg = await DAEMON.get_wrist_frame()
+        except Exception as exc:
+            return web.json_response(
+                {"error": "camera grab failed", "detail": str(exc)}, status=503
+            )
+        return web.Response(
+            body=jpeg,
+            content_type="image/jpeg",
+            headers={
+                "X-Frame-Ts": f"{DAEMON.wrist_frame_ts:.3f}",
+                "X-Fps": "0.0",
+            },
+        )
     DAEMON.note_frame_poll()
     try:
         jpeg = await DAEMON.get_frame_for_serving()
@@ -878,6 +949,7 @@ async def h_look(request: web.Request) -> web.Response:
     DAEMON.touch()
     prompt = None
     max_age_s = LOOK_MAX_AGE
+    camera = "front"
     if request.can_read_body:
         try:
             body = await request.json()
@@ -886,9 +958,11 @@ async def h_look(request: web.Request) -> web.Response:
                     prompt = str(body["prompt"])
                 if body.get("max_age_s") is not None:
                     max_age_s = float(body["max_age_s"])
+                if body.get("camera") in CAMERAS:
+                    camera = body["camera"]
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
-    res = await DAEMON.look(max_age_s, prompt)
+    res = await DAEMON.look(max_age_s, prompt, camera)
     res["stale_reason"] = DAEMON.stale_reason()
     return web.json_response(res)
 
@@ -941,17 +1015,21 @@ async def h_events(request: web.Request) -> web.StreamResponse:
 async def h_describe(request: web.Request) -> web.Response:
     DAEMON.touch()
     prompt = DEFAULT_PROMPT
+    camera = "front"
     if request.can_read_body:
         try:
             body = await request.json()
-            if isinstance(body, dict) and body.get("prompt"):
-                prompt = str(body["prompt"])
+            if isinstance(body, dict):
+                if body.get("prompt"):
+                    prompt = str(body["prompt"])
+                if body.get("camera") in CAMERAS:
+                    camera = body["camera"]
         except (json.JSONDecodeError, ValueError):
             pass
     # VQA burst -> isolated answer slot. Does NOT overwrite the shared watch
     # caption slot / ring / SSE feed (the GUI ask box reads this response
     # directly). The shared slot only ever holds DEFAULT_PROMPT scene captions.
-    res = dict(await DAEMON.answer(prompt))
+    res = dict(await DAEMON.answer(prompt, camera))
     res["stale_reason"] = DAEMON.stale_reason()
     return web.json_response(res)
 

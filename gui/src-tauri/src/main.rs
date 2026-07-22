@@ -785,11 +785,16 @@ async fn vlm_models(ip: String) -> Result<String, String> {
 /// frontend drops b64 into `img.src = "data:image/jpeg;base64,<...>"` and shows
 /// the measured fps.
 #[tauri::command]
-async fn vlm_frame(ip: String) -> Result<String, String> {
+async fn vlm_frame(ip: String, camera: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let auth = vlm_auth()?;
+        let path = if camera.as_deref() == Some("wrist") {
+            "/frame.jpg?camera=wrist"
+        } else {
+            "/frame.jpg"
+        };
         let resp = vlm_agent(6)
-            .get(&vlm_url(&ip, "/frame.jpg"))
+            .get(&vlm_url(&ip, path))
             .timeout(Duration::from_secs(6))
             .set("Authorization", &auth)
             .call()
@@ -810,14 +815,18 @@ async fn vlm_frame(ip: String) -> Result<String, String> {
 /// One-shot describe. VLM inference can take several seconds, so the timeout is
 /// generous; the call still runs off the async runtime.
 #[tauri::command]
-async fn vlm_describe(ip: String, prompt: String) -> Result<String, String> {
+async fn vlm_describe(ip: String, prompt: String,
+                      camera: Option<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let auth = vlm_auth()?;
-        let body = if prompt.trim().is_empty() {
-            "{}".to_string()
-        } else {
-            serde_json::json!({ "prompt": prompt }).to_string()
-        };
+        let mut body = serde_json::Map::new();
+        if !prompt.trim().is_empty() {
+            body.insert("prompt".into(), serde_json::json!(prompt));
+        }
+        if camera.as_deref() == Some("wrist") {
+            body.insert("camera".into(), serde_json::json!("wrist"));
+        }
+        let body = serde_json::Value::Object(body).to_string();
         vlm_agent(90)
             .post(&vlm_url(&ip, "/describe"))
             .timeout(Duration::from_secs(90))

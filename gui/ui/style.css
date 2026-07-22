@@ -148,6 +148,9 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 #telewrap.armed .panel { border-color: #3a63a8; }
 .panel h2 { margin: 0 0 4px; font-size: 15px; font-weight: 700; }
 .panel h2 .en { font-size: 12px; font-weight: 400; color: #6b7394; margin-left: 8px; }
+/* camera picker lives in the video panel title so it's visible without scrolling */
+#vCamPick { float: right; font-size: 13px; font-weight: 400; }
+#vCamPick select { font-size: 13px; }
 .tip { font-size: 12.5px; color: #8b93b5; margin: 4px 0 16px; }
 /* A tip inside a packed control row: break onto its own full-width line instead
    of being squeezed into a sliver by the flex siblings. */

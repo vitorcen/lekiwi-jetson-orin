@@ -112,9 +112,13 @@ async def list_tools() -> list[Tool]:
                 "`max_age_s` seconds (cached:true, zero GPU) else captures a "
                 "fresh one (cached:false). A custom `prompt` always runs a "
                 "fresh, isolated VQA answer and never returns/overwrites the "
-                "shared caption. Result carries age_seconds, stale_reason and a "
-                "human-readable `notice` (warns when perception is degraded). "
-                "Read-only; cannot move the robot."
+                "shared caption. `camera` picks the viewpoint: 'front' is the "
+                "head camera (default, wide scene view); 'wrist' is the gripper "
+                "wrist camera (close-up of what the claw is holding/facing — "
+                "always a fresh capture, never cached). Result carries "
+                "age_seconds, stale_reason and a human-readable `notice` "
+                "(warns when perception is degraded). Read-only; cannot move "
+                "the robot."
             ),
             inputSchema={
                 "type": "object",
@@ -126,6 +130,12 @@ async def list_tools() -> list[Tool]:
                     "max_age_s": {
                         "type": "number",
                         "description": "Max cached-caption age in seconds (default 5.0).",
+                    },
+                    "camera": {
+                        "type": "string",
+                        "enum": ["front", "wrist"],
+                        "description": ("'front' head camera (default) or "
+                                        "'wrist' gripper close-up camera."),
                     },
                 },
             },
@@ -185,6 +195,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 body["prompt"] = str(arguments["prompt"])
             if arguments and arguments.get("max_age_s") is not None:
                 body["max_age_s"] = float(arguments["max_age_s"])
+            if arguments and arguments.get("camera") in ("front", "wrist"):
+                body["camera"] = arguments["camera"]
             data = await _post("/look", body)
             return _text(_decorate(data))
         if name == "vlm_last_caption":

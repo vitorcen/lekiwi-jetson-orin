@@ -24,6 +24,7 @@
 import { $, S, invoke } from './state.js';
 
 const FRAME_MIN_MS = 33;   // cap the frame pump at ~30 fps (native-ish)
+const WRIST_MIN_MS = 1000; // wrist preview: one-shot grabs, keep it ~1 fps
 const CAPTION_MS = 1000;   // 1 Hz caption pull, only while 解读中
 const HEALTH_MS  = 1000;   // 1 Hz health while online
 const PROBE_MS   = 2000;   // 0.5 Hz health while offline (reconnect probe)
@@ -37,6 +38,13 @@ let lastSeq    = -1;       // dedupe repeated captions
 let lastFrameAt = 0;       // client clock of the last decoded frame (for age)
 let curFps     = 0;        // daemon-measured capture fps (X-Fps)
 let framePumping = false;  // a frame pump loop is running (never stack two)
+// which camera the page views + interprets: 'front' (head, continuous) or
+// 'wrist' (gripper close-up, on-demand one-shot grabs). Watch mode is
+// front-only by design — the wrist device is shared with the ROS node.
+function curCam() {
+  const el = document.getElementById('vCamSel');
+  return (el && el.value === 'wrist') ? 'wrist' : 'front';
+}
 let healthErrs = 0;        // consecutive failed health polls
 let lastHealthErr = '';    // why the last poll failed (shown on the 离线 badge)
 
@@ -241,8 +249,10 @@ async function framePump() {
   try {
     while (active && online && invoke) {
       const t0 = performance.now();
+      const cam = curCam();
       try {
-        const r = JSON.parse(await invoke('vlm_frame', { ip: curIp() }));
+        const r = JSON.parse(await invoke('vlm_frame', { ip: curIp(), camera: cam }));
+        if (cam !== curCam()) continue;      // camera switched mid-request: drop stale frame
         $('vlmImg').src = 'data:image/jpeg;base64,' + r.b64;
         $('vlmImg').classList.add('live');
         $('vidplaceholder').style.display = 'none';
@@ -258,7 +268,8 @@ async function framePump() {
         continue;
       }
       const dt = performance.now() - t0;
-      if (dt < FRAME_MIN_MS) await sleep(FRAME_MIN_MS - dt);
+      const minMs = curCam() === 'wrist' ? WRIST_MIN_MS : FRAME_MIN_MS;
+      if (dt < minMs) await sleep(minMs - dt);
     }
   } finally {
     framePumping = false;
@@ -300,7 +311,7 @@ function goOnline() {
   online = true;
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(pollHealth, HEALTH_MS);
-  const btn = $('vlmWatchBtn'); if (btn) btn.disabled = false;
+  const btn = $('vlmWatchBtn'); if (btn) btn.disabled = curCam() === 'wrist';
   framePump();   // start the camera feed (CPU only)
   loadModels();  // fill the model dropdown once the daemon answers
 }
@@ -424,6 +435,25 @@ $('vconnBtn').onclick = () => {
   else stopActive();
 };
 
+// 相机切换:腕部 = 爪子按需特写。连续解读(watch)仅前置 —— 腕部设备与 ROS
+// wrist_cam 节点按需共享,不做常驻解读;切到腕部时若在解读先停,按钮置灰。
+// 提问框(单发解读)跟随所选相机。
+$('vCamSel') && ($('vCamSel').onchange = () => {
+  const wrist = curCam() === 'wrist';
+  if (wrist && watching) setWatchingOff();
+  const btn = $('vlmWatchBtn');
+  if (btn) {
+    btn.disabled = wrist || !online;
+    btn.title = wrist ? '连续解读仅前置相机;腕部请用下方提问(单发解读)' : '';
+  }
+  curFps = 0; paintFps();
+});
+
+function setWatchingOff() {
+  if (invoke) invoke('vlm_set_state', { ip: curIp(), state: 'idle' }).catch(() => {});
+  setWatching(false);
+}
+
 // 开始解读 / 停止解读: the only normal promoter of GPU captioning.
 $('vlmWatchBtn').onclick = () => {
   if (!invoke || !online) return;
@@ -458,7 +488,8 @@ $('vlmAskBtn').onclick = async () => {
   const btn = $('vlmAskBtn');
   btn.disabled = true;
   try {
-    const r = JSON.parse(await invoke('vlm_describe', { ip: curIp(), prompt: q }));
+    const r = JSON.parse(await invoke('vlm_describe',
+      { ip: curIp(), prompt: q, camera: curCam() }));
     addCaption(r.text || '(空)', r.latency_ms, 'answer', r.frame_b64);
   } catch (e) {
     addCaption('请求失败: ' + e, null, 'error');

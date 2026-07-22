@@ -22,7 +22,13 @@ metadata:
   +一句话提示词、llama-server `-fa on`、nvpmodel MAXN_SUPER;调优前 4.6-6.6s)。
   相机原生 15fps@720p MJPEG。
 - **MCP**:robot profile `mcp_servers.vlm` 三只读工具 vlm_look/vlm_last_caption/vlm_health,
-  输出带 age_seconds + 不可信观测免责声明。
+  输出带 age_seconds + 不可信观测免责声明。**vlm_look 支持双相机(2026-07-22)**:
+  `camera` 参数 front(头部,默认,连续采集+共享 caption)/ wrist(爪腕 Sunplus 2M,
+  640x480,`_grab_jpeg` 一次性抓帧,永不缓存、不污染 front 的缓存/健康态,无共享
+  caption——`/look` 对 wrist 恒走隔离 fresh answer)。板上验证:wrist 直拍 2.6s 出中文
+  描述;LLM 经 vlm_look(camera=wrist) 全链路答对。注意 wrist 设备与 ROS wrist_cam
+  节点按需共享,订阅期间抓帧会 EBUSY(诚实报错)。改 MCP schema 后须重启
+  hermes-gateway-robot 才生效。
 - **GUI**:📷 视觉 Tab,Rust ureq 代理(token 不进 WebView),帧 4fps/caption 1Hz 仅
   Tab 可见时轮询,进 Tab promote watch、离开发 idle(dead-man 同遥控 Tab)。
 - 相机 /dev/v4l/by-id/usb-CN02KX4NLG…-video-index0,MJPEG 1280x720 抓帧(ffmpeg 单帧)。
