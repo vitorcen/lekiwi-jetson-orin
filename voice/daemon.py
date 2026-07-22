@@ -547,13 +547,22 @@ class Daemon:
 
     async def audio_watch_loop(self) -> None:
         """音频卡丢失/卡名失一致时重试发现(拔掉声卡不让 daemon 崩)。
-        故障期 5s 快速重试,正常期 30s 巡检。"""
+        故障期 5s 快速重试,正常期 30s 巡检。
+        自愈不变量:非 IDLE 必须有活的采集任务。start_capture 在 audio_ok=False
+        窗口会静默放弃(2026-07-22 实锅:状态挂 listening、设备恢复后 audio_ok
+        修好了,但采集永远没人再拉起 → ASR 无响应),这里兜底重启。"""
         while True:
             broken = not self.audio_ok or not (self.cap_card and self.play_card)
             if broken:
                 await self.discover_audio()
                 broken = not self.audio_ok
-            await asyncio.sleep(5 if broken else 30)
+            cap_dead = self.state != IDLE and (
+                self._cap_task is None or self._cap_task.done())
+            if not broken and cap_dead:
+                self.emit("audio", status="capture_restarted",
+                          message="采集任务丢失,已自动重启(自愈)")
+                await self.start_capture()
+            await asyncio.sleep(5 if broken or cap_dead else 30)
 
     def _playback_dead(self, rc) -> None:
         """aplay 非零退出 = 播放设备已失效(拔插/卡名变了):置 audio_ok=False
@@ -2335,6 +2344,14 @@ async def _on_start(app: web.Application) -> None:
     # config 里 vision_speak=true 则起板端播报桥(不依赖 GUI 哪个 Tab 可见)
     if DAEMON.config.get("vision_speak"):
         await DAEMON.set_vision_speak(True)
+    # 开机即对话(auto_listen,默认开):与 GUI 开麦完全同一路径 —— 常开窗口
+    # WINDOW_S、活动自动续期、到期回 IDLE。音频没就绪也没关系:状态先挂
+    # LISTENING,audio_watch_loop 的自愈不变量会在设备出现后拉起采集;
+    # 断网只影响 hermes 轮次(说话会得到明确报错),ASR/监听全在本地。
+    if DAEMON.config.get("auto_listen", True):
+        await DAEMON.do_listen(None)
+        print("[voice-daemon] auto_listen: boot straight into LISTENING",
+              flush=True)
 
 
 async def _on_cleanup(app: web.Application) -> None:

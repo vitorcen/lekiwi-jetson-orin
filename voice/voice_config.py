@@ -26,6 +26,8 @@ DEFAULT_CONFIG = {
     "omni": {"url": "http://192.168.13.2:8093"},
     "vision_speak": False,
     "vision_speak_limit": 300,          # spoken-caption cap, Python len() chars
+    "auto_listen": True,                # boot straight into LISTENING (same
+                                        # path as the GUI mic button)
     "vision": {"model": None},          # desired VLM model id; null = use board env as-is
     # Audio front-end (global, not part of a preset pair). vad = the switchable segmenter;
     # audio.gain_db = digital make-up gain (0 = identity, stock behaviour unchanged).
