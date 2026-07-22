@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 import hashlib
 import json
 import os
@@ -77,6 +76,7 @@ BARGE_IN = _env("VOICE_BARGE_IN", "1").lower() not in ("0", "false", "no")
 BARGE_MIN_S = 0.55            # 打断语音最短时长(太短多为回声碎片/杂音)
 BARGE_MIN_RMS = 0.020         # 能量门(归一化 RMS,残余回声底噪之上)
 BARGE_ECHO_SIM = 0.55         # 与近期播报句相似度 ≥ 此值 → 判回声
+BARGE_ECHO_COVER = 0.70       # 段文本被近期播报拼接串覆盖比例 ≥ 此值 → 跨句回声
 BARGE_ECHO_WINDOW_S = 20.0    # 只与最近这段时间的播报句比对
 # 停止词:命中只打断不起轮(允许单字"停",绕过最短长度过滤)
 STOP_WORDS = {"停", "停停", "停一下", "停下", "别说了", "闭嘴", "安静", "等等", "先停"}
@@ -981,25 +981,15 @@ class Daemon:
     @staticmethod
     def _norm_text(t: str) -> str:
         """去空白与中英标点,留下可比对的字符序列。"""
-        return re.sub(r"[\s,。!?、;:·~——…‘’“”\"'!?,.;:()()\-]+", "", t)
+        return vobs.norm_text(t)
 
     def _is_echo(self, text: str) -> bool:
-        """识别文本与近期播报句相似 → 判为自身回声(AEC 残余)。"""
-        cand = self._norm_text(text)
-        if not cand:
-            return True
-        now = time.time()
-        for ts, sent in list(self._recent_tts):
-            if now - ts > BARGE_ECHO_WINDOW_S:
-                continue
-            ref = self._norm_text(sent)
-            if not ref:
-                continue
-            if cand in ref or ref in cand:
-                return True
-            if difflib.SequenceMatcher(None, cand, ref).ratio() >= BARGE_ECHO_SIM:
-                return True
-        return False
+        """识别文本与近期播报相似 → 判为自身回声(AEC 残余)。纯逻辑在
+        voice_asr_obs.is_echo:单句比对 + 跨句拼接覆盖率兜底(段横跨两句
+        播报时与任一单句都不像,曾漏成假用户轮 —— 2026-07-22 实锅)。"""
+        return vobs.is_echo(text, list(self._recent_tts), time.time(),
+                            window_s=BARGE_ECHO_WINDOW_S,
+                            sim=BARGE_ECHO_SIM, cover=BARGE_ECHO_COVER)
 
     async def _barge_check(self, gen: int, samples: np.ndarray) -> None:
         # 能量/长度门在 ASR 之前丢弃的段计 gate(存音频可回放,但 SPEAKING 期不上

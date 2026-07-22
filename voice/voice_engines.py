@@ -22,6 +22,18 @@ MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 # SenseVoice emits tags like <|zh|><|HAPPY|><|Speech|>; strip them from the transcript.
 _TAG_RE = re.compile(r"<\|[^|]*\|>")
+# Fun-ASR's LLM decoder emits slash event markers for non-speech audio ("/sil",
+# "/noise", ...). They must never reach the brain as user text (field bug: the
+# agent chat received a literal "/sil" turn).
+_EVENT_RE = re.compile(
+    r"/\s*(sil|silence|noise|music|bgm|laughter|breath|cough)\b", re.IGNORECASE)
+
+
+def clean_transcript(text):
+    """Engine-boundary cleanup shared by every ASR host: model tags + event markers."""
+    text = _TAG_RE.sub("", text or "")
+    text = _EVENT_RE.sub("", text)
+    return text.strip()
 
 
 def malloc_trim():
@@ -65,7 +77,7 @@ class OfflineAsr:
         stream.accept_waveform(16000, samples)
         self.rec.decode_stream(stream)
         text = stream.result.text or ""
-        return _TAG_RE.sub("", text).strip()
+        return clean_transcript(text)
 
 
 class OfflineParaformer:
@@ -103,7 +115,7 @@ class OfflineParaformer:
         stream.accept_waveform(16000, samples)
         self.rec.decode_stream(stream)
         text = stream.result.text or ""
-        return _TAG_RE.sub("", text).strip()
+        return clean_transcript(text)
 
 
 class OfflineWhisper:
@@ -140,7 +152,7 @@ class OfflineWhisper:
         stream.accept_waveform(16000, samples)
         self.rec.decode_stream(stream)
         text = stream.result.text or ""
-        return _TAG_RE.sub("", text).strip()
+        return clean_transcript(text)
 
 
 class OfflineQwen3Asr:
@@ -181,7 +193,7 @@ class OfflineQwen3Asr:
         stream.accept_waveform(16000, samples)
         self.rec.decode_stream(stream)
         text = stream.result.text or ""
-        return _TAG_RE.sub("", text).strip()
+        return clean_transcript(text)
 
 
 class OfflineFunAsr:
@@ -256,7 +268,7 @@ class OfflineFunAsr:
                 w.setsampwidth(2)
                 w.setframerate(16000)
                 w.writeframes(pcm.tobytes())
-            return self._ask(path)
+            return clean_transcript(self._ask(path))
         finally:
             try:
                 os.unlink(path)
@@ -361,11 +373,11 @@ class StreamingAsr:
         while self.rec.is_ready(self.stream):
             self.rec.decode_stream(self.stream)
             if self.rec.is_endpoint(self.stream):
-                txt = _TAG_RE.sub("", self.rec.get_result(self.stream) or "").strip()
+                txt = clean_transcript(self.rec.get_result(self.stream))
                 if txt:
                     finals.append(txt)
                 self.rec.reset(self.stream)
-        partial = _TAG_RE.sub("", self.rec.get_result(self.stream) or "").strip()
+        partial = clean_transcript(self.rec.get_result(self.stream))
         return partial, finals
 
 

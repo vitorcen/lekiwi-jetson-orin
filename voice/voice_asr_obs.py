@@ -77,3 +77,48 @@ def selftest_pass(asr_text, expected, threshold=0.5):
     Bisects 'acoustic problem' vs 'model problem': a clean synthesized human voice
     fed straight through VAD+ASR must decode, no microphone involved."""
     return similarity(asr_text, expected) >= threshold
+
+
+# --------------------------------------------------------------------------- #
+# barge-in echo discrimination (pure text logic, unit-testable off-board)
+# --------------------------------------------------------------------------- #
+_PUNCT_RE = re.compile(r"[\s,。!?、;:·~——…‘’“”\"'!?,.;:()()\-]+")
+
+
+def norm_text(t):
+    """Strip whitespace + zh/en punctuation, leaving a comparable char sequence."""
+    return _PUNCT_RE.sub("", t or "")
+
+
+def is_echo(text, recent, now, *, window_s=20.0, sim=0.55, cover=0.70):
+    """Is `text` (ASR of a mic segment heard while SPEAKING) an echo of our own
+    playback? `recent` = [(ts, sentence)] in play order.
+
+    Two layers: per-sentence containment/similarity, then a cross-sentence
+    fallback — a VAD segment often straddles two played sentences (tail of one
+    + head of the next), matching NO single sentence above `sim`, which used to
+    leak the echo back in as a fake user turn. The fallback measures how much of
+    the candidate is covered by matching blocks against the concatenation of
+    recent sentences; only for candidates ≥4 chars so short real commands
+    (停/等等/别说了) can never be swallowed by scattered one-char matches."""
+    cand = norm_text(text)
+    if not cand:
+        return True
+    refs = []
+    for ts, sent in recent:
+        if now - ts > window_s:
+            continue
+        ref = norm_text(sent)
+        if not ref:
+            continue
+        refs.append(ref)
+        if cand in ref or ref in cand:
+            return True
+        if difflib.SequenceMatcher(None, cand, ref).ratio() >= sim:
+            return True
+    concat = "".join(refs)
+    if len(cand) >= 4 and concat:
+        m = difflib.SequenceMatcher(None, cand, concat)
+        if sum(b.size for b in m.get_matching_blocks()) / len(cand) >= cover:
+            return True
+    return False

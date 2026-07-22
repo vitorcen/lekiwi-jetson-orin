@@ -33,3 +33,15 @@ def test_registry_tts_hosts_and_sample_rates():
     for name, cls in ve.REGISTRY["tts"].items():
         assert cls.name == name
         assert cls().loaded is False
+
+
+def test_clean_transcript_strips_tags_and_event_markers():
+    # sensevoice-style tags
+    assert ve.clean_transcript("<|zh|><|HAPPY|>你好") == "你好"
+    # funasr slash event markers must never reach the brain (field bug: "/sil")
+    assert ve.clean_transcript("/sil") == ""
+    assert ve.clean_transcript("/sil /sil") == ""
+    assert ve.clean_transcript("/noise 你好呀 /SIL") == "你好呀"
+    # real text with a slash stays intact
+    assert ve.clean_transcript("网址是 a/b 那种写法") == "网址是 a/b 那种写法"
+    assert ve.clean_transcript(None) == ""
