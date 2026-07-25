@@ -120,6 +120,13 @@ VLM_TOKEN_FILE = os.path.expanduser(
 OMNI_TOKEN_FILE = os.path.expanduser(
     _env("VOICE_OMNI_TOKEN_FILE", os.path.join(HERE, "omni_token"))
 )
+# Qwen3-Omni's vocoder is quiet: five replies measured a median -29.5 dBFS RMS
+# against matcha's -18.0, so the brain is the softest voice the robot has. Peaks
+# across those replies ran -8.0 to -17.0 dBFS, so +6 dB is the most that keeps
+# the loudest one 2 dB clear of the rails. A preset may override with
+# play_gain_db — raise it and the loud replies start clipping, they have nowhere
+# left to go.
+OMNI_PLAY_GAIN_DB = float(_env("VOICE_OMNI_PLAY_GAIN_DB", "6.0"))
 # vlm-daemon POST /model is synchronous through a cold model load (90s ready +
 # probe); give the proxied call generous margin. POST returns 202 first, so the
 # Rust 15s cap never applies (this runs inside the /config vision job).
@@ -1141,12 +1148,13 @@ class Daemon:
         turn = omni_client.OmniTurn(url, self._omni_token(),
                                     preset.get("speaker") or "ethan")
         alive = lambda: gen == self.generation                    # noqa: E731
+        play_gain = float(preset.get("play_gain_db", OMNI_PLAY_GAIN_DB) or 0.0)
 
         spoken = {"secs": 0.0, "text": ""}
 
         async def on_audio(pcm: bytes, rate: int) -> None:
             spoken["secs"] += len(pcm) / 2.0 / float(rate)   # s16le mono
-            await self._omni_play(gen, pcm, rate)
+            await self._omni_play(gen, pcm, rate, play_gain)
 
         def on_text(said: str) -> None:
             # Register BEFORE the audio plays. Barge-in matches the mic against
@@ -1230,8 +1238,17 @@ class Daemon:
         except Exception:
             return ""
 
-    async def _omni_play(self, gen: int, pcm: bytes, rate: int) -> bool:
+    async def _omni_play(self, gen: int, pcm: bytes, rate: int,
+                         gain_db: float = 0.0) -> bool:
         """Stream one raw s16le chunk into the turn's single aplay.
+
+        gain_db lifts the omni waveform to the level of everything else the board
+        plays. Qwen3-Omni's vocoder comes out about 11 dB below matcha — measured
+        across five replies, omni sits at a median -29.5 dBFS RMS against matcha's
+        -18.0 — so with no correction the model is audibly the quietest voice on
+        the robot. The card's own playback mixer is not the place to fix it: the
+        daemon sets that to 90% for every path, and raising it would drag the TTS
+        up too. See OMNI_PLAY_GAIN_DB for how the default was chosen.
 
         ONE aplay per turn, not per chunk. Spawning a process per chunk (the
         obvious way to write this) put a process start/stop between every 50 codec
@@ -1251,6 +1268,13 @@ class Daemon:
                 return False
         if self.state in (THINKING, LISTENING):
             self.set_state(SPEAKING)
+        if gain_db > 0.0 and pcm:
+            # Fixed gain, not per-chunk normalisation: the chunks are 50 codec
+            # tokens of one sentence, so normalising each would pump the volume
+            # inside a single reply.
+            scaled = (np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+                      * (10.0 ** (gain_db / 20.0)))
+            pcm = np.clip(scaled, -32768, 32767).astype("<i2").tobytes()
         try:
             if self._cur_aplay is None:
                 self._cur_aplay = await asyncio.create_subprocess_exec(
