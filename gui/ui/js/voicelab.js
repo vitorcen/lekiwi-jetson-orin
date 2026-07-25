@@ -182,6 +182,7 @@ function fillVadSel(list, curEngine) {
     sel.append(o);
   }
   if (curEngine && [...sel.options].some(o => o.value === curEngine)) sel.value = curEngine;
+  paintVadApplicability();   // engine known now: mark the inert boxes
 }
 
 // Repaint an input from config — but never stomp the user: skip while it has
@@ -654,7 +655,7 @@ function stopActive() {
   paintDevice(null);
 }
 
-export function onEnterVoice() { startActive(); }
+export function onEnterVoice() { startActive(); refreshVoiceSvcAuto(); }
 export function onLeaveVoice() { stopActive(); }
 
 // ---- wiring --------------------------------------------------------------
@@ -745,6 +746,26 @@ $('vlTtsSave') && ($('vlTtsSave').onclick = () => {
   postConfig({ axis: 'tts', value: curTts() }, '已保存为当前搭配');
 });
 
+// Engines differ in which knobs they actually read. fsmn ignores threshold and
+// min_silence entirely (it runs its own state machine — see FsmnVad's docstring),
+// so leaving those boxes looking live invites tuning a value that does nothing.
+// Dimmed, not disabled: the value still persists for whichever engine does use it.
+const VAD_IGNORED = { fsmn: ['vlVadThreshold', 'vlVadMinSilence'] };
+
+function paintVadApplicability() {
+  const eng = $('vlVadEngine') && $('vlVadEngine').value;
+  const dead = VAD_IGNORED[eng] || [];
+  for (const id of ['vlVadThreshold', 'vlVadMinSpeech', 'vlVadMinSilence', 'vlVadPreRoll']) {
+    const el = $(id);
+    if (!el || !el.parentElement) continue;
+    const off = dead.includes(id);
+    el.parentElement.classList.toggle('vadoff', off);
+    el.parentElement.title = off
+      ? `${eng} 引擎忽略此项，改了不会有任何效果`
+      : (el.parentElement.dataset.tip || el.parentElement.title);
+  }
+}
+
 // ---- VAD engine / params + digital gain (global audio front-end) ----------
 // All changes are ephemeral (debug override, auto-reverts on leaving DEBUG); the
 // small 「存」 button is the only thing that persists. VAD is NOT part of a preset
@@ -754,6 +775,7 @@ $('vlVadEngine') && ($('vlVadEngine').onchange = () => {
   if (e && e.default_threshold != null) $('vlVadThreshold').value = e.default_threshold;
   postConfig({ axis: 'vad', value: curVad(), ephemeral: true },
              '临时切 VAD: ' + $('vlVadEngine').value, 'vlAsrFeed');
+  paintVadApplicability();
 });
 for (const id of ['vlVadThreshold', 'vlVadMinSpeech', 'vlVadMinSilence', 'vlVadPreRoll']) {
   $(id) && ($(id).onchange = () => {
@@ -857,5 +879,54 @@ $('vlVisionSpeak') && ($('vlVisionSpeak').onchange = async e => {
     cb.checked = !cb.checked;   // revert on failure
   } finally {
     cb.disabled = !online;
+  }
+});
+
+// ---- voice-daemon service control (moved here from the Agent page) ---------
+// These are operations, not conversation: the Agent page is for talking to the
+// robot, so the IP field and the start/stop buttons live on this page instead.
+// Feedback goes to the ASR bench feed — the same page the buttons are on.
+for (const [id, action, label] of [
+  ['asvcRestart', 'restart', '重启'],
+  ['asvcStop', 'stop', '停止'],
+  ['asvcStart', 'start', '启动'],
+]) {
+  const btn = $(id);
+  if (!btn) continue;
+  btn.onclick = async () => {
+    if (!invoke) return;
+    btn.disabled = true;
+    addRow('vlAsrFeed', `${label}语音服务…`, 'ask');
+    try {
+      await invoke('voice_service', { ip: curIp(), action });
+      addRow('vlAsrFeed', `服务${label}完成`, 'ask');
+    } catch (e) {
+      addRow('vlAsrFeed', `服务${label}失败: ${e}`, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+async function refreshVoiceSvcAuto() {
+  const cb = $('asvcAuto');
+  if (!cb || !invoke) return;
+  try {
+    const out = await invoke('voice_service', { ip: curIp(), action: 'is-enabled' });
+    cb.checked = out.split('\n').some(l => l.trim() === 'enabled');
+    cb.disabled = false;
+  } catch { cb.disabled = true; }
+}
+$('asvcAuto') && ($('asvcAuto').onchange = async e => {
+  const cb = e.target;
+  cb.disabled = true;
+  try {
+    await invoke('voice_service', { ip: curIp(), action: cb.checked ? 'enable' : 'disable' });
+    addRow('vlAsrFeed', `开机自启已${cb.checked ? '开启' : '关闭'}`, 'ask');
+  } catch (err) {
+    addRow('vlAsrFeed', `开机自启设置失败: ${err}`, 'error');
+    cb.checked = !cb.checked;
+  } finally {
+    cb.disabled = false;
   }
 });

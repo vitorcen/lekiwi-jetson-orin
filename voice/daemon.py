@@ -47,6 +47,7 @@ import voice_brain as vbrain
 import voice_asr_obs as vobs
 import voice_http as vhttp
 from voice_audio import SentenceAccumulator, SegStore, read_wav_16k
+import omni_client
 
 # --------------------------------------------------------------------------- #
 # Config(全部可用环境变量覆盖;默认值针对本板)
@@ -113,6 +114,11 @@ BREAKER_PROBE = 60.0            # 熔断期间后台探测间隔
 VLM_BASE = _env("VOICE_VLM_BASE", "http://127.0.0.1:8090").rstrip("/")
 VLM_TOKEN_FILE = os.path.expanduser(
     _env("VOICE_VLM_TOKEN_FILE", os.path.join(HERE, "..", "vlm", "token"))
+)
+# Omni brain (LAN, another host). Its endpoint lives in the preset, but the bearer
+# token stays in a file: config.json is served to the GUI and ends up in logs.
+OMNI_TOKEN_FILE = os.path.expanduser(
+    _env("VOICE_OMNI_TOKEN_FILE", os.path.join(HERE, "omni_token"))
 )
 # vlm-daemon POST /model is synchronous through a cold model load (90s ready +
 # probe); give the proxied call generous margin. POST returns 202 first, so the
@@ -318,6 +324,17 @@ class Daemon:
         # 与对话播报半双工同语义 —— 播完 +HALF_DUPLEX_RESUME 才恢复喂 VAD。
         self._seg_aplay: asyncio.subprocess.Process | None = None
         self.seg_playing = False
+
+        # VAD 相位遥测(给 Agent 页仪表盘)。刻意做成「当前值」而不是 feed 事件:
+        # 嘈杂环境下 VAD 每 320ms 就可能翻转一次,记成事件会把 feed 环冲垮,而仪表盘
+        # 本来就只关心此刻的相位和它持续了多久。
+        self._vad_was_active = False
+        self.vad_since = time.time()       # 上次相位翻转时刻
+        self.last_seg_s = 0.0              # 最近一段被采下来的语音长度
+        self.last_say_s = 0.0              # 最近一次机器人自己说了多长
+        self.last_say_backend = None
+        self.asr_busy = False              # ASR 解码在跑(与「大脑在想」区分开)
+        self.ignored_count = 0             # 模型判定「不是对我说的」的轮数
 
         # 轮次/朗读任务
         self.turn_task: asyncio.Task | None = None
@@ -779,6 +796,11 @@ class Daemon:
                 self._vad_error_ts = now
                 self.emit("error", message=f"vad accept failed: {self.vad_last_error}")
             return
+        # 相位翻转打点。放在 feed() 之后:此刻 active 已反映这一块的判定。
+        now_active = bool(self.vad.active)
+        if now_active != self._vad_was_active:
+            self._vad_was_active = now_active
+            self.vad_since = time.time()
         for seg_arr in segs:
             # 只在 LISTENING 起轮;拿到段立刻改 THINKING 停止再截句(单轮保证)
             if self.state == LISTENING and (self.turn_task is None or self.turn_task.done()):
@@ -800,14 +822,19 @@ class Daemon:
 
     async def _asr_then_turn(self, gen: int, samples: np.ndarray) -> None:
         loop = asyncio.get_running_loop()
+        # THINKING covers both ASR decode and the brain, which hides where a slow
+        # turn is actually stuck. This flag splits the two for the Agent gauge.
+        self.asr_busy = True
         try:
             text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
         except Exception as exc:
+            self.asr_busy = False
             self.emit("error", message=f"asr failed: {exc}")
             if gen == self.generation:
                 self.set_state(LISTENING)
                 self.refresh_deadline()
             return
+        self.asr_busy = False
         if gen != self.generation:
             return
         # 段级观测:分类 outcome、计数、存段音频。非 accepted 上 feed(asr_seg),
@@ -819,8 +846,15 @@ class Daemon:
             self.refresh_deadline()
             return
         self.turn_id += 1
-        self.emit("user_text", text=text)
-        await self.run_turn(gen, text)
+        # Segment length and level ride along with the transcript. When a turn
+        # fires on room noise, the text alone cannot tell you whether VAD cut the
+        # wrong span or ASR misread a good one — the duration usually can.
+        dur_s, peak_dbfs, _ = self._seg_meta(samples)
+        self.last_seg_s = dur_s
+        self.emit("user_text", text=text, secs=dur_s, peak_dbfs=peak_dbfs)
+        # samples ride along: the omni brain listens to the audio itself, and the
+        # ASR text above is only the GUI transcript. hermes ignores the extra arg.
+        await self.run_turn(gen, text, samples)
 
     async def _asr_debug_transcribe(self, samples: np.ndarray) -> None:
         """转写台:VAD 段 → ASR → 独立增量环(不进大脑、不触发 TTS、不 barge)。
@@ -1043,8 +1077,15 @@ class Daemon:
     # ------------------------------------------------------------------ #
     # 一轮:Hermes 流式 → 句子累积器 → TTS 队列(pipeline + 背压)
     # ------------------------------------------------------------------ #
-    async def run_turn(self, gen: int, text: str) -> None:
+    async def run_turn(self, gen: int, text: str,
+                       samples: "np.ndarray | None" = None) -> None:
         if gen != self.generation:
+            return
+        # Brain kind is a property of the preset, so switching brains switches the
+        # whole turn pipeline — omni bypasses the sentence queue and TTS entirely
+        # rather than pretending to be a text LLM with a "none" TTS engine.
+        if vconfig.current_brain_kind(self.config) == "omni":
+            await self.run_omni_turn(gen, text, samples)
             return
         self.set_state(THINKING)
         # 待播队列上限 2 句(满则 Hermes 消费挂起 → 天然背压)
@@ -1075,6 +1116,184 @@ class Daemon:
         if gen == self.generation:
             self.set_state(LISTENING)
             self.refresh_deadline()
+
+    # ------------------------------------------------------------------ #
+    # Omni 大脑:音频→局域网 Mac→(工具调用 | 24kHz 语音),不经 TTS
+    # ------------------------------------------------------------------ #
+    async def run_omni_turn(self, gen: int, text: str, samples) -> None:
+        """整轮交给局域网 omni 服务。与 hermes 路径的区别是结构性的:
+        决策输入是音频而非 ASR 文本,输出是波形而非待合成的句子。"""
+        preset = vconfig.current_preset(self.config)
+        url = preset.get("url")
+        if not url:
+            self.emit("error", message="omni preset has no url")
+            await self._play_local_phrase(gen, "抱歉,大脑地址没配好")
+            self.set_state(LISTENING)
+            self.refresh_deadline()
+            return
+        if samples is None and not text:
+            self.emit("error", message="omni turn has neither audio nor text")
+            self.set_state(LISTENING)
+            self.refresh_deadline()
+            return
+
+        self.set_state(THINKING)
+        turn = omni_client.OmniTurn(url, self._omni_token(),
+                                    preset.get("speaker") or "ethan")
+        alive = lambda: gen == self.generation                    # noqa: E731
+
+        spoken = {"secs": 0.0, "text": ""}
+
+        async def on_audio(pcm: bytes, rate: int) -> None:
+            spoken["secs"] += len(pcm) / 2.0 / float(rate)   # s16le mono
+            await self._omni_play(gen, pcm, rate)
+
+        def on_text(said: str) -> None:
+            # Register BEFORE the audio plays. Barge-in matches the mic against
+            # recently spoken text, so doing this after playback lets the robot
+            # hear itself, declare an interruption, and start a turn that collides
+            # with the one still streaming (observed as "omni busy" in the field).
+            self._recent_tts.append((time.time(), said))
+            # The GUI transcript is built from assistant_delta, not from tts — a
+            # turn that only emits tts speaks but leaves the conversation blank.
+            # omni has no token stream, so the whole reply is one delta.
+            self.emit("assistant_delta", delta=said)
+            spoken["text"] = said
+
+        try:
+            # Inner finally: the player must be closed before ANY handler below
+            # runs, because _play_local_phrase opens its own aplay and the two
+            # would fight over the device.
+            try:
+                await turn.run(samples, text, on_audio, alive,
+                               on_tool=lambda n: self.emit("tool", tool_name=n),
+                               on_text=on_text)
+            finally:
+                await self._omni_play_close(gen)
+            if spoken["text"]:
+                # tts fires at the END here, unlike the hermes path: only now is
+                # the spoken length known, and that length is the point.
+                self.last_say_s = round(spoken["secs"], 2)
+                self.last_say_backend = "omni"
+                self.emit("tts", sentence=spoken["text"], backend="omni",
+                          secs=self.last_say_s)
+        except omni_client.Ignored:
+            # Silence is the correct output here. Counted, not spoken and not
+            # written to the transcript — a row per noise burst would bury the
+            # actual conversation.
+            self.ignored_count += 1
+        except asyncio.CancelledError:
+            await turn.cancel()
+            raise
+        except omni_client.OmniError as exc:
+            self.emit("error", message=f"omni: {exc}")
+            await self._play_local_phrase(gen, "抱歉,我这边出错了")
+        except asyncio.TimeoutError:
+            await turn.cancel()
+            self.emit("error", message="omni turn timeout")
+            await self._play_local_phrase(gen, "抱歉,我这边超时了")
+        except Exception as exc:
+            self.emit("error", message=f"omni error: {exc}")
+            await self._play_local_phrase(gen, "抱歉,我暂时连不上大脑")
+
+        if gen == self.generation:
+            self.set_state(LISTENING)
+            self.refresh_deadline()
+
+    async def reset_brain(self) -> dict:
+        """Start a fresh conversation. Single-user by design, so there is no other
+        session to protect — 「新对话」 means the robot forgets too, not just the
+        操作台. hermes keeps its own session server-side and has no reset here;
+        say so plainly rather than pretending the button did something."""
+        kind = vconfig.current_brain_kind(self.config)
+        if kind != "omni":
+            return {"reset": False, "kind": kind,
+                    "detail": "hermes 会话在网关侧,本按钮不清它"}
+        preset = vconfig.current_preset(self.config)
+        url = preset.get("url")
+        if not url:
+            return {"reset": False, "kind": kind, "detail": "omni preset 无 url"}
+        try:
+            out = await omni_client.reset_conversation(url, self._omni_token())
+        except Exception as exc:
+            return {"reset": False, "kind": kind, "detail": f"{exc}"}
+        self.turn_id = 0
+        self.emit("brain_reset", **out)
+        return {"reset": True, "kind": kind, **out}
+
+    def _omni_token(self) -> str:
+        """Bearer token for the LAN brain. Kept in a file like every other token
+        here — never in config.json, which is served to the GUI and hits logs."""
+        try:
+            with open(OMNI_TOKEN_FILE, "r") as fh:
+                return fh.read().strip()
+        except Exception:
+            return ""
+
+    async def _omni_play(self, gen: int, pcm: bytes, rate: int) -> bool:
+        """Stream one raw s16le chunk into the turn's single aplay.
+
+        ONE aplay per turn, not per chunk. Spawning a process per chunk (the
+        obvious way to write this) put a process start/stop between every 50 codec
+        tokens: audible gaps and clicks that sound like echo, and a half-duplex
+        resume deadline that got reset a dozen times per reply — which makes the
+        robot far more likely to hear itself.
+
+        Keeps _local_play's contract otherwise: SPEAKING state, the _cur_aplay
+        handle that barge-in kills, generation checks, and _playback_dead on a
+        genuine device failure. _omni_play_close() owns reap and _after_playback.
+        """
+        if gen != self.generation or not pcm:
+            return False
+        if not self.audio_ok:
+            await self.discover_audio()
+            if not self.audio_ok:
+                return False
+        if self.state in (THINKING, LISTENING):
+            self.set_state(SPEAKING)
+        try:
+            if self._cur_aplay is None:
+                self._cur_aplay = await asyncio.create_subprocess_exec(
+                    "aplay", "-D", self.play_dev(),
+                    "-f", "S16_LE", "-r", str(rate), "-c", "1", "-t", "raw", "-q",
+                    stdin=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+            ap = self._cur_aplay
+            ap.stdin.write(pcm)
+            await ap.stdin.drain()      # backpressure: don't outrun the sound card
+            return True
+        except Exception as exc:
+            # A closed pipe here is the normal shape of barge-in (the handle was
+            # killed mid-reply), not a device fault.
+            if gen == self.generation:
+                self.emit("error", message=f"omni play failed: {exc}")
+            self._kill(self._cur_aplay)
+            await self._reap(self._cur_aplay)
+            self._cur_aplay = None
+            return False
+
+    async def _omni_play_close(self, gen: int) -> None:
+        """Finish the turn's playback: flush, wait for the sound card, hand back
+        to the half-duplex logic. Must run even when the turn failed early."""
+        ap = self._cur_aplay
+        if ap is None:
+            return
+        try:
+            try:
+                ap.stdin.close()
+            except Exception:
+                pass
+            rc = await asyncio.wait_for(ap.wait(), timeout=30.0)
+            if rc != 0 and gen == self.generation:   # kill during barge-in is fine
+                self._playback_dead(rc)
+        except Exception:
+            self._kill(ap)
+        finally:
+            await self._reap(ap)
+            if self._cur_aplay is ap:
+                self._cur_aplay = None
+            self._after_playback()
 
     async def _hermes_stream(self, gen: int, text: str, q: asyncio.Queue) -> None:
         """POST /chat/stream,解析 SSE。assistant.delta→累积器;tool.started→转发;
@@ -1389,6 +1608,10 @@ class Daemon:
             pcm16 = await loop.run_in_executor(self._tts_pool, host.synth, text)
             if gen != self.generation:
                 return False
+            # Local engines know their own length for free; edge streams mp3 and
+            # does not, so the dashboard shows a length only for what it can measure.
+            self.last_say_s = round(len(pcm16) / float(host.sample_rate), 2)
+            self.last_say_backend = host.name
             ap = await asyncio.create_subprocess_exec(
                 "aplay", "-D", self.play_dev(),
                 "-f", "S16_LE", "-r", str(host.sample_rate), "-c", "1",

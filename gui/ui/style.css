@@ -437,3 +437,93 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .src-键盘 .lsrc { color: #a6e3a1; }
 .src-主臂 .lsrc { color: #f9e2af; }
 .src-系统 .lsrc { color: #f38ba8; }
+
+/* VAD gauge (Agent page). Same slab styling as #brainbar so the two read as one
+   instrument cluster rather than two unrelated widgets. */
+#vadbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: #12162080; border: 1px solid #1c2030; border-radius: 10px;
+  padding: 7px 14px; margin: 8px 0 4px;
+  font-size: 12.5px; color: #a3abcc;
+}
+#vadbar .vadsep { color: #3a4055; }
+#vadbar .vadlab { color: #6f7794; }
+#vadbar .vadnum { font: 12.5px ui-monospace, monospace; color: #cdd6f4; }
+#vadbar .vaddot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #3a4055; transition: background .12s, box-shadow .12s;
+}
+/* Phase colours match the state pills: capturing is the only "live" one. */
+#vadbar.cap  .vaddot { background: #76b900; box-shadow: 0 0 7px #76b90099; }
+#vadbar.busy .vaddot { background: #e3b341; }
+#vadbar.off  .vaddot { background: #3a4055; }
+#vadbar.cap  #vadPhase { color: #a8dd5c; }
+#vadbar.busy #vadPhase { color: #e3b341; }
+
+/* Agent-page camera thumbnails. Deliberately small: the page is for talking to
+   the robot, and these only answer "what is it looking at right now". */
+/* Title row: heading left, cameras hard right on the same baseline. */
+.vctitle { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.vctitle h2 { margin: 0; }
+#acams { display: flex; gap: 8px; flex: 0 0 auto; }
+#acams .acam { position: relative; line-height: 0; }
+#acams img {
+  width: 198px; height: 111px; object-fit: cover; display: block;
+  background: #0d1017; border: 1px solid #1c2030; border-radius: 8px;
+}
+#acams img:not(.live) { opacity: .25; }
+#acams .acamlab, #acams .acamage {
+  position: absolute; bottom: 3px;
+  font: 10px ui-monospace, monospace; color: #cdd6f4;
+  background: #0009; padding: 1px 4px; border-radius: 4px; line-height: 1.4;
+}
+#acams .acamlab { left: 4px; }
+#acams .acamage { right: 4px; color: #a3abcc; }
+#acams .acamage.stale { color: #e3b341; }
+
+/* A VAD knob the current engine does not read. Dimmed, never disabled — the
+   value still matters for engines that do use it, and a disabled input would
+   also swallow the click that lets you edit it. */
+#vlVadRow .ivlabel.vadoff { opacity: .4; }
+#vlVadRow .ivlabel.vadoff::after { content: " (本引擎忽略)"; font-size: 10px; color: #e3b341; }
+
+/* Brain strip absorbed the Agent page's status bar: one strip answering "what is
+   this thing right now". The pill sits at the end of row 1 so a longer preset
+   name cannot shove it around; the chain description takes row 2 to itself
+   because it is by far the longest item and would otherwise wrap everything. */
+#brainbar .bbstate { margin-left: auto; }
+#brainbar .bbchain { flex-basis: 100%; margin-top: 2px; }
+/* Window countdown / stage text rides at the end of the gauge line: it answers
+   the same question ("what is happening now") that the phase does, so stacking
+   the two on separate rows just split one thought in half. */
+#vadbar .vadstage { margin-left: auto; color: #6f7794; }
+
+/* Panel header: controls left, cameras right, both starting at the top. The
+   cameras are ~111px tall while the title is one line, so centring them left a
+   tall empty gap on the left — stacking title+controls+gauge in a left column
+   fills that height instead of wasting it. */
+.vchead { display: flex; align-items: flex-start; gap: 16px; }
+.vchead .vcleft { flex: 1 1 auto; min-width: 0; }
+.vchead .vcleft h2 { margin: 0 0 10px; }
+.vchead #acams { flex: 0 0 auto; }
+
+/* ---- Agent page: fill the viewport, scroll only the transcript ------------
+   The feed was capped at a fixed 420px, so a tall window sat mostly empty while
+   a short one scrolled the entire page (header, brain strip and controls
+   scrolling away with it). Making the page a flex column and letting the feed
+   take the remainder ties the transcript to the window instead of a constant.
+   min-height:0 is the part that actually matters — without it a flex child
+   refuses to shrink below its content and the scrollbar never appears. */
+#page-agent.on { display: flex; flex-direction: column; height: 100%; }
+#page-agent > #brainbar { flex: 0 0 auto; }
+#page-agent > #voicePanel {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+}
+#voicePanel > .vchead, #voicePanel > .askrow { flex: 0 0 auto; }
+#voicePanel > #vofeed { flex: 1 1 auto; min-height: 0; max-height: none; }
+
+/* Width: the panel keeps the full window (the cameras earn that space), but the
+   message text does not — past ~80 characters the eye loses the line start on
+   the way back. Cap the line, not the container, so a wide monitor buys more
+   camera and more visible history rather than harder-to-read lines. */
+#vofeed .capmsg { max-width: 80ch; }

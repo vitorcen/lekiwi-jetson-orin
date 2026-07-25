@@ -22,8 +22,11 @@ CONFIG_PATH = os.path.expanduser(
 # The one persistent engine state is presets[*].pair + current brain. Running engines
 # are always the projection of the current preset's pair (debug overrides are ephemeral).
 DEFAULT_CONFIG = {
-    "brain": {"kind": "hermes", "preset": "deepseek"},
-    "omni": {"url": "http://192.168.13.2:8093"},
+    # A preset carries its own `kind` (tagged union). The old shape had kind on
+    # `brain` plus a top-level `omni.url`, which made "brain.kind says hermes but
+    # brain.preset points at an omni entry" a representable state. It no longer is.
+    # A preset without `kind` reads as "hermes" so existing configs keep working.
+    "brain": {"preset": "deepseek"},
     "vision_speak": False,
     "vision_speak_limit": 300,          # spoken-caption cap, Python len() chars
     "auto_listen": True,                # boot straight into LISTENING (same
@@ -203,6 +206,15 @@ def current_preset(config):
     if presets:
         return next(iter(presets.values()))
     return copy.deepcopy(DEFAULT_CONFIG["presets"]["deepseek"])
+
+
+def current_brain_kind(config):
+    """"hermes" | "omni" — read off the selected preset, never off `brain`.
+
+    Absent means "hermes": every preset that predates the omni brain is a hermes
+    one, so old configs need no migration.
+    """
+    return (current_preset(config) or {}).get("kind") or "hermes"
 
 
 def current_pair(config):

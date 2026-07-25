@@ -39,11 +39,21 @@ async def h_health(request: web.Request) -> web.Response:
 
 
 async def h_state(request: web.Request) -> web.Response:
+    """Cheap, high-frequency poll. The Agent page's VAD gauge lives here rather
+    than on the feed: VAD can flip phase every 320 ms in a noisy room, and logging
+    that as events would flood the ring to show what is really just a current value."""
     h = D.health()
     return web.json_response({
         "state": h["state"], "audio": h["audio"],
         "edge_breaker": h["edge_breaker"], "generation": h["generation"],
         "window_deadline": h["window_deadline"], "mem_rss_mb": h["mem_rss_mb"],
+        "vad_active": h["vad_active"], "mic_dbfs": h["mic_dbfs"],
+        "asr_busy": D.asr_busy,               # ASR decoding vs. brain thinking
+        "ignored": D.ignored_count,          # turns the model judged not addressed to it
+        "vad_since": D.vad_since,            # epoch of the last phase flip
+        "last_seg_s": D.last_seg_s,          # length of the last captured utterance
+        "last_say_s": D.last_say_s,          # length of what the robot last said
+        "last_say_backend": D.last_say_backend,
     })
 
 
@@ -101,6 +111,11 @@ async def h_simulate(request: web.Request) -> web.Response:
     D.emit("user_text", text=text)
     D.turn_task = asyncio.create_task(D.run_turn(gen, text))
     return web.json_response({"ok": True})
+
+
+async def h_reset(request: web.Request) -> web.Response:
+    """POST /reset → 开新对话:清掉大脑侧的会话历史(GUI 的「新对话」按钮)。"""
+    return web.json_response(await D.reset_brain())
 
 
 async def h_config_get(request: web.Request) -> web.Response:
@@ -349,6 +364,7 @@ def make_app(daemon, token: str, models: str, hermes_env: str,
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/health", h_health)
     app.router.add_get("/state", h_state)
+    app.router.add_post("/reset", h_reset)
     app.router.add_post("/listen", h_listen)
     app.router.add_post("/stop", h_stop)
     app.router.add_post("/interrupt", h_interrupt)

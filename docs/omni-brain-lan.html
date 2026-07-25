@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omni 大脑:局域网端到端语音 + 工具调用 · 设计方案</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  a{color:var(--accent-dk)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+<h1>Omni 大脑:局域网端到端语音 + 工具调用</h1>
+<p class="sub">LeKiwi · Jetson Orin Nano 8GB + Mac(Apple Silicon) · 2026-07-25 · Qwen3-Omni-30B-A3B-Instruct-4bit / mlx-vlm 0.6.4 · Claude + codex&nbsp;gpt-5.6-sol 评审定稿 · 关键代码断言已逐条核实</p>
+</header>
+
+<div class="tldr">
+<h2>TL;DR</h2>
+<ul>
+<li><strong>目标</strong>:Agent 页面新增一个「omni」大脑——用户语音直接喂给局域网上 Mac 的 Qwen3-Omni,模型自己听、自己想、自己调机器人工具、自己说话。<strong>不经 TTS</strong>,本地 ASR 只负责把用户说的话变成文字给 GUI 显示。</li>
+<li><strong>核心洞察:把生成拆成「thinker 决策阶段」+「可选的 talker 语音阶段」</strong>。mlx-vlm 的 <code>generate()</code> 内部本来就是先跑完 thinker、再抽 hidden states、再跑 talker——工具调用与语音的冲突、性能浪费、文本漂移这三个问题,在拆开的那一刻同时消失。<strong>这不是调参,是数据流的正确切分。</strong></li>
+<li><strong>hermes 走不通,别硬塞</strong>。它没有端到端的原生音频输出编排。板上 config 早就有 <code>brain.kind</code> 字段,但那只是死数据——<code>switch_brain()</code> 最后还硬编码写回 <code>"kind":"hermes"</code>。</li>
+<li><strong>Qwen3-Omni 原生支持 function calling</strong>(Hermes 风格 <code>&lt;tool_call&gt;</code>),官方 cookbook 证明了纯音频输入能吐 tool_call。但<strong>这只证明模型能力,不证明 mlx-vlm 这条路径已经能用</strong>——omnivla 现在手拼 ChatML,压根没调 <code>apply_chat_template(..., tools=...)</code>,这部分必须新写并实测。</li>
+<li><strong>工具执行不能 importlib 直接加载 MCP server</strong>。voice venv 没装 <code>mcp</code>/<code>pyzmq</code>,而且进程内的 <code>_motion_lock</code> 跨进程无效——两个进程各持一把锁等于没有锁。必须把业务逻辑抽成 import-clean 的共享模块。</li>
+<li><strong>「GUI 零改动」「分流点只有一个」都是错的</strong>,已在正文更正。omni 需要原始音频,而现有链路在 ASR 之后就把音频丢了。</li>
+<li><strong>P0 已跑完:GO</strong>。实测(≥10 轮/场景,门在跑之前写死):工具调用成功率 <strong>100%</strong>、
+tool dispatch P50 <strong>634 ms</strong>、聊天首音 P50 <strong>2561 ms</strong>(门 3500 ms)。
+两阶段相对初稿方案在工具轮省掉中位 <strong>3.9 秒</strong>。</li>
+<li><strong>流式是必需项,不是优化项</strong>。非流式首音 20.9 s;流式 <code>chunk_size=50</code> 配合回复长度约束(禁列表、两句内)后 2.6 s。
+协议、服务端、板上播放从第一版就必须流式。</li>
+</ul>
+</div>
+
+<h2>1 · 起点:一次名字引发的误会</h2>
+
+<p>本机 <code>~/work_ai/omnivla</code> 的 git remote 叫 <code>OmniVLA</code>,但它<strong>既不是 VLA,也不是服务</strong>。
+全仓 4 个源文件 ~600 行,是 Qwen3-Omni 的<strong>本机语音对讲 CLI</strong>——「Omni」指 Qwen3-<strong>Omni</strong>,与 OmniVLA 导航模型无关。</p>
+
+<table>
+<tr><th>以为是</th><th>实际是</th><th>核实方式</th></tr>
+<tr><td>VLA 动作模型</td><td>语音对话模型,无动作输出、无图像输入</td><td>grep <code>image|camera|action|vision</code> 零命中</td></tr>
+<tr><td>局域网服务</td><td>前台 CLI,占用本机麦克风/扬声器</td><td>grep <code>fastapi|uvicorn|flask|websocket|zmq|grpc|port</code> 零命中</td></tr>
+<tr><td>有客户端 SDK</td><td>无 client.py / examples / tests</td><td>目录树只有 4 个文件</td></tr>
+<tr><td>已经在用工具调用</td><td><strong>手拼 ChatML,从未调过 <code>apply_chat_template(tools=)</code></strong></td><td><code>scripts/qwen3_omni_mlx_live.py</code> 的 <code>build_audio_prompt()</code></td></tr>
+</table>
+
+<div class="box warn">
+<strong>版本锁死,不可随意升级</strong>
+脚本 monkey-patch 了 <code>mlx-vlm==0.6.4</code> 的 Qwen3-Omni 内部(修 <code>AudioModel.sanitize</code>/<code>Code2WavModel.sanitize</code>
+的错误转置、重算 <code>&lt;|audio_pad|&gt;</code> token 数),且 <strong>patch 必须在 <code>from mlx_vlm import load</code> 之前调用</strong>。
+另注意 <code>~/models/.venv_mlx_bench/</code> 里装的是 <strong>0.4.4</strong>,与本方案的 0.6.4 不是一回事,别混用。
+实施首步需验证 0.6.4 的 <code>qwen3_omni_moe</code> 移植是否仍需要这个 patch。
+</div>
+
+<h2>2 · 为什么不走 hermes</h2>
+
+<p>hermes(Nous Research Hermes Agent,本机 <strong>v0.19.0</strong>,装在 <code>~/.hermes/</code>,板上以 systemd user 服务
+<code>hermes-gateway-robot</code> 运行)的扩展性很好——几十个 model provider 插件、<code>custom</code> provider 支持任意
+OpenAI 兼容 base_url,MCP function calling 接线完善。它的 gateway 甚至已经认识 <code>input_audio</code> 这种内容类型。</p>
+
+<p>但它有一条结构性边界:<strong>没有端到端的原生音频输出编排</strong>。gateway 在部分会话/显示路径中会把音频内容降级成
+<code>[audio]</code> 占位;更根本的是,它的 transport 抽象里没有「模型返回一段波形」这件事的位置。</p>
+
+<p>强行走 hermes 意味着把 Qwen3-Omni 包成一个「既 OpenAI 兼容、又能收发音频」的端点,再让 hermes 装作看不见音频——
+为了复用一个不匹配的抽象而增加两层转译,同时把 hermes 的核心价值(MCP 编排)也丢了,因为 omni 的工具调度必须发生在音频轮内部。</p>
+
+<div class="box err">
+<strong>更正:config「已预留」属实,「架构已预留」不属实</strong>
+<code>voice/voice_config.py:25</code> 确有 <code>"brain": {"kind": "hermes", "preset": "deepseek"}</code> 和 <code>omni:{url}</code>,
+但那只是<strong>死数据</strong>:<code>voice_http.py</code> 的 <code>/brain</code> 仍无条件按 hermes 校验 key_env/HTTPS/transport,
+<code>daemon.py:2048</code> 的 <code>switch_brain()</code> 最终硬编码写回 <code>{"kind": "hermes", ...}</code>。
+这些都要改,不能声称「白捡」。
+</div>
+
+<h2>3 · Qwen3-Omni 的工具调用:能力、硬伤与正确解法</h2>
+
+<h3>3.1 原生支持 Hermes 风格 <code>&lt;tool_call&gt;</code></h3>
+
+<p><code>chat_template.json</code> 里是完整的 Qwen/Hermes 工具协议:</p>
+<pre><code>{%- if tools %}
+    {{- "# Tools\n\nYou may call one or more functions..." }}
+    {%- for tool in tools %}{{- "\n" }}{{- tool | tojson }}{%- endfor %}
+{%- endif %}
+...
+{%- if message.tool_calls %}
+    {{- '&lt;tool_call&gt;\n{"name": "' }}{{- tool_call.name }}{{- '", "arguments": ' }}...{{- '}\n&lt;/tool_call&gt;' }}
+{%- elif message.role == "tool" %}
+    {{- '\n&lt;tool_response&gt;\n' }}{{- content }}{{- '\n&lt;/tool_response&gt;' }}</code></pre>
+
+<p>即 <code>apply_chat_template(messages, tools=[...])</code> 直接生效,工具结果用 <code>role:"tool"</code> 回填。
+mlx-vlm 的 <code>apply_chat_template(..., **kwargs)</code> 把 <code>tools=</code> 原样透传给 HF jinja 引擎。</p>
+
+<h3>3.2 音频输入 + 工具调用共存 —— 模型能力已证明,本项目路径未证明</h3>
+
+<p>官方 <code>cookbooks/audio_function_call.ipynb</code> 中,user turn <strong>只有音频、没有文字</strong>,模型直接吐出
+<code>&lt;tool_call&gt;{"name": "car_ac_control", ...}&lt;/tool_call&gt;</code>。这确实是本方案需要的形态。</p>
+
+<div class="box warn">
+<strong>但不能把 cookbook 当作本项目的可行性证据</strong>
+两条鸿沟:(1) cookbook 走的是 vLLM/transformers,不是 mlx-vlm;(2) omnivla 现有代码<strong>手拼 ChatML 字符串</strong>,
+从未调用过带 <code>tools=</code> 的 chat template。<strong>「mlx-vlm 0.6.4 + 自定义 prompt 路径能稳定产出 tool_call」是一个待验证假设,
+不是既成事实</strong>——它是 P0 的验收项之一,不是前提。
+另注意 cookbook 自己的配置是 <code>RETURN_AUDIO = False</code>:官方演示 audio function call 时也关掉了 talker。
+</div>
+
+<h3>3.3 硬伤:talker 会念出工具 JSON</h3>
+
+<div class="box err">
+<strong>Qwen3-Omni 没有「只进思考不进语音」的机制</strong>
+transformers 的 <code>Qwen3OmniMoeForConditionalGeneration.generate()</code> 中,talker 输入是
+<code>trailing_text_hidden = cat(assistant_hidden[:, 4:], tts_eos_embed)</code>——把本轮 assistant 生成的
+<strong>全部 token</strong>(除前 4 个模板 token)喂给 talker,<strong>无过滤、无截断、无标记位</strong>。
+Qwen2.5-Omni 曾有可手工塞给 talker 的 <code>thinker_reply_part</code> 参数,<strong>在 Qwen3-Omni 的实现里已被删除</strong>(grep 零命中)。
+官方唯一机制是全有/全无的 <code>return_audio</code> / <code>disable_talker()</code>。
+</div>
+
+<h3>3.4 正确解法:拆成 thinker 决策阶段 + 可选 talker 阶段</h3>
+
+<p>本文档初稿曾主张「永远 <code>return_audio=True</code>,发现 tool_calls 就丢弃音频」,论据是「talker 开销正比文本长度,
+几十 token 的工具 JSON 很便宜」。<strong>这个论证是错的</strong>,评审时被推翻。</p>
+
+<p>读 mlx-vlm 0.6.4 的实际代码(<code>models/qwen3_omni_moe/qwen3_omni_moe.py:294-548</code>),
+<code>return_audio=True</code> 的路径是四步,而不是「thinker 然后顺手 talker」:</p>
+
+<pre><code>generate(return_audio=True):
+  ① generate_step(...)                        # thinker 自回归生成,直到 EOS   :394-410
+  ② extract_thinker_hidden_states(...)        # 对 prompt+生成结果再做一次完整前向 :414-418
+  ③ talker 生成 codec tokens                                                  :~420-517
+  ④ code2wav 声码器                                                          :518-537</code></pre>
+
+<div class="box err">
+<strong>初稿错在哪</strong>
+② 是<strong>对整个 prompt + 生成结果的完整重新前向</strong>,音频编码路径也会再走一遍。它的开销由<strong>上下文总长度</strong>决定,
+而不是由那几十个 token 的输出长度决定。④ 声码器还有固定开销。
+所以工具轮浪费的绝不是「一行 JSON 的 talker」,而是<strong>整段 hidden-state 重算 + 固定声码器成本</strong>——
+初稿的成本模型整个搞反了。
+</div>
+
+<p><strong>而正确答案就摆在同一段代码里</strong>:① 和 ②③④ 之间有一条天然的缝。thinker 文本在任何 talker 计算开始之前
+就已经完整可见。<code>generate_stream()</code>(<code>:550-730</code>)也是同样结构——它先把 thinker 跑到 EOS(<code>:604-607</code>),
+才去抽 hidden states。</p>
+
+<div class="box ok">
+<strong>方案:两阶段适配层</strong>
+<pre style="background:none;border:0;padding:0;margin:8px 0 0"><code>1. generate_thinker(prompt)          → thinker sequences + 文本
+2. 解析工具标记
+3. 有 tool_call  → 立即返回,<strong>根本不进入 ②③④</strong>,零浪费
+4. 无 tool_call  → 用<strong>同一份</strong> thinker sequences 继续 synthesize_audio()</code></pre>
+</div>
+
+<table>
+<tr><th></th><th>纯聊天轮</th><th>工具轮</th><th>文本漂移</th><th>talker 念 JSON</th></tr>
+<tr><td>初稿:永远出音频</td><td>1 次全流程</td><td><strong>1 次全流程(全浪费)</strong></td><td>无</td><td>靠丢弃音频规避</td></tr>
+<tr><td>先探测再出声</td><td><strong>2 次 thinker 生成</strong></td><td>1 次 thinker</td><td><strong>有</strong></td><td>无</td></tr>
+<tr><td><strong>两阶段(本方案)</strong></td><td><strong>1 次全流程</strong></td><td><strong>只跑 ①</strong></td><td><strong>无</strong></td><td><strong>结构上不可能</strong></td></tr>
+</table>
+
+<p>三个问题(工具 JSON 被朗读、性能浪费、文本漂移)在拆开的那一刻<strong>同时消失</strong>,而不是被逐个打补丁绕过。
+这是数据流的正确切分,不是参数调优。</p>
+
+<p><strong>最小原型</strong>:把 <code>generate_stream()</code> 的 text yield 从 <code>:699</code> 提到
+<code>extract_thinker_hidden_states()</code>(<code>:610</code>)之前,服务端看到工具标记就关闭生成器。
+<strong>做成 omnivla 侧显式的适配层,不要 monkey-patch 业务判断</strong>——monkey-patch 已经用在修 mlx-vlm 的 bug 上了,
+再拿它承载业务逻辑会让两种 patch 混在一起,升级时分不清哪个能删。</p>
+
+<h3>3.5 mlx-vlm 0.6.4 的支持度(核实过)</h3>
+
+<table>
+<tr><th>能力</th><th>状态</th><th>依据</th></tr>
+<tr><td>Qwen3-Omni 移植</td><td>✓ 完整</td><td><code>thinker.py</code>/<code>talker.py</code>/<code>code2wav.py</code>/<code>audio.py</code>/<code>vision.py</code></td></tr>
+<tr><td><code>return_audio=False</code> 快速分支</td><td>✓</td><td><code>:317-362</code>,只跑 thinker,不抽 hidden_states,直接 <code>return thinker_result, None</code></td></tr>
+<tr><td><strong>流式生成</strong></td><td>✓ <strong>存在</strong></td><td><code>generate_stream() :550</code>、<code>talker.generate_stream() :798</code>、<code>code2wav.stream_decode() :471</code></td></tr>
+<tr><td><code>tools=</code> 透传</td><td>✓</td><td><code>apply_chat_template(..., **kwargs)</code> 落到 HF jinja</td></tr>
+<tr><td>自带 OpenAI server</td><td>△ 不能直接用</td><td>支持 audio-in + tools + 自动 <code>&lt;tool_call&gt;</code> 解析,<strong>但无 <code>return_audio</code>/<code>speaker</code> 字段,纯文本输出</strong></td></tr>
+<tr><td>speaker</td><td>3 个</td><td>本地 checkpoint <code>speaker_id</code> = <code>chelsie</code> / <code>ethan</code> / <code>aiden</code></td></tr>
+</table>
+
+<p><strong>工具解析器复用它的,别手写</strong>。mlx-vlm 的 <code>tool_parsers</code> 里
+<code>(("&lt;tool_call&gt;", "tool_call.name"), "json_tools")</code> 会正确选中 JSON 解析器。
+自己写「找标签、截字符串、<code>json.loads</code>」的解析器是脆弱的。解析结果必须<strong>三分</strong>:</p>
+<ul>
+<li><strong>无工具标记</strong> → 纯聊天,进 talker</li>
+<li><strong>合法工具调用</strong> → 返回 tool_calls,不进 talker</li>
+<li><strong>有标记但格式损坏</strong> → 返回 <code>bad_tool_call</code> 错误。<strong>绝不能当成纯文本朗读</strong>,否则机器人会念出一段损坏的 JSON</li>
+</ul>
+
+<h2>4 · 架构</h2>
+
+<pre><code>板上麦克风 → VAD 切段
+   ├→ 本地 ASR(并行)  → emit user_text → GUI 显示 + 进有界文本历史
+   └→ 原始音频        → 局域网 → Mac omni server(常驻单进程,串行)
+                                      ↓ ① thinker
+                        ┌──── 解析工具标记 ────┐
+                        │                      │
+              有 tool_calls               无 tool_calls
+                        │                      │
+          返回 {turn_id, tool_calls}      ②③④ talker+code2wav
+          板上执行 → POST tool-results     返回 24kHz 音频
+          用 turn_id 续轮(不重传上下文)    板上原生播放</code></pre>
+
+<h3>4.1 会话状态所有权:两个所有者,边界清晰</h3>
+
+<div class="box err">
+<strong>更正:初稿的「工具轮改发 ASR 文本」不是等价变换</strong>
+它把<strong>模型实际听到的音频</strong>换成<strong>另一个 ASR 模型猜出来的文本</strong>。后果是模型可能否认自己刚才的意图、
+误解工具结果、甚至改调别的工具——第一轮它是<em>听着音频</em>决定调工具的,第二轮却只看到一段可能识别错的文字。
+这可以作为<strong>经 P0 对照测试验证过的优化</strong>,但不能当成架构公理写进设计。
+</div>
+
+<table>
+<tr><th>所有者</th><th>持有什么</th><th>生命周期</th></tr>
+<tr><td><strong>Jetson</strong></td><td>跨用户轮的<strong>有界文本历史</strong>(按 token 预算裁剪)</td><td>会话级</td></tr>
+<tr><td><strong>Mac</strong></td><td>当前工具链的临时 <code>turn_id</code> 状态:原始音频、预处理结果、thinker 文本、已发出的 tool_calls</td><td>单轮;完成 / 取消 / TTL 到期即删</td></tr>
+</table>
+
+<p>工具续轮只发 <code>turn_id + tool_results</code>,<strong>不让客户端重新拼一份语义不同的伪历史</strong>。
+这样第二轮模型看到的仍是它自己听过的那段音频的上下文。</p>
+
+<div class="box warn">
+<strong>措辞更正</strong>
+在 Mac 侧缓存 <code>input_features</code> 只能省掉<strong>网络传输和部分预处理</strong>;
+当前 mlx-vlm 的 thinker 前向<strong>仍会走音频编码路径</strong>。可以说「避免重复传输与前处理」,
+<strong>不能</strong>说「避免重新编码音频」。
+</div>
+
+<h3>4.2 板上执行面:必须抽共享模块,不能 importlib 加载 MCP server</h3>
+
+<p>初稿建议 importlib 直接加载 <code>drive/mcp_server.py</code> 调 <code>call_tool()</code>,理由是「三道安全门白送」。
+事实核查后这条<strong>必须推翻</strong>:</p>
+
+<table>
+<tr><th>初稿断言</th><th>核实结果</th></tr>
+<tr><td><code>call_tool()</code>/<code>list_tools()</code> 是模块级函数、不依赖 MCP 会话</td><td>✓ <strong>成立</strong>(MCP 装饰器 <code>return func</code>)</td></tr>
+<tr><td>drive 有钳位 + mutex + cooldown 三道门</td><td>✓ <strong>成立</strong>(<code>drive/mcp_server.py</code>)</td></tr>
+<tr><td>「直接 import 即可,三道门白送」</td><td>✗ <strong>不成立</strong>,见下</td></tr>
+<tr><td>「import 无副作用风险」</td><td>✗ <strong>不成立</strong>,顶层会建 ZMQ socket</td></tr>
+</table>
+
+<ul>
+<li><strong><code>voice/setup.sh</code> 没装 <code>mcp</code>,也没装 <code>pyzmq</code></strong>。在 voice venv 里 import 会直接在 <code>from mcp...</code> 炸掉,没有任何部署保证。</li>
+<li><strong><code>_motion_lock</code> 和 cooldown 是进程内全局变量</strong>。hermes 拉起的 MCP 子进程和 voice-daemon 里的导入实例各持一份,<strong>互相看不见</strong>。两个进程各持一把锁 = 没有锁。「omni 模式下 hermes 不接管对话」并不能证明没有别的 hermes session 或入口会调它。</li>
+<li>直接调用装饰后的函数会<strong>绕过 MCP SDK 的 inputSchema 校验</strong>。</li>
+<li><code>drive_move</code> 跑在 <code>asyncio.to_thread()</code> 里,<strong>取消 coroutine 不会停止已在运行的线程</strong>——车会继续开到 duration 结束。</li>
+</ul>
+
+<div class="box ok">
+<strong>正确做法</strong>
+把工具 schema 与业务逻辑抽到 <strong>import-clean 的共享模块</strong>(<code>drive/tools.py</code>、<code>vlm/tools.py</code>),
+MCP server 退化成薄适配层,omni executor 调同一批核心函数。
+executor 层统一做 JSON Schema 校验、工具白名单、超时、结果大小上限。
+<strong>运动互斥与 cooldown 必须下沉到单一拥有者</strong>(base_host 或独立 drive executor),
+不能指望两个 Python 进程各自的模块锁。
+</div>
+
+<p>这条没做完之前,<strong>P2 不允许用「前进一点」作正式验收</strong>——那等于在没有互斥的情况下让车动。</p>
+
+<h3>4.3 改动面:比初稿说的大得多</h3>
+
+<div class="box err">
+<strong>更正:「分流点只有一个」是严重低估</strong>
+现有链路 <code>_handle_chunk()</code> → <code>_asr_then_turn()</code> → <code>run_turn(gen, text)</code> 中,
+<strong><code>run_turn</code> 只收到文本,音频在 ASR 之后就被丢掉了</strong>。而 omni 需要原始音频。
+</div>
+
+<div class="box warn">
+<strong>本地 ASR 是一道闸,omni 模式下必须重新决策</strong>
+<code>_asr_then_turn()</code> 现在用 <code>classify_segment(text)</code> 过滤:解码为空 / 语气词 / 过短的段
+<strong>直接不起轮</strong>。在 hermes 模式下这是对的(大脑只吃文本,没文本就没得聊)。
+但 omni 模式下,<strong>这等于让本地 ASR 替 omni 决定「这段话值不值得听」</strong>——
+ASR 没听清的段,omni 未必听不清。<br>
+P2 必须明确二选一:(a) omni 模式跳过 <code>classify_segment</code> 闸,只靠 VAD 起轮(代价:噪声段也会打到 Mac);
+(b) 保留闸但放宽判据。<strong>不能默认继承</strong>。
+</div>
+
+<table>
+<tr><th>组件</th><th>改动</th></tr>
+<tr><td><code>_asr_then_turn(gen, samples)</code></td><td>保留 samples(现在手里有,只是没往下传);ASR 与网络请求并行;<strong>重新决策 <code>classify_segment</code> 闸</strong></td></tr>
+<tr><td><code>run_turn(gen, text, samples=None)</code> 或独立 <code>run_omni_turn()</code></td><td>按 preset kind 分流</td></tr>
+<tr><td><code>_barge_check()</code> 起新轮</td><td>同样要把 samples 传下去</td></tr>
+<tr><td><strong>新增原生音频播放函数</strong></td><td>见下,不能只是「直接 aplay」</td></tr>
+<tr><td>TTS 队列 / <code>_speak_worker</code></td><td><strong>不改,但 omni 是「绕过」而非「复用」</strong>——它根本不进那个队列</td></tr>
+</table>
+
+<div class="box warn">
+<strong>原生播放必须复刻完整播放语义</strong>
+照 <code>_local_play()</code> 的结构写(它已经是 <code>aplay</code> 播 s16le,omni 的 24kHz 正好对得上 edge 那条路的采样率),
+必须同时维护:<code>set_state(SPEAKING)</code>、<code>_cur_aplay</code> 句柄、generation 令牌比对、kill/reap、
+<code>_after_playback()</code>、<code>_playback_dead(rc)</code> 设备失效重发现,以及
+<strong>把 assistant 文本 append 进 <code>_recent_tts</code></strong>——否则 barge-in 的回声检测失去参照,机器人会把自己的话当成用户插话。
+</div>
+
+<h3>4.4 GUI:不是零改动</h3>
+
+<div class="box err">
+<strong>更正:「GUI 零改动」是错的</strong>
+下拉框选项确实数据驱动、Rust 白名单确实已放行 <code>/brain</code> 和 <code>/config</code>——所以「不改也能点」成立。
+但<strong>「GUI 语义正确」不成立</strong>。
+</div>
+
+<table>
+<tr><th>位置</th><th>问题</th></tr>
+<tr><td><code>voice_http.py</code> 的 <code>/brain</code></td><td>无条件按云 preset 校验,强制要求 <code>key_env</code> 非空</td></tr>
+<tr><td><code>daemon.py</code> 的 <code>switch_brain()</code></td><td>无条件改 hermes YAML、重启网关,最后硬编码写回 <code>kind:"hermes"</code></td></tr>
+<tr><td><code>brain_drift()</code>、capabilities 徽章</td><td>只认识 hermes profile</td></tr>
+<tr><td><code>agent.js</code> 的 pair 显示</td><td>会把 omni 显示成「ASR + TTS 搭配」,而 omni 根本不用 TTS</td></tr>
+<tr><td>页面说明文案</td><td>硬编码 hermes / DeepSeek / 传统 TTS</td></tr>
+</table>
+
+<h2>5 · 配置数据结构:消灭重复真相源</h2>
+
+<p>现状有四个真相源:<code>brain.kind</code>、<code>brain.preset</code>、顶层 <code>omni.url</code>、只描述 hermes provider 的 <code>presets.*</code>。
+GUI 下拉框只提交 preset 名——<strong>后端凭什么推断出这个 preset 是什么种类?</strong> 没有定义。</p>
+
+<p>改成 <strong>tagged union</strong>:kind 由 preset 自己携带,顶层 <code>omni.url</code> 删除。</p>
+
+<pre><code>{
+  "brain": {"preset": "omni-mac"},
+  "presets": {
+    "deepseek": {"kind": "hermes", "api": "...", "model": "...", "key_env": "...", "pair": {...}},
+    "omni-mac": {"kind": "omni",   "url": "http://&lt;mac-lan-ip&gt;:&lt;port&gt;",
+                 "speaker": "ethan", "pair": {"asr": "sensevoice"}}
+  }
+}</code></pre>
+
+<p><strong>向后兼容</strong>:老配置的 preset 没有 <code>kind</code> 字段时,默认解释成 <code>"hermes"</code>。
+这样一个 preset 自己携带完整类型,<strong>「kind 与 preset 不一致」这个非法状态在数据结构层面不再存在</strong>。</p>
+
+<h2>6 · 协议</h2>
+
+<p>初稿的协议同时出现 <code>session</code> + 完整 <code>messages</code> + 独立 <code>audio_b64</code> + 「messages 里 user 也可以带 audio」——
+<strong>三个真相源,典型的坏数据结构</strong>。重做如下。</p>
+
+<p><strong>不假装 OpenAI 兼容</strong>——它本来就不是(要流式回传音频、要按工具调用决定是否合成语音)。
+假装兼容只会制造「看起来能用别的客户端打、实际不能」的误解。JSON + base64 对短语音够用,不必为「标准」引入 multipart。</p>
+
+<div class="box ok">
+<strong>响应用 SSE,因为板上已经有解析器</strong>
+<code>voice/daemon.py</code> 的 <code>_iter_sse()</code> 现在用来读 hermes 的流,可直接复用——新链路零新增解析代码。
+注意它那条注释里的实锅:<strong>不能用 aiohttp 的行迭代器</strong>(512KB <code>read_bufsize</code> 上限,
+一行塞下整段 base64 音频会超限抛错、整轮中断),必须自行按 <code>\n</code> 切行。omni 的音频块比 hermes 的文本行大得多,
+这个坑只会更容易踩到。
+</div>
+
+<pre><code>POST /v1/turn                          Authorization: Bearer &lt;token&gt;
+{
+  "request_id":      "&lt;uuid&gt;",         # 幂等键
+  "conversation_id": "voice",
+  "user_text":       "...",            # 本地 ASR 文本(可选,供模型参考与日志)
+  "audio":           {"b64": "...", "mime": "audio/wav", "rate": 16000, "channels": 1},
+  "tools":           [...],            # OpenAI function schema
+  "tools_version":   "&lt;hash&gt;",         # 变更时使 Mac 侧缓存失效
+  "speaker":         "ethan"           # chelsie | ethan | aiden
+}
+→ 200 text/event-stream    # 必须流式:P0 实测非流式首音 20.9s,流式 2.6s
+  event: thinker.text                  # 一次。thinker 已完成,工具与否此刻已确定
+  data: {"turn_id": "...", "status": "completed" | "tool_calls" | "bad_tool_call",
+         "assistant_text": "...",      # 已剥除 &lt;tool_call&gt; 标记
+         "tool_calls": [{"call_id": "...", "name": "...", "arguments": {...}}]}
+
+  event: audio.chunk                   # 0..N 次。status=completed 时才有
+  data: {"seq": 0, "b64": "...", "rate": 24000}
+
+  event: done
+  data: {"timing": {"thinker_ms":…, "hidden_ms":…, "first_audio_ms":…, "total_ms":…}}
+
+  event: error
+  data: {"code": "busy|cancelled|bad_tool_call|expired_turn|audio_too_long", "message": "..."}
+
+POST /v1/turn/{turn_id}/tool-results   # 续轮:只发结果,不重传上下文
+{ "request_id": "...", "results": [{"call_id": "...", "ok": true, "content": "..."}] }
+→ 同上响应结构
+
+DELETE /v1/requests/{request_id}       # 取消,见第 7 节
+GET    /health                         # 探针用
+</code></pre>
+
+<table>
+<tr><th>约束</th><th>规定</th></tr>
+<tr><td><code>request_id</code> 幂等</td><td><strong>必须</strong>。HTTP 重试绝不能让机器人把同一个动作执行两次</td></tr>
+<tr><td><code>call_id</code></td><td>即使模型模板不用,执行器与日志也必须靠它关联</td></tr>
+<tr><td>鉴权</td><td>Bearer token。<strong>局域网不是安全边界</strong>,与 vlm-daemon 的 token 机制一致</td></tr>
+<tr><td>音频上限</td><td>明确最大时长、解码后字节上限、采样率/声道/MIME 白名单</td></tr>
+<tr><td>并发</td><td><strong>二选一,不能两种都写</strong>:本方案取「零排队,忙则立即 <code>503 busy</code>」——<em>前提是取消可靠</em>(见第 7 节),否则残留的旧请求会让用户插话后的新请求必然失败</td></tr>
+<tr><td>结构化错误</td><td><code>busy</code> / <code>cancelled</code> / <code>bad_tool_call</code> / <code>expired_turn</code> / <code>audio_too_long</code></td></tr>
+</table>
+
+<h2>7 · 打断与取消:诚实地说,现有 barge-in 解决不了</h2>
+
+<div class="box err">
+<strong>更正:初稿说 barge-in「原样复用」,不成立</strong>
+现有打断检测只在 <code>SPEAKING</code> 状态开麦(<code>_handle_chunk()</code> 的注释写得很清楚:「LISTENING 走正常截句;
+SPEAKING 开麦做打断检测;<strong>其余丢弃</strong>」)。于是:
+<ul style="margin:8px 0 0">
+<li>Mac 推理期间 Jetson 处于 <code>THINKING</code>,<strong>用户语音被直接丢弃</strong>。</li>
+<li>非流式模式下,进入 <code>SPEAKING</code> 时 Mac 推理早已结束,<strong>已经没有东西可取消</strong>。</li>
+<li>GUI 的 interrupt 能 cancel Jetson 的 aiohttp task,但<strong>同步的 MLX 推理不会因此停止</strong>,Mac 的 worker 还在跑。</li>
+<li>若此刻有 <code>drive_move</code> 在 <code>asyncio.to_thread()</code> 里,<strong>取消 coroutine 也不会停线程,车会继续开</strong>。</li>
+</ul>
+</div>
+
+<p>必须补齐:</p>
+<ul>
+<li>Mac 侧<strong>请求级 cancel token</strong>,在 thinker / talker 的 token 循环里检查。</li>
+<li><code>DELETE /v1/requests/{request_id}</code> 取消端点。<strong>客户端断线不等于取消</strong>,必须走显式协议。</li>
+<li>取消当前工具链时,若有运动工具在途,<strong>显式调 <code>drive_stop</code> / motion controller stop</strong>——不能只 cancel 协程。</li>
+<li>定义「取消后 worker 多久必须重新可用」,并作为 P0 验收项。</li>
+<li><strong>如果第一版做不到 THINKING 期打断,就诚实写「只支持播放期打断」</strong>,不要声称复用现有机制已经解决。</li>
+</ul>
+
+<h2>8 · 工具循环、失败与上下文预算</h2>
+
+<p>这些必须是<strong>协议的一部分</strong>,不是实现细节:</p>
+
+<table>
+<tr><th>项</th><th>规定</th></tr>
+<tr><td>工具异常</td><td>一律转成<strong>结构化 tool result</strong> 回填给模型,不能让整轮 silently die</td></tr>
+<tr><td>错误分类</td><td><code>timeout</code> / <code>cancelled</code> / <code>unknown_tool</code> / <code>schema_invalid</code> 分开表示</td></tr>
+<tr><td>最大工具轮数</td><td>4</td></tr>
+<tr><td>单轮最大 tool calls</td><td>4</td></tr>
+<tr><td><strong>运动工具</strong></td><td><strong>一轮最多一个</strong>;多个只读工具可并行,<strong>运动工具必须串行</strong></td></tr>
+<tr><td>tool result 字节上限</td><td>必须设(VLM caption / <code>vlm_recent</code> 可能很长)</td></tr>
+<tr><td>上下文裁剪</td><td>按 <strong>token 预算</strong>,不按「十轮看起来不多」</td></tr>
+<tr><td>裁剪优先级</td><td><strong>永远保留当前未完成的工具链</strong>,优先丢最老的完整用户轮</td></tr>
+<tr><td>被打断的轮次</td><td>assistant 音频/文本<strong>不得写入已完成历史</strong>;但已执行的运动副作用<strong>必须保留审计记录</strong></td></tr>
+<tr><td>重复调用检测</td><td>同一轮内相同 name+arguments 重复出现时拦截</td></tr>
+</table>
+
+<h2>9 · 风险与对策</h2>
+
+<table>
+<tr><th>风险</th><th>后果</th><th>对策</th></tr>
+<tr><td><strong>延迟</strong>:30B-A3B/MLX + 局域网传音频 + 工具轮多次推理</td><td>体验不可接受,方案价值归零</td><td><strong>P0 先测,go/no-go 数字跑测试前写死</strong></td></tr>
+<tr><td><strong>跨进程运动互斥失效</strong></td><td>两路同时发速度帧,机器人行为不可预测</td><td>互斥下沉到单一拥有者;<strong>这条没做完不许让车动</strong></td></tr>
+<tr><td>取消不可靠 + 零排队 503</td><td>用户插话后新请求必然失败</td><td>取消可靠是 503 策略的<strong>前提</strong>,一并在 P0 验证</td></tr>
+<tr><td>ASR 接力的语义损失</td><td>模型误解自己刚才的意图</td><td>默认<strong>不</strong>做替换(turn_id 续轮);若要做,须经 P0 对照测试</td></tr>
+<tr><td>mlx-vlm 工具路径未验证</td><td>P1 写完发现模型不吐 tool_call</td><td>P0 必须实测成功率,<strong>不引用 transformers cookbook 当证据</strong></td></tr>
+<tr><td>monkey-patch 与 0.6.4 绑死</td><td>升级即炸</td><td>固定版本;两阶段适配层<strong>独立于</strong> bug-fix patch,不混在一起</td></tr>
+<tr><td><code>_brain_probe()</code> 判据是「必须吐 token」</td><td>omni preset 探针必然失败并自动回滚</td><td>按 kind 分流:omni 探针改为打服务端 <code>/health</code></td></tr>
+<tr><td>畸形 <code>&lt;tool_call&gt;</code></td><td>机器人念出损坏 JSON,或误执行</td><td>talker 启动前识别,返回 <code>bad_tool_call</code>,板上播固定错误短语。<strong>绝不猜测参数</strong></td></tr>
+<tr><td>22GB 峰值内存</td><td>服务化后可能更高</td><td>那是 CLI 路径的记录,<strong>不是容量承诺</strong>;P0 重测,含连续 20 轮是否增长</td></tr>
+</table>
+
+<h2>10 · 实施路线</h2>
+
+<p>原则:<strong>物理动车是最后一步,不是用来证明网络协议能跑的冒烟测试</strong>。</p>
+
+<div class="box ok">
+<strong>P0 已执行完毕(2026-07-25):VERDICT = GO</strong>
+实测代码 <code>omnivla/scripts/omni_two_stage.py</code> + <code>p0_bench.py</code>,
+测试语音由 macOS <code>say -v Tingting</code> 生成(可复现)。<strong>下面的所有数字都是实测,不是估计。</strong>
+</div>
+
+<h3>P0 实测结果</h3>
+
+<p><strong>① 可行性:成立。</strong> <code>apply_chat_template(tools=...)</code> + 纯音频输入在 mlx-vlm 0.6.4 上
+<strong>确实能稳定产出 <code>&lt;tool_call&gt;</code></strong>——工具调用成功率 <strong>100%</strong>(80 个工具轮),
+<code>bad_tool_call</code> <strong>0/140</strong>。这条此前是假设,现已验证。</p>
+
+<p><strong>② 两阶段拆分:被数据强力验证,且初稿的成本模型确实错得离谱。</strong></p>
+<table>
+<tr><th>工具轮(中位)</th><th>wall</th><th>被丢弃的 talker 侧开销</th></tr>
+<tr><td><strong>two_stage(本方案)</strong></td><td><strong>671 ms</strong></td><td><strong>0 ms</strong></td></tr>
+<tr><td>always_audio(初稿方案)</td><td>4691 ms</td><td><strong>3949 ms</strong></td></tr>
+</table>
+<p>初稿称「工具 JSON 只有几十 token,talker 很便宜」。实测 <code>always_audio</code> 在工具轮的 talker 开销是
+<strong>8268 ms</strong>(<code>tool_drive</code>)——比正常回答还贵,因为 <strong>talker 在逐字朗读那段 JSON</strong>。
+两阶段直接省掉中位 <strong>3.9 秒</strong>。</p>
+
+<p><strong>③ 首音延迟:非流式 NO-GO,流式 + 回复长度约束后 GO。</strong>
+瓶颈是 talker,且严格正比回复长度(短答 2312 ms → 长答 <strong>17691 ms</strong>)。
+非流式必须等整段语音合成完才能出第一个采样。两个杠杆:</p>
+<table>
+<tr><th>配置</th><th>chat_long 首音</th></tr>
+<tr><td>非流式(批式)</td><td>20864 ms</td></tr>
+<tr><td>流式 chunk=300</td><td>12784 ms</td></tr>
+<tr><td>流式 chunk=150</td><td>7302 ms</td></tr>
+<tr><td>流式 chunk=75</td><td>4880 ms</td></tr>
+<tr><td><strong>流式 chunk=50 + 回复长度约束</strong></td><td><strong>2561 ms</strong></td></tr>
+</table>
+
+<p><strong>最终门(stream50 + terse system prompt)</strong>:</p>
+<table>
+<tr><th>指标</th><th>实测</th><th>门</th><th></th></tr>
+<tr><td>说完→首音 P50</td><td><strong>2561 ms</strong></td><td>3500 ms</td><td>PASS</td></tr>
+<tr><td>说完→首音 P95</td><td><strong>2899 ms</strong></td><td>6000 ms</td><td>PASS</td></tr>
+<tr><td>说完→tool dispatch P50</td><td><strong>634 ms</strong></td><td>2500 ms</td><td>PASS</td></tr>
+<tr><td>说完→tool dispatch P95</td><td><strong>898 ms</strong></td><td>4000 ms</td><td>PASS</td></tr>
+<tr><td>工具调用成功率</td><td><strong>100%</strong></td><td>90%</td><td>PASS</td></tr>
+<tr><td>峰值内存(140 轮)</td><td>21.4 → 21.9 GB</td><td>不增长</td><td>+0.49 GB,继续观察</td></tr>
+</table>
+
+<div class="box warn">
+<strong>P0 遗留的三个未验证项(移交 P1)</strong>
+<ul style="margin:8px 0 0">
+<li><strong>取消(cancel)</strong>:P0 未测。「取消后 worker ≤1s 可用」仍是纸面指标,而它是 503 并发策略的前提。</li>
+<li><strong>真实麦克风音频</strong>:上述成功率基于 <code>say</code> 合成语音。真人语音、噪声、口音下的工具调用成功率必须重测。</li>
+<li><strong>长会话</strong>:140 轮 +0.49 GB 的增长趋势需要在更长的会话上确认不是泄漏。</li>
+</ul>
+</div>
+
+<h3>P0 · 方法(留档)</h3>
+<p>三件事:两阶段生成的 spike、工具模板实测、延迟/内存/取消测量。</p>
+<p><strong>必测对照</strong>:<code>return_audio=False</code> / 原版 <code>generate_stream()</code> 中途关闭 / 提前 text yield 的两阶段版本。</p>
+<p><strong>go/no-go 门(跑测试之前写死,不许看到结果再解释)</strong>:</p>
+<table>
+<tr><th>指标</th><th>门</th><th>来源</th></tr>
+<tr><td>说完 → 首个可播放音频</td><td>P50 ≤ <strong>3.5s</strong>,P95 ≤ <strong>6s</strong></td><td>P50 复用项目现有标准(<code>agent-voice-pages-plan.html</code>)</td></tr>
+<tr><td>说完 → tool dispatch</td><td>P50 ≤ <strong>2.5s</strong>,P95 ≤ <strong>4s</strong></td><td>本方案设定</td></tr>
+<tr><td>工具结果 → 首个确认音频</td><td>P50 ≤ <strong>3.5s</strong></td><td>本方案设定</td></tr>
+<tr><td>cancel → Mac worker 重新可用</td><td>≤ <strong>1s</strong></td><td>503 策略的前提</td></tr>
+<tr><td>音频 function call 成功率(MLX 实测)</td><td>≥ <strong>90%</strong></td><td>不引用 cookbook</td></tr>
+<tr><td>连续 20 轮峰值统一内存</td><td><strong>不增长</strong></td><td>泄漏门</td></tr>
+</table>
+<p><strong>测量方法</strong>:预热后每场景 ≥20 次,报 P50/P95(不是单次);分段计时 audio encode / thinker / hidden-state / talker / code2wav;
+覆盖 warm/cold、1/5/15 秒输入、短/长回复、chat / 单工具 / 两轮工具链 / 畸形 tool call;记录峰值内存与连续运行降频。</p>
+<p><strong>可选对照(决定 4.1 是否做 ASR 替换)</strong>:准备一组易误识别但工具意图明确的音频(中英混合、数字、方向、同音词),
+比较「续轮重放音频」/「本地 ASR 文本」/「omni 自身转写」三种做法的<strong>工具链成功率</strong>。</p>
+
+<div class="box ok">
+<strong>P1 已执行完毕(2026-07-25):31/31 PASS = GO</strong>
+实现 <code>omnivla/scripts/server.py</code>(aiohttp + SSE),验收 <code>scripts/p1_client_test.py</code>。
+</div>
+
+<h3>P1 实测结果</h3>
+<table>
+<tr><th>验收项</th><th>实测</th></tr>
+<tr><td>聊天轮首音</td><td><strong>2198 ms</strong>(与 P0 的 2561 ms 吻合)</td></tr>
+<tr><td>工具轮</td><td>thinker 703 ms,<strong>timing 中无 <code>hidden_ms</code>/<code>talker_ms</code></strong>——两阶段经 HTTP 端到端确认</td></tr>
+<tr><td><strong>取消</strong></td><td><code>was_active: true</code>,收到 <code>cancelled</code> 事件,worker <strong>3 ms</strong> 释放(门 ≤1000 ms)</td></tr>
+<tr><td>并发</td><td>第二路 <strong>1 ms</strong> 返回 503,且断言首路当时仍在跑(排除假阳性)</td></tr>
+<tr><td>幂等</td><td>同 <code>request_id</code> 重放 1 ms,turn_id 一致,未重跑推理</td></tr>
+<tr><td>坏输入</td><td>未知 speaker 400 / 超长音频 413 / 畸形音频 400 / 缺 request_id 400 / 未知 turn_id 404</td></tr>
+<tr><td>工具失败</td><td>模型收到 <code>[tool error]</code> 后自行降级:「移动功能暂时不可用。我试试看能不能用摄像头观察周围环境。」</td></tr>
+</table>
+
+<div class="box err">
+<strong>踩到的坑:MLX 的 generation stream 是线程局部的</strong>
+<code>mlx_vlm/generate/common.py</code> 用 <strong><code>mx.new_thread_local_stream()</code></strong> 在<strong>导入时</strong>建 stream。
+若在主线程 <code>load()</code> 而在 worker 线程推理,会报
+<code>RuntimeError: There is no Stream(gpu, 1) in current thread</code>——
+而且 <strong>thinker 照常工作、只有 talker/code2wav 炸</strong>,看起来像声码器的 bug,极具误导性。<br>
+修法不是加锁绕过,而是<strong>让 import、权重加载、推理全部发生在同一个 worker 线程</strong>
+(<code>pool.submit(_load).result()</code>)。反正设计上就是单线程串行,这样那个线程局部不变量按构造成立。
+</div>
+
+<div class="box warn">
+<strong>这个坑还顺带暴露了一个测试陷阱</strong>
+talker 一崩,聊天轮从 ~2.5 s 缩到 ~700 ms,于是「sleep 1 秒后发第二路请求应得 503」和「取消正在跑的请求」<strong>两个用例都变成假阳性</strong>——
+worker 早就空了。<strong>并发/取消类用例必须断言「被测的第一路此刻确实还在跑」</strong>,
+否则它们只是在测试自己的 sleep 时长。已加 <code>check("被拒时首路仍在跑", not task.done())</code>。
+</div>
+
+<h3>P1 · 范围(留档)</h3>
+<p>第 6 节协议全量:鉴权、<code>turn_id</code> 状态、<code>request_id</code> 幂等、取消端点、复用 mlx-vlm 的 tool parser。</p>
+<p><strong>验收</strong>(不止两条 curl):并发请求确实被拒且不排队;客户端断开与显式 cancel 行为符合协议;
+畸形/超长音频、未知 speaker 被正确拒绝;畸形与混合文本/tool call 三分正确;多 tool calls;
+模型异常 / OOM / 服务重启可恢复;<strong>工具路径确认没有跑 talker/code2wav</strong>(看 timing 分段);
+request_id、日志与 timing 三者对得上。</p>
+
+<div class="box ok">
+<strong>P2 已完成(2026-07-25):真机跑通</strong>
+真实麦克风 → VAD → 本地 ASR(仅显示) + 原始音频 → Mac omni → <code>vlm_look</code> → 模型原生语音在机器人喇叭放出。
+实测一轮:「你看看前面有什么东西？」→ 调用 <code>vlm_look</code> → 用模型自己的声音答
+「看到一个黄色足球，还有木桌腿和坐在床上的人。」
+</div>
+
+<h3>P2 现场暴露的五个 bug(纸面设计全看不出来)</h3>
+<table>
+<tr><th>现象</th><th>根因</th><th>修法</th></tr>
+<tr><td>回声自打断,随后 <code>omni busy</code></td>
+    <td><code>_recent_tts.append</code> 放在整轮<strong>结束后</strong>,而回声检测需要在音频<strong>播放期间</strong>就能查到该句。hermes 路径是播每句<strong>之前</strong>就登记的</td>
+    <td>新增 <code>on_text</code> 回调,文本一确定就登记</td></tr>
+<tr><td>打断后新轮撞 503</td>
+    <td>旧轮只在本地停止,<strong>没通知 Mac</strong>,服务端还在生成</td>
+    <td><code>alive()</code> 转 false 立即 <code>DELETE /v1/requests/{id}</code></td></tr>
+<tr><td>只出声不出字</td>
+    <td>只发了 <code>tts</code>,而 GUI 对话气泡渲染的是 <code>assistant_delta</code></td>
+    <td>omni 无 token 流,整句作为一个 delta 发出</td></tr>
+<tr><td><strong>播放有回音/断续</strong></td>
+    <td><strong>每个音频块单独 spawn 一个 <code>aplay</code></strong>。chunk=50 时一条回复十几块 = 十几次进程启停,块间必有空隙,半双工恢复时刻被反复重置</td>
+    <td>整轮只开一个 aplay,音频块写进它的 stdin(<code>drain()</code> 做背压)</td></tr>
+<tr><td><strong>工具打转到耗尽轮数</strong><br><code>vlm_look → vlm_last_caption → vlm_look → …</code></td>
+    <td><strong>把工具响应整个 JSON dump 给了模型</strong>,而 <code>/caption</code> 的返回里带 <code>frame_b64</code>——一整张 base64 JPEG,截断到 4000 字符后就是乱码。模型看到噪声就再试一次</td>
+    <td>白名单投影工具结果字段(<code>_VLM_KEEP</code>),外加重复调用检测</td></tr>
+</table>
+
+<div class="box err">
+<strong>运行约束:板子 8 GB 内存装不下「视觉 + ASR + 桌面」</strong>
+实测稳态:<code>llama-server</code>(VLM 视觉模型)<strong>2648 MB</strong> + <code>llama-funasr-cli</code> 884 MB
++ voice-daemon 316 MB + 桌面/Xorg/WebKit ~400 MB。<strong>只要 <code>vlm_look</code> 把视觉模型拉起来,可用内存就逼近零</strong>,
+voice-daemon 撞上 unit 的 <code>MemoryHigh=900M</code> 被内核节流成假死——
+<strong>进程活着、日志打印「listening on 0.0.0.0:8092」、端口实际没起来</strong>,极难诊断。<br>
+omni 把 LLM 挪到 Mac 省下了大脑的内存,<strong>但视觉工具仍要板上那 2.6 GB</strong>。P3 必须正视。
+诊断命令:<code>systemctl --user status voice-daemon</code> 看 <code>Memory: X (high: 900.0M available: 0B)</code>,
+以及 <code>free -m</code> 的 available 列。
+</div>
+
+<h3>会话历史:采用有界文本历史,不做跨轮 KV cache</h3>
+
+<p>P2 初版没有任何跨轮记忆(每轮 <code>system + 当前音频</code>,说完就忘)。评估了「缓存语义空间」方案后,
+<strong>选择有界文本历史</strong>,理由是实测数据而非偏好:</p>
+
+<table>
+<tr><th>结论</th><th>依据(codex 实测)</th></tr>
+<tr><td><code>max_kv_size</code> <strong>是空操作</strong></td>
+    <td>thinker 的 <code>LanguageModel.make_cache()</code> 强制返回普通 <code>KVCache</code>,而 <code>make_prompt_cache()</code> 一旦发现模型自带 <code>make_cache()</code> 就不看该参数。请求 512,返回的仍是 48 个普通 KVCache</td></tr>
+<tr><td><code>RotatingKVCache</code> <strong>会算错位置</strong></td>
+    <td>语言模型拿 <code>cache._idx</code> 当位置偏移,但它是<strong>环形写指针</strong>,写满跳回 <code>keep</code>,不是累计 token 位置。<strong>0.6.4 上禁用</strong></td></tr>
+<tr><td>mRoPE 不是障碍,但 RoPE offset 是</td>
+    <td>该版本 <code>get_rope_index()</code> 只给 image/video 建三维网格,音频走普通顺序位置。但 <code>get_input_embeddings()</code> 每次清空 <code>_position_ids/_rope_deltas</code>,只传 suffix 而不恢复 offset 会让 suffix 从位置 0 重来:logprob 平均偏差 <strong>0.22 → 1.31(最大 9.19)</strong></td></tr>
+<tr><td>KV cache 能省 <strong>280–300 ms/轮</strong></td>
+    <td>2048 token 冷 prefill 339 ms,追加 128 token 仅 52 ms(6.5×)。20 轮约 2052 token</td></tr>
+<tr><td><strong>但冷 prefill 本来就只要 ~340 ms</strong></td>
+    <td>在 2.5 s 首音预算里不显眼 → 有界文本历史够用</td></tr>
+<tr><td>内存不是约束</td>
+    <td>96 KiB/token(48 层 × 4 KV head × 128 × 2B,GQA)。<strong>3 秒音频只有 40 token(13.3 token/s)</strong>,20 轮 2052 token = <strong>0.19 GiB</strong>。先撞上的是 65K 上下文上限,不是 128 GB</td></tr>
+<tr><td><code>kv_bits</code> 量化不值得</td>
+    <td>8-bit 让 suffix 从 105 ms <strong>变慢到 289 ms</strong>,还引入漂移</td></tr>
+</table>
+
+<div class="box warn">
+<strong>静默损坏陷阱:历史音频不能只传当前那一段</strong>
+历史里有多个音频段时,phase ② <strong>必须重新提供所有历史音频 features</strong>。
+只传当前音频,当前实现会把缺失的历史 audio embedding <strong>补零</strong>——<strong>不报错,但语义是错的</strong>。
+这正是本方案历史只存文本、不回放音频的直接原因。
+</div>
+
+<p><strong>若将来确实需要保留原始音频历史</strong>,再做跨轮 KV cache,但要手工管理三样东西:实际 token 序列(不是每轮重渲染模板)、
+cache、RoPE offset。且优先级低于另一件事——<strong>把 ②③ 裁剪到最后一轮</strong>:
+<code>_get_talker_assistant_parts()</code> 完全不用 contextual hidden(只投影 assistant token embedding),
+<code>_get_talker_user_parts()</code> 也只在多模态位置用 hidden,所以裁剪是安全的,而 ② 的开销是线性的
+(512→85 ms,2048→297 ms,4096→642 ms)。</p>
+
+<h3>P2 · Jetson 音频链路 + 纯聊天与只读工具</h3>
+<ul>
+<li><code>_asr_then_turn</code> 保留 samples;<code>run_turn</code> 按 preset kind 分流</li>
+<li>原生音频播放函数(完整播放语义,见 4.3)</li>
+<li>工具只接<strong>只读的</strong>:<code>vlm_look</code> / <code>imu_read</code> / <code>drive_status</code> / <code>motion_status</code></li>
+</ul>
+<p><strong>验收</strong>:纯语音对话跑通;问「你看到什么」能走 vlm 并用 omni 的声音回答;打断行为与文档描述一致(不夸大)。</p>
+
+<h3>P3 · 运动仲裁 + drive 工具 + 切换 + GUI 语义</h3>
+<ul>
+<li><code>drive/tools.py</code> / <code>vlm/tools.py</code> 共享模块落地,MCP server 退化为薄适配层</li>
+<li><strong>运动互斥下沉到单一拥有者</strong>,幂等与安全门到位</li>
+<li>config 改 tagged union;<code>switch_brain</code> / <code>/brain</code> / <code>_brain_probe</code> / <code>brain_drift</code> 全部 kind-aware</li>
+<li>GUI 状态文案、能力徽章、原生语音显示改成 kind-aware</li>
+<li>故障注入 + 现场测试</li>
+</ul>
+<p><strong>验收</strong>:说「前进一点」车动且互斥可证;hermes ↔ omni 来回切换正常且 omni 侧明显更快(不重启网关);
+拔网线 / 杀服务 / 取消运动中的工具,行为均符合第 7、8 节规定。</p>
+
+<h2>11 · 明确不做</h2>
+<ul>
+<li><del>第一版不做网络流式</del> —— <strong>此条作废。P0 实测:流式是必需项,不是优化项</strong>。
+非流式首音 20.9 s,流式 chunk=50 + 回复长度约束后 2.6 s。协议、服务端、板上播放<strong>从第一版就必须是流式的</strong>,
+详见第 6 节。</li>
+<li><strong>不给 hermes 加音频 transport</strong>。见第 2 节。</li>
+<li><strong>不做 omni 的视觉输入</strong>。视觉仍走 <code>vlm_look</code> 返回文本 caption,与现有链路一致。</li>
+<li><strong>不给 TTS 加 <code>none</code> 选项</strong>。omni 跳过 TTS 是 preset kind 分流的自然结果,不是 TTS 轴上的特殊值——
+往 <code>TTS_ENGINES</code> 塞哨兵值是把两个正交概念揉在一起。</li>
+<li><strong>不补 <code>required: []</code></strong>。JSON Schema 里缺 <code>required</code> 本就表示全部可选,补空数组没有语义价值
+(初稿此处建议作废)。</li>
+</ul>
+
+</div>
+</body>
+</html>

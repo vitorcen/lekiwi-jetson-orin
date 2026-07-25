@@ -279,6 +279,22 @@
 <!-- ======================= 语音 Voice(设备 / ASR / TTS 调试) ======================= -->
 <div id="page-voice" class="page">
 
+  <!-- 语音服务连接 + 启停。#voip 是整个 GUI 里唯一的 voice-daemon 连接字段,
+       Agent 页也读它(按 id,不要求同页显示)。 -->
+  <div class="connbar">
+    <label>语音服务 IP
+      <input id="voip" type="text" value="127.0.0.1">
+    </label>
+    <span class="svcbtns" title="语音服务(voice-daemon)手动控制。只影响本次运行,不改开机自启。">
+      <button id="asvcRestart">重启服务</button>
+      <button id="asvcStop">停止服务</button>
+      <button id="asvcStart">启动服务</button>
+      <label class="svcauto" title="开机自启(systemctl --user enable/disable voice-daemon)">
+        <input type="checkbox" id="asvcAuto"> 开机自启
+      </label>
+    </span>
+  </div>
+
   <!-- 设备状态条:麦克风电平 + 音响 + 音频总灯,数据全来自 /health -->
   <div id="voicedevbar">
     <span class="vdcell" title="麦克风采集卡 + 闸门前实时电平(dBFS)。接近 -79 即设备静音或未开机。">
@@ -324,19 +340,19 @@
       </div>
       <!-- VAD 模式参数(一级=VAD+离线 时显示) -->
       <div class="watchrow" id="vlVadRow">
-        <label class="ivlabel" title="VAD 引擎:silero 现役;energy 零依赖基准;webrtc/ten 视板上可用">VAD
+        <label class="ivlabel" title="VAD 引擎:决定「这段音频算不算人声」。&#10;fsmn/silero=神经网络判据(抗噪好);energy=纯电平门(零依赖,吵的环境会疯);&#10;webrtc/ten 视板上可用。换引擎后阈值语义也跟着变,要重调。">VAD
           <select id="vlVadEngine"></select>
         </label>
-        <label class="ivlabel" title="silero/webrtc 为 0~1;energy 为 dBFS 门(如 -45)">阈值
+        <label class="ivlabel" title="每帧「是语音」的概率门槛(silero/webrtc 0~1;energy 为 dBFS 如 -45)。&#10;⚠ fsmn 引擎忽略此项(它自带内部状态机),改了没有任何效果。&#10;调大 → 更难被噪音触发,但轻声/远处说话的开头会被吞掉。&#10;调小 → 轻声也能唤醒,但环境噪音会不停误起轮。">阈值
           <input type="text" inputmode="decimal" id="vlVadThreshold" style="width:5em">
         </label>
-        <label class="ivlabel" title="开段:语音需连续这么久(秒)">最短语音
+        <label class="ivlabel" title="连续多久的语音才算开了一段(秒)。&#10;★ fsmn 引擎下这是抑制误触发的主要旋钮(阈值/尾静音对它无效)。&#10;调大 → 咔哒声、回声尾巴这类短促噪音直接不成段。&#10;调小 → 「停」「好」这类极短指令不会被漏掉。&#10;参考:实测真人一句话通常 2 秒以上,误触发多在 1 秒以内。">最短语音
           <input type="text" inputmode="decimal" id="vlVadMinSpeech" style="width:5em">
         </label>
-        <label class="ivlabel" title="收段:静音这么久(秒)才截断">尾静音
+        <label class="ivlabel" title="说完后静音多久才认为这句话结束(秒)。&#10;⚠ fsmn 引擎忽略此项(收段由它自己的状态机决定)。&#10;调大 → 句中停顿不会把一句话切成两半,但机器人回话变慢。&#10;调小 → 响应更快,但说话稍作停顿就会被切断、半句话就送去处理。">尾静音
           <input type="text" inputmode="decimal" id="vlVadMinSilence" style="width:5em">
         </label>
-        <label class="ivlabel" title="前置回溯(秒):把段起点前这么久音频一并纳入,修「起音掐头」。默认0.45">前置
+        <label class="ivlabel" title="把段起点往前多补一段音频(秒),修「第一个字被吃掉」。&#10;注意:fsmn 本身已经前导约 150ms,这里是在那之上再加。&#10;调大 → 起音不掉字,但会把说话前的环境声一起送进去(omni 模式下模型直接听这段)。&#10;调小 → 段更干净,但可能掐掉开头的辅音。默认 0.45。">前置
           <input type="text" inputmode="decimal" id="vlVadPreRoll" style="width:5em">
         </label>
         <span class="tip">VAD 切段喂上面二级选的离线引擎。改动<b>临时</b>,「保存」写入 config。</span>
@@ -396,43 +412,63 @@
 <!-- ======================= 🦞 Agent(Hermes 实时对话,原 voice 页) ======================= -->
 <div id="page-agent" class="page">
 
-  <div class="connbar">
-    <label>语音服务 IP
-      <input id="voip" type="text" value="127.0.0.1">
-    </label>
-    <span class="svcbtns" title="语音服务(voice-daemon)手动控制。只影响本次运行,不改开机自启。">
-      <button id="asvcRestart">重启服务</button>
-      <button id="asvcStop">停止服务</button>
-      <button id="asvcStart">启动服务</button>
-      <label class="svcauto" title="开机自启(systemctl --user enable/disable voice-daemon)">
-        <input type="checkbox" id="asvcAuto"> 开机自启
-      </label>
-    </span>
-    <span id="aState" class="pill bad">离线</span>
-    <span class="hint">麦克风 → SenseVoice 识别 → Hermes(DeepSeek)→ 小晓播报（<code>voice-daemon</code>，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。</span>
-  </div>
-
-  <!-- 大脑条:切换云端 preset(下发 Hermes yaml 补丁 → 重启 → 探针 → 落盘) -->
+  <!-- 大脑条 = 本页唯一的「它现在是什么」条:选哪个大脑、配套什么、当前状态、链路怎么走。
+       状态药丸固定在行尾(它变化最频繁,不该被变长的 preset 名推着跑);链路说明单独
+       占第二行(它最长,挤在第一行会把别的元素顶换行)。 -->
   <div id="brainbar">
     <span class="bblab">🧠 大脑</span>
-    <select id="aBrainSel" disabled title="切换大脑云端 preset:下发补丁、重启网关、真实探针过了才落盘"></select>
-    <span id="aBrainCap" class="bbcap" style="display:none" title="该 profile 的 MCP 能力(来自 profile,不随模型变)"></span>
+    <select id="aBrainSel" disabled title="切换大脑:hermes preset 要下发补丁、重启网关、探针过了才落盘;omni 只改 config,秒切"></select>
+    <span id="aBrainCap" class="bbcap" style="display:none" title="该 profile 的 MCP 能力(来自 profile,不随模型变 —— 切模型 ≠ 切权限)"></span>
     <span id="aBrainPair" class="bbpair">搭配 —</span>
     <span id="aBrainStatus" class="bbstat" style="display:none"></span>
     <span id="aBrainDrift" class="pill warn" style="display:none" title="config 期望值与实际加载不一致">⚠ drift</span>
-    <span class="hint">切换大脑云端 preset;能力角标来自 profile 的 MCP(切模型 ≠ 切权限)。</span>
+    <span id="aState" class="pill bad bbstate">离线</span>
+    <!-- 链路随大脑/引擎变，不能写死:hermes 和 omni 是两条不同的链路。由 agent.js
+         按 /config 的实际配置填写,写死的文案迟早会描述一条不存在的链路。 -->
+    <span id="aChain" class="hint bbchain">链路 —（<code>voice-daemon</code>，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。</span>
   </div>
 
   <section class="panel" id="voicePanel">
-    <h2>Hermes 语音对话 <span class="en">Voice chat</span></h2>
-    <div class="watchrow">
-      <button id="aListenBtn" class="primary" disabled>开始对话</button>
-      <button id="aIntBtn" disabled>打断</button>
-      <label class="svcauto" title="按「开始对话」后麦克风常开的时长，期间免按键连续对话；每轮对话自动续期，到期自动关麦。">
-        常开 <input id="aWin" type="number" min="1" max="60" value="30" style="width:52px"> 分钟
-      </label>
-      <button id="voClear" class="minibtn" title="清空下方对话记录（仅本机显示，不影响板端）">清空</button>
-      <span id="aStage" class="tip">待机</span>
+    <!-- 标题行:左标题 + 右侧摄像头小窗。标题不再写死 Hermes —— 大脑可切,
+         omni 时这条链路里根本没有 Hermes。 -->
+    <div class="vchead">
+      <div class="vcleft">
+        <h2>语音对话 <span class="en">Voice chat</span></h2>
+        <div class="watchrow">
+          <button id="aListenBtn" class="primary" disabled>开始对话</button>
+          <button id="aIntBtn" disabled>打断</button>
+          <label class="svcauto" title="按「开始对话」后麦克风常开的时长，期间免按键连续对话；每轮对话自动续期，到期自动关麦。">
+            常开 <input id="aWin" type="number" min="1" max="60" value="30" style="width:52px"> 分钟
+          </label>
+          <button id="voClear" class="minibtn" title="开一段新对话:清空本机记录(记住位置,重开 GUI 也不会回来),同时让大脑忘掉之前的会话历史。板端事件环不删。">新对话</button>
+        </div>
+        <!-- VAD 仪表盘:相位 + 已持续多久 + 上一段/上一句多长。数据来自 /state 高频轮询,
+             不是 feed 事件 —— VAD 每 320ms 就可能翻转,那是当前值不是日志。 -->
+        <div id="vadbar" title="VAD 相位。空闲=没在收音；采集中=正在截一段话；识别中=段已闭合，ASR/大脑在跑">
+          <span id="vadDot" class="vaddot"></span>
+          <span id="vadPhase">空闲</span>
+          <span id="vadElapsed" class="vadnum">0.0s</span>
+          <span class="vadsep">·</span>
+          <span class="vadlab">电平</span><span id="vadLevel" class="vadnum">—</span>
+          <span class="vadsep">·</span>
+          <span class="vadlab" title="模型判定「这声音不是在对我说话」而保持沉默的轮数。没人说话时它还在涨,说明 VAD/回声在误起轮">忽略</span><span id="vadIgnored" class="vadnum">0</span>
+          <span id="aStage" class="tip vadstage">待机</span>
+        </div>
+      </div>
+      <!-- 机器人此刻看到什么。复用本页的语音服务 IP(两个 daemon 同一块板子),
+           不再放第二个 IP 输入框。刷新率低于视觉页——监视窗,不是取景器。 -->
+      <div id="acams">
+        <div class="acam">
+          <img id="acamFront" alt="前置摄像头">
+          <span class="acamlab">前置</span>
+          <span id="acamFrontAge" class="acamage">—</span>
+        </div>
+        <div class="acam">
+          <img id="acamWrist" alt="手腕摄像头">
+          <span class="acamlab">手腕</span>
+          <span id="acamWristAge" class="acamage">—</span>
+        </div>
+      </div>
     </div>
     <div class="askrow">
       <input id="aSay" type="text" placeholder="打字和龙虾对话（回答会播报），或「仅播报」直接出声…">

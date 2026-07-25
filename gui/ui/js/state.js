@@ -33,3 +33,17 @@ for (const f of CONN_FIELDS) {
   const el = $(f);
   if (el) el.addEventListener('change', saveConn);
 }
+
+// Non-input settings that still belong in the one config file (same rule as the
+// connection fields: no localStorage second source of truth). Used for things
+// like "the transcript was cleared at seq N", which must survive a GUI restart
+// or the clear button is a lie — the daemon replays its whole ring on reconnect.
+export function getCfg(key, dflt = null) {
+  return cfg[key] !== undefined ? cfg[key] : dflt;
+}
+
+export function setCfg(key, value) {
+  cfg[key] = value;
+  if (!invoke) return;
+  invoke('save_config', { text: JSON.stringify(cfg, null, 2) + '\n' }).catch(() => {});
+}

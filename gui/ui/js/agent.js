@@ -13,15 +13,23 @@
 //   tool            {tool_name}   — Hermes tool call (e.g. vlm_look)
 //   tts             {sentence, backend}
 //   error           {message}
-import { $, S, invoke } from './state.js';
+import { $, S, invoke, getCfg, setCfg } from './state.js';
 
+// /state is a cheap projection of health, so the VAD gauge can poll far faster
+// than the 1 s health loop without adding real load. Below ~400 ms the gauge
+// stops tracking VAD (which flips on 320 ms audio chunks) and starts to stutter.
+const VAD_MS    = 300;
 const HEALTH_MS = 1000;
 const PROBE_MS  = 2500;
 const FEED_MS   = 400;
 
 let active = false, online = false;
-let healthTimer = null, feedTimer = null;
+let healthTimer = null, feedTimer = null, vadTimer = null;
 let lastSeq = 0;
+// Everything at or below this seq was cleared and must never be re-rendered.
+// Persisted: the daemon keeps a 200-event ring and replays it from 0 on every
+// reconnect, so a clear that only emptied the DOM came straight back on restart.
+let clearedSeq = +getCfg('agentClearedSeq', 0) || 0;
 let vstate = 'idle';        // daemon state machine mirror
 let deadline = 0;           // 常开窗口 server-side deadline (epoch s), 0 = none
 let curAnswer = null;       // the assistant bubble currently receiving deltas
@@ -72,10 +80,21 @@ function handleEvent(ev) {
       paintState();
       if (vstate === 'idle') curAnswer = null;
       break;
-    case 'user_text':
+    case 'user_text': {
       curAnswer = null;                       // next deltas start a new bubble
-      addRow('🗣 ' + ev.text, 'ask');
+      // Show the VAD segment's length/level next to the transcript: a 0.4s blip
+      // that decoded into a plausible sentence is almost certainly room noise,
+      // and you cannot tell that from the words alone. Typed input has no segment.
+      const row = addRow('🗣 ' + ev.text, 'ask');
+      const slot = row && row.querySelector('.capmeta');   // where time/brain live
+      if (slot && ev.secs !== undefined) {
+        const s = document.createElement('span');
+        s.textContent = ` ${ev.secs.toFixed(1)}s`
+          + (ev.peak_dbfs !== undefined ? ` ${ev.peak_dbfs}dB` : '');
+        slot.appendChild(s);
+      }
       break;
+    }
     case 'assistant_delta':
       if (!curAnswer) curAnswer = addRow('', 'answer', ev.brain);
       if (curAnswer) curAnswer.textContent += ev.delta || '';
@@ -84,9 +103,24 @@ function handleEvent(ev) {
       addRow('🔧 调用 ' + (ev.tool_name || '?') + ' …', 'ask');
       break;
     case 'tts':
+      // Spoken length lands on the bubble it belongs to. It is only known once
+      // the turn finished, so it is stamped onto the row after the fact rather
+      // than shown as a floating "last utterance" number in the gauge.
+      if (ev.secs && curAnswer && curAnswer.parentElement) {
+        const m = curAnswer.parentElement.querySelector('.capmeta');
+        if (m && !m.dataset.secs) {
+          m.dataset.secs = '1';
+          const s2 = document.createElement('span');
+          s2.textContent = ` ${ev.secs.toFixed(1)}s`;
+          m.appendChild(s2);
+        }
+      }
+      // omni speaks with the model's own voice — no TTS engine is involved, so
+      // the "云端 TTS 降级" note would be plainly false there.
       if (ev.backend && ev.backend !== 'edge') {
         const st = $('aStage');
-        if (st) st.textContent = '本地音色播报(云端 TTS 降级)';
+        if (st) st.textContent = ev.backend === 'omni'
+          ? '模型原生语音' : '本地音色播报(云端 TTS 降级)';
       }
       break;
     case 'error':
@@ -226,13 +260,29 @@ function renderBrain(cfg) {
       : '';
     capEl.style.display = has ? '' : 'none';
   }
+  // A preset carries its own kind; absent means hermes (every preset that
+  // predates the omni brain is one). omni has no TTS at all, so showing it a
+  // "搭配 TTS x" line would describe an engine that never runs.
+  const cur = presets[brain.preset];
+  const kind = (cur && cur.kind) || 'hermes';
   const pairEl = $('aBrainPair');
   if (pairEl) {
-    const cur = presets[brain.preset];
     const pair = cur && cur.pair;
-    pairEl.textContent = pair
-      ? `搭配 ASR ${pair.asr || '—'} · TTS ${ttsDesc(pair.tts)}`
-      : '搭配 —';
+    const asr = (pair && pair.asr) || '—';
+    pairEl.textContent = kind === 'omni'
+      ? `搭配 ASR ${asr}(仅转写) · 原生语音`
+      : (pair ? `搭配 ASR ${asr} · TTS ${ttsDesc(pair.tts)}` : '搭配 —');
+  }
+  const chain = $('aChain');
+  if (chain) {
+    const pair = cur && cur.pair;
+    const asr = (pair && pair.asr) || '—';
+    chain.textContent = kind === 'omni'
+      ? `麦克风 → ${asr} 识别(仅显示文字) → omni 大脑(局域网，听原始音频) → 模型原生语音`
+        + `（voice-daemon，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。`
+      : `麦克风 → ${asr} 识别 → Hermes(${(cur && cur.model) || brain.preset || '—'})`
+        + ` → ${ttsDesc(pair && pair.tts)} 播报`
+        + `（voice-daemon，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。`;
   }
   const drift = $('aBrainDrift');
   if (drift) {
@@ -265,13 +315,112 @@ async function pollHealth() {
   }
 }
 
+// VAD gauge. `vad_since` is the epoch of the last phase flip, so "how long has it
+// been like this" is computed here rather than counted client-side — a client-side
+// counter drifts across daemon restarts and page reloads.
+let vadSt = null;
+
+function paintVad() {
+  const bar = $('vadbar');
+  if (!bar) return;
+  if (!online || !vadSt) {
+    bar.className = 'off';
+    $('vadPhase').textContent = '离线';
+    $('vadElapsed').textContent = '—';
+    return;
+  }
+  // Phase order matters: once a segment closes, the turn owns the time, not VAD.
+  // ASR is split out from the brain because "thinking" alone cannot tell you
+  // which of the two a slow turn is actually stuck in.
+  let phase, cls;
+  if (vstate === 'thinking')      { phase = vadSt.asr_busy ? 'ASR 识别中' : '大脑思考中';
+                                    cls = 'busy'; }
+  else if (vstate === 'speaking') { phase = '播报中';      cls = 'busy'; }
+  else if (vstate === 'idle')     { phase = '待机(闭麦)';  cls = 'off'; }
+  else if (vadSt.vad_active)      { phase = '采集中';      cls = 'cap'; }
+  else                            { phase = '空闲';        cls = 'off'; }
+  bar.className = cls;
+  $('vadPhase').textContent = phase;
+
+  // Elapsed is only meaningful for the VAD phases; a turn's clock is its own.
+  const since = +vadSt.vad_since || 0;
+  const held = since ? (Date.now() / 1000 - since) : 0;
+  $('vadElapsed').textContent = (cls === 'busy' || !since)
+    ? '—' : held.toFixed(1) + 's';
+
+  const dbfs = vadSt.mic_dbfs;
+  $('vadLevel').textContent = (dbfs === undefined || dbfs === null)
+    ? '—' : dbfs.toFixed(0) + 'dB';
+  // Segment and reply lengths are stamped on the transcript rows they belong to,
+  // not shown here: a floating "most recent" number leaves you matching it back
+  // to a line by hand. The gauge keeps only what has no row of its own.
+  //
+  // Ignored turns are the noise counter: if this climbs while nobody is
+  // talking to the robot, VAD/echo is firing turns that should never have started.
+  const ig = $('vadIgnored');
+  if (ig) ig.textContent = vadSt.ignored ? String(vadSt.ignored) : '0';
+}
+
+async function pollVad() {
+  if (!active || !online || !invoke) { paintVad(); return; }
+  try {
+    vadSt = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/state' }));
+    vstate = vadSt.state || vstate;      // fresher than the 1 s health loop
+  } catch { /* transient; health loop owns online/offline */ }
+  paintVad();
+}
+
+// Camera thumbnails. Auxiliary to the conversation, so they refresh far slower
+// than the Vision tab's viewfinder — the question here is only "what is it
+// looking at", not "is the framing right".
+const CAM_MS = 1200;
+let camPumping = false;
+
+async function camPump() {
+  if (camPumping) return;
+  camPumping = true;
+  try {
+    while (active && online && invoke) {
+      for (const [cam, imgId, ageId] of [['front', 'acamFront', 'acamFrontAge'],
+                                         ['wrist', 'acamWrist', 'acamWristAge']]) {
+        if (!active || !online) break;
+        const img = $(imgId), age = $(ageId);
+        try {
+          const r = JSON.parse(await invoke('vlm_frame',
+                                            { ip: curIp(), camera: cam }));
+          if (img && r.b64) { img.src = 'data:image/jpeg;base64,' + r.b64;
+                              img.classList.add('live'); }
+          if (age) { age.textContent = 'live'; age.classList.remove('stale'); }
+        } catch {
+          // One camera failing must not kill the pump or blank the other one;
+          // mark it stale and keep the last good frame on screen.
+          if (age) { age.textContent = '离线'; age.classList.add('stale'); }
+          if (img) img.classList.remove('live');
+        }
+      }
+      await new Promise(r => setTimeout(r, CAM_MS));
+    }
+  } finally {
+    camPumping = false;
+  }
+}
+
 async function pollFeed() {
   if (!active || !online || !invoke) return;
   try {
     const r = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/feed?since=' + lastSeq }));
     // Daemon restart resets seq; detect and re-pull from scratch.
-    if (r.last_seq < lastSeq) { lastSeq = 0; return; }
-    for (const ev of r.events || []) handleEvent(ev);
+    if (r.last_seq < lastSeq) {
+      // Daemon restarted: seq numbering restarts too, so the old watermark now
+      // points at unrelated events. Dropping it is the only safe reading.
+      lastSeq = 0;
+      if (clearedSeq) { clearedSeq = 0; setCfg('agentClearedSeq', 0); }
+      return;
+    }
+    for (const ev of r.events || []) {
+      if (ev.seq !== undefined && ev.seq <= clearedSeq) continue;   // cleared
+      handleEvent(ev);
+    }
     lastSeq = r.last_seq;
   } catch { /* transient; health loop owns online/offline */ }
 }
@@ -282,6 +431,8 @@ function goOnline() {
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(pollHealth, HEALTH_MS);
   if (!feedTimer) feedTimer = setInterval(pollFeed, FEED_MS);
+  if (!vadTimer) vadTimer = setInterval(pollVad, VAD_MS);
+  camPump();                 // self-terminating loop; guarded against double-start
   refreshSvcAuto();
   refreshBrain();
   paintState();
@@ -292,6 +443,8 @@ function goOffline() {
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(pollHealth, PROBE_MS);
   if (feedTimer) { clearInterval(feedTimer); feedTimer = null; }
+  if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+  vadSt = null; paintVad();
   paintState();
 }
 
@@ -311,8 +464,8 @@ function startActive() {
 function stopActive() {
   if (!active) return;
   active = false;
-  for (const t of [healthTimer, feedTimer]) if (t) clearInterval(t);
-  healthTimer = feedTimer = null;
+  for (const t of [healthTimer, feedTimer, vadTimer]) if (t) clearInterval(t);
+  healthTimer = feedTimer = vadTimer = null;
   online = false;
   paintState();
 }
@@ -393,57 +546,34 @@ $('aBrainSel') && ($('aBrainSel').onchange = async e => {
   }
 });
 
-// Service control buttons + boot-autostart checkbox (mirrors vision.js).
-for (const [id, action, label] of [
-  ['asvcRestart', 'restart', '重启'],
-  ['asvcStop', 'stop', '停止'],
-  ['asvcStart', 'start', '启动'],
-]) {
-  const btn = $(id);
-  if (!btn) continue;
-  btn.onclick = async () => {
-    if (!invoke) return;
-    btn.disabled = true;
-    addRow(`${label}语音服务…`, 'ask');
-    try {
-      await invoke('voice_service', { ip: curIp(), action });
-      addRow(`服务${label}完成`, 'ask');
-    } catch (e) {
-      addRow(`服务${label}失败: ${e}`, 'error');
-    } finally {
-      btn.disabled = false;
-    }
-  };
-}
-
-async function refreshSvcAuto() {
-  const cb = $('asvcAuto');
-  if (!cb || !invoke) return;
-  try {
-    const out = await invoke('voice_service', { ip: curIp(), action: 'is-enabled' });
-    cb.checked = out.split('\n').some(l => l.trim() === 'enabled');
-    cb.disabled = false;
-  } catch { cb.disabled = true; }
-}
-$('asvcAuto') && ($('asvcAuto').onchange = async e => {
-  const cb = e.target;
-  cb.disabled = true;
-  try {
-    await invoke('voice_service', { ip: curIp(), action: cb.checked ? 'enable' : 'disable' });
-    addRow(`开机自启已${cb.checked ? '开启' : '关闭'}`, 'ask');
-  } catch (err) {
-    addRow(`开机自启设置失败: ${err}`, 'error');
-    cb.checked = !cb.checked;
-  } finally {
-    cb.disabled = false;
-  }
-});
+// Service control + autostart now live on the Voice page (they are operations,
+// not conversation), so their handlers moved to voicelab.js — a button whose
+// feedback lands in a feed on another page is worse than no feedback.
+// refreshSvcAuto stays a no-op hook here so goOnline() keeps its shape.
+function refreshSvcAuto() {}
 
 // 清空: local display only — the daemon's own feed/history is untouched, and
 // lastSeq stays put so we don't re-fetch what was just cleared. curAnswer must
 // be dropped too: it points at a row that is about to leave the DOM, and a
 // streaming answer would otherwise append into a detached element forever.
-$('voClear').onclick = () => {
+// 新对话: this is a /new, not a cosmetic wipe. Clearing only the local
+// transcript leaves the robot still remembering everything you just said, so the
+// "fresh start" would be a fresh start for the human alone. Single-user by
+// design, so there is no other session to protect.
+$('voClear').onclick = async () => {
   $('vofeed').innerHTML = '';
   curAnswer = null;
+  // Remember where we cleared, or the next reconnect replays it all back.
+  clearedSeq = lastSeq;
+  setCfg('agentClearedSeq', clearedSeq);
+  if (!invoke) return;
+  try {
+    const r = JSON.parse(await invoke('voice_post',
+      { ip: curIp(), path: '/reset', body: '{}' }));
+    addRow(r.reset ? `🆕 新对话（大脑已忘记之前 ${r.dropped_exchanges ?? 0} 轮）`
+                   : `🆕 本机记录已清空，但大脑未重置：${r.detail || '未知原因'}`,
+           'sys');
+  } catch (e) {
+    addRow('🆕 本机记录已清空，但大脑重置失败: ' + e, 'error');
+  }
 };
