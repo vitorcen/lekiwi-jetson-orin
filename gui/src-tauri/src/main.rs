@@ -55,57 +55,74 @@ fn base_json(x: f64, y: f64, theta: f64) -> String {
     format!("{{\"src\": \"gui\", \"x.vel\": {x}, \"y.vel\": {y}, \"theta.vel\": {theta}}}")
 }
 
+/// Send one frame with a 200 ms ceiling so a stalled PUSH can't wedge the
+/// worker. A timeout/error means the peer is gone (base_host restarted): drop
+/// the socket so the self-heal probe rebuilds it. The pure-Rust `zeromq` PUSH
+/// does NOT reconnect on its own — without this a board reboot silently wedges
+/// every command (base drive AND arm follow) while the UI still shows 已连接.
+async fn push_or_drop(sock: &mut Option<PushSocket>, payload: String) {
+    if let Some(s) = sock.as_mut() {
+        let ok = matches!(
+            tokio::time::timeout(Duration::from_millis(200), s.send(ZmqMessage::from(payload)))
+                .await,
+            Ok(Ok(())),
+        );
+        if !ok {
+            *sock = None;
+        }
+    }
+}
+
 /// The worker: one owned tokio runtime on its own thread, holding the socket.
+/// `ep` is the DESIRED endpoint (set on Connect, cleared on Disconnect); while
+/// it is set but the socket is down, a 2 s probe reconnects — same self-heal the
+/// log bus uses, so a board reboot recovers the command channel automatically.
 fn spawn_worker() -> mpsc::UnboundedSender<Req> {
     let (tx, mut rx) = mpsc::unbounded_channel::<Req>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("zmq worker runtime");
         rt.block_on(async move {
             let mut sock: Option<PushSocket> = None;
-            while let Some(req) = rx.recv().await {
-                match req {
-                    Req::Connect(ep, reply) => {
-                        let mut s = PushSocket::new();
-                        let result = match s.connect(&ep).await {
-                            Ok(_) => {
-                                sock = Some(s);
-                                Ok(ep)
+            let mut ep: Option<String> = None;
+            loop {
+                tokio::select! {
+                    req = rx.recv() => match req {
+                        None => break,   // app shutting down
+                        Some(Req::Connect(e, reply)) => {
+                            ep = Some(e.clone());
+                            let mut s = PushSocket::new();
+                            let result = match s.connect(&e).await {
+                                Ok(_) => { sock = Some(s); Ok(e) }
+                                Err(err) => { sock = None; Err(format!("connect failed: {err}")) }
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Some(Req::Send(x, y, theta)) => {
+                            push_or_drop(&mut sock, base_json(x, y, theta)).await;
+                        }
+                        Some(Req::SendJson(json)) => {
+                            push_or_drop(&mut sock, json).await;
+                        }
+                        Some(Req::Disconnect(reply)) => {
+                            if sock.is_some() {
+                                push_or_drop(&mut sock, base_json(0.0, 0.0, 0.0)).await;
                             }
-                            Err(e) => Err(format!("connect failed: {e}")),
-                        };
-                        let _ = reply.send(result);
-                    }
-                    Req::Send(x, y, theta) => {
-                        if let Some(s) = sock.as_mut() {
-                            let msg = ZmqMessage::from(base_json(x, y, theta));
-                            // Bounded so a stalled PUSH can't wedge the worker.
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(200),
-                                s.send(msg),
-                            )
-                            .await;
+                            ep = None;      // intentional: stop the self-heal probe
+                            sock = None;
+                            let _ = reply.send(());
                         }
-                    }
-                    Req::SendJson(json) => {
-                        if let Some(s) = sock.as_mut() {
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(200),
-                                s.send(ZmqMessage::from(json)),
-                            )
-                            .await;
+                    },
+                    // Self-heal: reconnect every 2 s while an endpoint is wanted but
+                    // the socket is down (peer restarted / initial connect raced).
+                    _ = tokio::time::sleep(Duration::from_secs(2)),
+                        if sock.is_none() && ep.is_some() =>
+                    {
+                        if let Some(e) = &ep {
+                            let mut s = PushSocket::new();
+                            if s.connect(e).await.is_ok() {
+                                sock = Some(s);
+                            }
                         }
-                    }
-                    Req::Disconnect(reply) => {
-                        if let Some(s) = sock.as_mut() {
-                            let zero = ZmqMessage::from(base_json(0.0, 0.0, 0.0));
-                            let _ = tokio::time::timeout(
-                                Duration::from_millis(200),
-                                s.send(zero),
-                            )
-                            .await;
-                        }
-                        sock = None;
-                        let _ = reply.send(());
                     }
                 }
             }

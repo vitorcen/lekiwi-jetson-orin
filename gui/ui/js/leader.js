@@ -20,10 +20,15 @@ function setState(text, cls) {
   el.className = 'pill ' + cls;
 }
 
+// A native `disabled` button swallows the click whole — no handler, no error,
+// no log line. That turned "跟随点了没反应" into an unfalsifiable bug: the UI
+// looked ready while the click went nowhere. Keep the buttons clickable and
+// let the handler say WHY it refused; the backend re-checks anyway
+// (leader_follow only arms when a zero pose exists).
 function refresh() {
   $('lconn').textContent = connected ? '断开主臂' : '连接主臂';
-  $('lalign').disabled = !connected;
-  $('lfollow').disabled = !connected || !aligned;
+  $('lalign').setAttribute('aria-disabled', String(!connected));
+  $('lfollow').setAttribute('aria-disabled', String(!connected || !aligned));
   $('lfollow').textContent = following ? '停止跟随' : '开始跟随';
   $('lfollow').classList.toggle('live', following);
   if (!connected) setState('未连接', 'bad');
@@ -64,6 +69,7 @@ $('lmid').onclick = () => {
 
 $('lalign').onclick = async () => {
   if (!invoke) return;
+  if (!connected) { logLine('主臂', '无法对齐：主臂未连接'); return; }
   try {
     await invoke('leader_align');
     aligned = true;
@@ -77,8 +83,17 @@ $('lalign').onclick = async () => {
 
 $('lfollow').onclick = async () => {
   if (!invoke) return;
-  following = !following;
-  await invoke('leader_follow', { on: following }).catch(() => {});
+  if (!connected) { logLine('主臂', '无法跟随：主臂未连接'); return; }
+  if (!aligned) { logLine('主臂', '无法跟随：未对齐零位（先摆中位再点「对齐零位」）'); return; }
+  const on = !following;
+  try {
+    await invoke('leader_follow', { on });
+  } catch (e) {
+    setState('跟随命令失败: ' + e, 'bad');
+    logLine('主臂', '跟随命令失败: ' + e);
+    return;                            // state stays as the backend last reported
+  }
+  following = on;
   // Stopping follow parks the follower: fold to rest, cut torque.
   if (!following) invoke('zmq_arm_relax').catch(() => {});
   logLine('主臂', following ? '开始跟随' : '停止跟随 → 收臂松弛');
