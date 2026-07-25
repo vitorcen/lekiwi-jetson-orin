@@ -33,5 +33,5 @@
 - [GUI 按钮别用原生 disabled](gui-disabled-swallows-clicks.md) — disabled 吞掉点击致故障不可证伪;附 ZMQ PUSH 不自愈坑与 lsof 诊断法;动 GUI 按钮/ZMQ 前必读
 - [Omni 大脑两阶段设计](omni-brain-two-stage.md) — 局域网 Qwen3-Omni;thinker决策/talker发声拆分省3.9s;流式chunk=50是必需项;附P0/P1实测与P3硬前置
 - [MLX stream 是线程局部的](mlx-thread-local-stream.md) — 主线程加载+worker推理会炸且只炸talker;附并发/取消用例假阳性陷阱
-- [VAD/ASR 自调参实验(待做)](vad-asr-autotune-plan.md) — Mac跑Matcha发声+车子ASR多轮扫参;fsmn忽略阈值/尾静音;空闲时VAD误判47%是根因;含三条测量陷阱
-- [测量必须断言前提](measurement-validity.md) — 一天撞三次「测了个空气还报通过」;崩溃期假阳性/静音输入/被测代码没跑;写测试和调参前必读
+- [VAD/ASR 调参结论](vad-asr-tuning-results.md) — silero(thr0.30)完胜fsmn已落盘;增益必须0;语料必须多音色可复现否则阈值调偏;MCP01降噪门吃掉词首「停」
+- [测量必须断言前提](measurement-validity.md) — 一天撞出十二种「测了个空气还报通过」;宽带正常但关键频段已死/对齐锚点被顶掉/口径把失败算成成功;写测试和调参前必读

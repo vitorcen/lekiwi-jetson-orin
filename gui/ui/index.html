@@ -333,7 +333,7 @@
         <label class="ivlabel" title="二级:随模式变——VAD 时选离线引擎(qwen3等),流式时选流式模型(zh-2025等)">模型
           <select id="vlModelSel"></select>
         </label>
-        <label class="ivlabel" title="数字增益 dB(0=不变):MCP01 采集偏低时补足,两种模式都生效">增益
+        <label class="ivlabel" title="数字增益 dB —— 实测保持 0。MCP01 自带 AGC,语音峰值已顶到约 -9 dBFS,再乘只会削顶:+15dB 削掉 14.8% 的语音采样,近场召回 14/14→12/14。silero/ten 是神经网络 VAD 不看电平,只有 energy(能量门)才依赖它">增益
           <input type="number" id="vlAudioGain" min="0" max="30" step="1" style="width:4.5em">
         </label>
         <span class="tip">转写<b>不进大脑、不触发播报</b>;开启会终止对话。改动<b>临时</b>,「保存」才落盘。</span>

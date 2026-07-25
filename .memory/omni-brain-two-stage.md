@@ -57,7 +57,7 @@ metadata:
 `status: "ignored"`——不进 talker、无音频、不进历史、不进对话记录，板上只累加计数。
 两阶段拆分让这条路几乎免费（只跑 thinker，~600ms）。
 **注意**：机制已验证可用，但模型的判断力是变量，合成语音上只挡住了一部分，
-真实噪音效果需现场实测。根因仍是 VAD 误起轮，见 [[vad-asr-autotune-plan]]。
+真实噪音效果需现场实测。根因仍是 VAD 误起轮，见 [[vad-asr-tuning-results]]。
 
 ## 「新对话」= 真的重置
 

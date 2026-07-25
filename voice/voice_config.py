@@ -34,8 +34,12 @@ DEFAULT_CONFIG = {
     "vision": {"model": None},          # desired VLM model id; null = use board env as-is
     # Audio front-end (global, not part of a preset pair). vad = the switchable segmenter;
     # audio.gain_db = digital make-up gain (0 = identity, stock behaviour unchanged).
-    "vad": {"engine": "fsmn", "threshold": 0.5,
-            "min_speech_s": 0.1, "min_silence_s": 0.5, "pre_roll_s": 0.9},
+    # The 2026-07-25 sweep optimum. The old default (fsmn / 0.5 / 0.1 / 0.5 / 0.9
+    # with audio gain +15) misfired on 20.6% of idle frames and clipped 14.8% of
+    # speech; a hand-edited config that falls back to defaults should not land on
+    # the worst engine in the box.
+    "vad": {"engine": "silero", "threshold": 0.3,
+            "min_speech_s": 0.1, "min_silence_s": 0.4, "pre_roll_s": 0.6},
     "audio": {"gain_db": 0},
     # DEBUG-only streaming recognition mode (免VAD, 对比验证). enabled 时调试转写台走
     # 流式 OnlineRecognizer 连续解码+端点检测,不影响对话链路(对话恒走 VAD+离线)。
@@ -47,7 +51,12 @@ DEFAULT_CONFIG = {
             "transport": "openai_chat",
             "key_env": "DEEPSEEK_API_KEY",
             "pair": {
-                "asr": "sensevoice",
+                # funasr, not sensevoice: every deployed preset already carries
+                # funasr and sensevoice measures 12/14 near-field. This seeds a
+                # fresh install only. Whether to move to qwen3 (most accurate,
+                # 1.20s/seg) or paraformer (same exact count, 0.09s/seg) is a
+                # latency call per brain — see docs/vad-asr-tuning.html §5.
+                "asr": "funasr",
                 # matcha default (2026-07-22): realtime offline (RTF 0.18), no
                 # per-sentence network stalls; edge stays selectable, melo is fallback.
                 "tts": {"engine": "matcha"},
@@ -62,11 +71,21 @@ DEFAULT_CONFIG = {
 # funasr listed first (field-tested best: GPU ~0.65s/seg, punctuation, LLM decoder);
 # funasr/whisper/qwen3 are heavy — run them with the vision service stopped.
 # Order here = GUI dropdown order.
-ASR_ENGINES = ["funasr", "qwen3", "sensevoice", "paraformer", "whisper"]
+# Ranked by the 2026-07-25 comparison (five engines, one fixed recording, oracle
+# cuts so the VAD is not a variable: docs/vad-asr-tuning.html). Near-field they
+# tie at 14/14; the ranking is decided at distance, where qwen3 takes 13/14 at
+# CER 0.036 and is the only one that hears 「停」. paraformer matches its exact
+# count 13x faster but loses that same 「停」. funasr, previously listed first, is
+# slower than paraformer AND less accurate than qwen3. whisper is not a choice.
+ASR_ENGINES = ["qwen3", "paraformer", "funasr", "sensevoice", "whisper"]
 # matcha first/default (realtime offline); edge online quality; melo resident fallback
 TTS_ENGINES = ["matcha", "edge", "melo"]
-# fsmn first/default (field-tested best: built-in endpointing, ~150ms lead-in)
-VAD_ENGINES = ["fsmn", "silero", "ten", "webrtc", "energy"]
+# Ranked by the 2026-07-25 sweep (480 configs, three engines, one fixed recording:
+# see docs/vad-asr-tuning.html). silero 13/14 near + 14/14 far at 4.8% idle
+# misfire; ten 13/14 + 13/14 at 7.5%; fsmn 10/14 + 10/14 at 9.8% and — structural,
+# not a tuning miss — unable to split two commands 0.8s apart in any of its 48
+# configs. webrtc/energy are the dependency-free debug baselines, never a choice.
+VAD_ENGINES = ["silero", "ten", "fsmn", "webrtc", "energy"]
 # Streaming models (二级下拉 when 一级=流式). x-asr first/default: field-tested slightly
 # ahead of zh-xlarge (2026-07-21), bilingual, and 2x faster (RTF 0.25 vs 0.56).
 STREAM_MODELS = ["x-asr-zh-en", "zh-xlarge", "para-zh-en", "zh-2025", "multi-zh", "zh-en"]
@@ -82,25 +101,32 @@ STREAM_SILENCE_RANGE = (0.2, 5.0)                  # streaming endpoint trailing
 # models). params_b = published parameter count in billions (null when no reliable
 # public figure — never guessed); disk_mb = measured on the board (du -sm of the
 # model dir under voice/models/), hard data.
+# label carries the two numbers that decide the pick: remote-field accuracy and
+# seconds per segment (both board-measured 2026-07-25 on the same 14 utterances).
 ASR_META = {
-    "sensevoice": {"id": "sensevoice", "label": "SenseVoice-Small",
-                   "params_b": 0.234, "disk_mb": 229},
-    "paraformer": {"id": "paraformer", "label": "Paraformer-large zh",
-                   "params_b": 0.22, "disk_mb": 232},
-    "whisper": {"id": "whisper", "label": "Whisper large-v3-turbo",
-                "params_b": 0.809, "disk_mb": 989},
-    "qwen3": {"id": "qwen3", "label": "Qwen3-ASR-0.6B (LLM抗噪)",
+    "qwen3": {"id": "qwen3", "label": "Qwen3-ASR-0.6B (最准,远场13/14,1.20s/段)",
               "params_b": 0.6, "disk_mb": 954},
-    "funasr": {"id": "funasr", "label": "Fun-ASR-Nano 0.8B (GPU,带标点)",
+    "paraformer": {"id": "paraformer", "label": "Paraformer-large zh (最快,13/14,0.09s/段)",
+                   "params_b": 0.22, "disk_mb": 232},
+    "funasr": {"id": "funasr", "label": "Fun-ASR-Nano 0.8B (GPU带标点,远场11/14,0.56s/段)",
                "params_b": 0.8, "disk_mb": 932},
+    "sensevoice": {"id": "sensevoice", "label": "SenseVoice-Small (近场12/14,0.11s/段)",
+                   "params_b": 0.234, "disk_mb": 229},
+    "whisper": {"id": "whisper", "label": "Whisper large-v3-turbo (6/14,淘汰)",
+                "params_b": 0.809, "disk_mb": 989},
 }
+# Order stays offline-first: matcha leads because it is the only local engine that
+# runs realtime, not because it sounds best. It does not — fed back through
+# Fun-ASR, matcha reads at 13/14 CER 0.143 while edge-tts reads at 83/84 CER 0.012
+# across six voices, and matcha re-renders each call (the same 「停」 came out
+# 0.29 / 0.39 / 0.41 s), which also disqualifies it as a test signal.
 TTS_META = {
-    "edge": {"id": "edge", "label": "edge-tts 在线",
-             "params_b": None, "disk_mb": None},
     # board-measured RTF 0.18 @2t (melo is 1.60 — not realtime); model 93MB + vocos 52MB
-    "matcha": {"id": "matcha", "label": "Matcha zh-en 离线(实时)",
+    "matcha": {"id": "matcha", "label": "Matcha zh-en 离线(唯一实时,吐字偏糊)",
                "params_b": None, "disk_mb": 145},
-    "melo": {"id": "melo", "label": "MeloTTS zh-en",
+    "edge": {"id": "edge", "label": "edge-tts 在线(最清晰,需联网)",
+             "params_b": None, "disk_mb": None},
+    "melo": {"id": "melo", "label": "MeloTTS zh-en (RTF 1.60,不实时)",
              "params_b": None, "disk_mb": 183},
 }
 # VAD engine display table for GET /config enums (disk_mb measured on the board;
@@ -108,16 +134,16 @@ TTS_META = {
 # threshold box to a sane value per engine (energy is a dBFS floor, not 0..1).
 # `available` is filled in by the daemon (needs the board's sherpa build / webrtcvad).
 VAD_META = {
-    "silero": {"id": "silero", "label": "Silero VAD", "disk_mb": 2,
-               "default_threshold": 0.5},
-    # FSMN 自带内部状态机:threshold/min_silence 不外调,min_speech/pre_roll 有效
-    "fsmn": {"id": "fsmn", "label": "FSMN-VAD (FunASR,自带端点)", "disk_mb": 2,
-             "default_threshold": 0.5},
-    "ten": {"id": "ten", "label": "TEN VAD", "disk_mb": 1,
+    "silero": {"id": "silero", "label": "Silero VAD (实测最优)", "disk_mb": 2,
+               "default_threshold": 0.3},
+    "ten": {"id": "ten", "label": "TEN VAD (次优,低阈值易黏段)", "disk_mb": 1,
             "default_threshold": 0.5},
-    "webrtc": {"id": "webrtc", "label": "WebRTC VAD", "disk_mb": 0,
+    # FSMN 自带内部状态机:threshold/min_silence 不外调,min_speech/pre_roll 有效
+    "fsmn": {"id": "fsmn", "label": "FSMN-VAD (FunASR,切不开连续短指令)",
+             "disk_mb": 2, "default_threshold": 0.5},
+    "webrtc": {"id": "webrtc", "label": "WebRTC VAD (调试基线)", "disk_mb": 0,
                "default_threshold": 0.6},
-    "energy": {"id": "energy", "label": "能量门 dBFS", "disk_mb": 0,
+    "energy": {"id": "energy", "label": "能量门 dBFS (调试基线)", "disk_mb": 0,
                "default_threshold": -45},
 }
 

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VAD/ASR 离线调参：silero 换掉 fsmn · 增益必须为 0 · 十二种测量陷阱</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1a1a18; --muted:#6b6b66; --line:#e2e2dd;
+    --card:#fff; --accent:#76b900; --accent-dk:#5c9000;
+    --warn-bg:#fff8e6; --warn-line:#e3b341; --warn-fg:#6b4e00;
+    --err-bg:#fdf0ef; --err-line:#d9534f; --err-fg:#8a2b28;
+    --ok-bg:#f0f7e6; --ok-line:#76b900; --ok-fg:#3d6100;
+    --code-bg:#f4f4f1; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#161714; --fg:#e8e8e3; --muted:#9a9a92; --line:#31332c;
+      --card:#1d1f1b; --accent:#8ed100; --accent-dk:#76b900;
+      --warn-bg:#2b2410; --warn-line:#8a6d1f; --warn-fg:#e6c96b;
+      --err-bg:#2c1817; --err-line:#a34440; --err-fg:#f0a7a4;
+      --ok-bg:#1c2913; --ok-line:#5c9000; --ok-fg:#a8dd5c;
+      --code-bg:#24261f;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:48px 24px 96px}
+  header{border-bottom:3px solid var(--accent);padding-bottom:24px;margin-bottom:36px}
+  h1{margin:0 0 8px;font-size:31px;line-height:1.3;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0;font-size:14.5px}
+  h2{margin:52px 0 16px;font-size:22px;letter-spacing:-.01em;padding-left:12px;border-left:4px solid var(--accent)}
+  h3{margin:32px 0 10px;font-size:17px}
+  p{margin:12px 0}
+  code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);padding:2px 6px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0}
+  .tldr{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:20px 24px;margin:28px 0}
+  .tldr h2{margin:0 0 12px;border:0;padding:0;font-size:17px}
+  .tldr ul{margin:0;padding-left:20px}
+  .tldr li{margin:6px 0}
+  .box{border-radius:8px;padding:14px 18px;margin:20px 0;border:1px solid;border-left-width:4px}
+  .warn{background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-fg)}
+  .err{background:var(--err-bg);border-color:var(--err-line);color:var(--err-fg)}
+  .ok{background:var(--ok-bg);border-color:var(--ok-line);color:var(--ok-fg)}
+  .box strong{display:block;margin-bottom:4px}
+  table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  a{color:var(--accent-dk)}
+  .good{color:var(--ok-fg);font-weight:700}
+  .bad{color:var(--err-fg);font-weight:700}
+  .mid{color:var(--warn-fg);font-weight:700}
+  .win td{background:var(--ok-bg)}
+  .svgbox{background:var(--card);border:1px solid var(--line);border-radius:8px;
+    padding:12px;margin:20px 0;overflow-x:auto}
+  details{margin:12px 0;border:1px solid var(--line);border-radius:8px;padding:10px 16px;
+    background:var(--card)}
+  summary{cursor:pointer;font-weight:600;color:var(--accent-dk)}
+  details[open] summary{margin-bottom:8px}
+  ol li,ul li{margin:6px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+<h1>VAD/ASR 离线调参</h1>
+<p class="sub">Jetson Orin Nano 8GB · voice-daemon (:8092) · 2026-07-25 ·
+全部数据为板上实测 · 工具见 <code>scripts/vad_*.py</code>、<code>scripts/mic_compare.py</code></p>
+</header>
+
+<div class="tldr">
+<h2>TL;DR</h2>
+<ul>
+<li><strong>VAD 换 silero</strong>（<code>thr 0.30 / min_speech 0.10 / min_silence 0.40 / pre_roll 0.60</code>）。
+空房间自言自语 <strong>3.4 次/分 → 1.0 次/分</strong>，near CER <strong>1.296 → 0.049</strong>，far <strong>1.031 → 0.036</strong>。已落盘。</li>
+<li><strong>数字增益必须为 0</strong>。MCP01 自带 AGC 已把语音峰值顶到 -9.3 dBFS，
+原来的 <code>+15 dB</code> 削掉 <strong>14.8%</strong> 的语音采样。它是纯亏损项，不是旋钮。</li>
+<li><strong>fsmn 输在结构上</strong>：48 组参数无一能切开间隔 0.8 秒的两条指令。粘连发生在
+FSMN 内部状态机，而 <code>make_vad</code> 只给它两个旋钮。<strong>ten 的病是黏段</strong>（低阈值下 20 秒吞 9 句）。</li>
+<li><strong>ASR 最优是 qwen3，不是当前的 funasr</strong>；但 paraformer 逐字全对打平且<strong>快 13 倍</strong>。
+funasr 被两边夹住：比 paraformer 慢 6 倍，比 qwen3 差。</li>
+<li><strong>语料不能用 Matcha</strong>——它每次重画（同一个「停」0.29/0.39/0.41 秒），
+自己还念不清。换 edge-tts 六音色后<strong>阈值最优点从 0.70 移到 0.30</strong>。</li>
+<li>本次共撞出 <strong>12 种「测了个空气还报通过」</strong>，每一种都产出过一张漂亮的表。见文末。</li>
+</ul>
+</div>
+
+<h2>1 · 已落盘的配置</h2>
+<pre><code># ~/.config/lekiwi/config.json
+vad:   engine=silero  threshold=0.30  min_speech_s=0.10  min_silence_s=0.40  pre_roll_s=0.60
+audio: gain_db=0.0
+
+# 改动前
+vad:   engine=fsmn    threshold=0.50  min_speech_s=0.10  min_silence_s=0.50  pre_roll_s=0.90
+audio: gain_db=15.0</code></pre>
+<p>同时把 <code>VAD_ENGINES</code> 下拉顺序改成实测排名 <code>silero | ten | fsmn | webrtc | energy</code>，
+并把 <code>DEFAULT_CONFIG["vad"]</code> 从旧的 fsmn 组合换成本次最优——手改坏配置时的兜底不该落在最差引擎上。</p>
+
+<h2>2 · 方法：为什么必须离线扫参</h2>
+<p>在活麦上顺序 A/B 不同参数，比的是<strong>房间</strong>不是参数。这个房间的底噪在两次录音之间能漂 13 dB，
+之前就跑出过「threshold 0.7 比 0.5 更差」这种物理上不可能的结果。
+所以：<strong>录一次，离线重放，480 组配置吃同一批字节。</strong></p>
+
+<div class="svgbox">
+<svg width="940" height="250" xmlns="http://www.w3.org/2000/svg"
+     style="font-family:-apple-system,sans-serif;font-size:12px">
+  <rect x="10" y="20" width="170" height="58" rx="6" fill="#fde" stroke="#a06" stroke-width="2"/>
+  <text x="95" y="42" text-anchor="middle" font-weight="bold">edge-tts 六音色</text>
+  <text x="95" y="60" text-anchor="middle">14 句 / 间距 0.8–10s</text>
+
+  <line x1="180" y1="49" x2="222" y2="49" stroke="#888" stroke-width="1"/>
+  <polygon points="222,49 214,45 214,53" fill="#888"/>
+
+  <rect x="225" y="20" width="170" height="58" rx="6" fill="#fed" stroke="#c50" stroke-width="2"/>
+  <text x="310" y="42" text-anchor="middle" font-weight="bold">Mac 播放 → 板子录</text>
+  <text x="310" y="60" text-anchor="middle">near / far / 5 分钟噪声</text>
+
+  <line x1="395" y1="49" x2="437" y2="49" stroke="#888" stroke-width="1"/>
+  <polygon points="437,49 429,45 429,53" fill="#888"/>
+
+  <rect x="440" y="20" width="180" height="58" rx="6" fill="#def" stroke="#06c" stroke-width="2"/>
+  <text x="530" y="42" text-anchor="middle" font-weight="bold">录音可用性闸门</text>
+  <text x="530" y="60" text-anchor="middle">辅音带 SNR ≥ 4 dB 才放行</text>
+
+  <line x1="620" y1="49" x2="662" y2="49" stroke="#888" stroke-width="1"/>
+  <polygon points="662,49 654,45 654,53" fill="#888"/>
+
+  <rect x="665" y="20" width="180" height="58" rx="6" fill="#eef" stroke="#339" stroke-width="2"/>
+  <text x="755" y="42" text-anchor="middle" font-weight="bold">离线扫 480 组</text>
+  <text x="755" y="60" text-anchor="middle">三引擎 · 同一批字节</text>
+
+  <line x1="755" y1="78" x2="755" y2="126" stroke="#2a8" stroke-width="2"/>
+  <polygon points="755,126 751,118 759,118" fill="#2a8"/>
+
+  <rect x="620" y="128" width="270" height="58" rx="6" fill="#dfe" stroke="#082" stroke-width="2"/>
+  <text x="755" y="150" text-anchor="middle" font-weight="bold">Fun-ASR 验证 + oracle 上限</text>
+  <text x="755" y="168" text-anchor="middle">切分好坏 vs 解码好坏，分开算</text>
+
+  <text x="20" y="150" font-weight="bold" fill="#a22">对照锚点</text>
+  <text x="20" y="170">① 数字语料（完全不过麦克风）= 天花板</text>
+  <text x="20" y="190">② oracle 切分（VAD 完美）= VAD 的账 vs ASR 的账</text>
+  <text x="20" y="210">③ 5 分钟空房间 = 误触发唯一有效的测量面</text>
+  <text x="20" y="230">④ 同信噪比对齐 = 比麦克风而不是比距离</text>
+</svg>
+</div>
+
+<h3>2.1 语料设计</h3>
+<p>14 句、六个 edge-tts 音色轮换，句间距<strong>从 0.8 秒到 10 秒</strong>，其中两句带 0.35 秒<strong>句内换气</strong>。
+这不是凑数：</p>
+<ul>
+<li><strong>长间距</strong>是误触发的测量面。全是 3 秒间距的语料上，一个只在 5 秒静音后才误触发的 VAD 看起来完美。</li>
+<li><strong>0.8/1.2 秒短间距</strong>是两条连续指令，必须切成两轮。</li>
+<li><strong>句内换气</strong>不能被切开，否则半个问题进大脑。</li>
+</ul>
+<p>后两者把 <code>min_silence_s</code> 夹成<strong>双边约束</strong>。第一版语料最短间距 2.5 秒、没有换气，
+那条轴上 0.40 和 0.70 的差别纯属噪声——<strong>测了个寂寞</strong>。</p>
+
+<h2>3 · 结果：三个 VAD 引擎</h2>
+<p>近距离辅音带 SNR +19.4 dB、远距离 +12.9 dB、5 分钟空房间（中位 -56.8 dBFS，含真实瞬态）。</p>
+<table>
+<tr><th>引擎</th><th>最优参数</th><th>near</th><th>far</th><th>空闲误判</th><th>漏 / 并</th></tr>
+<tr class="win"><td><strong>silero</strong></td><td><code>0.30 / 0.10 / 0.40 / 0.60 / gain 0</code></td>
+  <td class="good">13/14</td><td class="good">14/14</td><td class="good">4.8%</td><td>1 / 0</td></tr>
+<tr><td>ten</td><td><code>0.50 / 0.10 / 0.40 / 0.60 / gain +6</code></td>
+  <td>13/14</td><td>13/14</td><td class="mid">7.5%</td><td>2 / 1</td></tr>
+<tr><td>fsmn <em>(原生产)</em></td><td><code>min_speech 0.60 / pre_roll 0.60 / gain 0</code></td>
+  <td class="bad">10/14</td><td class="bad">10/14</td><td class="bad">9.8%</td><td>8 / 6</td></tr>
+</table>
+
+<div class="box err"><strong>fsmn 不是没调好，是调不了</strong>
+48 组参数里<strong>没有一组</strong>能把间隔 0.8–1.2 秒的两条指令切开（漏 8 并 6）。粘连发生在 FSMN
+自己的内部状态机里，而 <code>make_vad()</code> 只把 <code>min_speech_s</code> 和 <code>pre_roll_s</code>
+传进去——<code>threshold</code> 和 <code>min_silence_s</code> 根本没传（本次用实测复核：两组差到离谱的值，
+切出来的段完全相同）。GUI 上那两个输入框在 fsmn 下是装饰品。</div>
+
+<h3>3.1 端到端（Fun-ASR 转写）</h3>
+<table>
+<tr><th>配置</th><th>near 逐字全对</th><th>near CER</th><th>far 逐字全对</th><th>far CER</th><th>空房间起轮</th></tr>
+<tr><td>oracle 切分（VAD 完美）</td><td>14/14</td><td>0.000</td><td>11/14</td><td>0.131</td><td>—</td></tr>
+<tr class="win"><td><strong>silero 0.30</strong></td><td class="good">11/14</td><td class="good">0.049</td>
+  <td class="good">12/14</td><td class="good">0.036</td><td class="good">1.0 次/分</td></tr>
+<tr><td>旧生产 fsmn / gain +15</td><td class="bad">5/14</td><td class="bad">1.296</td>
+  <td class="bad">5/14</td><td class="bad">1.031</td><td class="bad">3.4 次/分</td></tr>
+</table>
+<p>silero 那行<strong>贴着 oracle</strong>——剩下的错全是 ASR 的账，不是 VAD 切坏的。
+far 的 12/14 甚至高于 oracle 的 11/14：VAD 的切分带 0.6 秒前置和尾巴，上下文比 oracle 的 0.2 秒 pad 更多，
+所以 <strong>oracle 不是严格上界</strong>。</p>
+
+<h2>4 · 哪些参数能统一</h2>
+<p>做法是<strong>强制</strong>所有引擎用同一个值，看最差的那个引擎比它自己的最优退化多少。</p>
+<table>
+<tr><th>参数</th><th>最佳共用值</th><th>结论</th><th>各自最优</th></tr>
+<tr><td><code>pre_roll_s</code></td><td>0.6</td><td class="good">统一，零代价</td><td>三引擎<strong>完全一致</strong>，两份语料上都成立</td></tr>
+<tr><td><code>min_silence_s</code></td><td>0.4</td><td class="good">统一</td><td>silero=ten=0.4（fsmn 不适用）</td></tr>
+<tr><td><code>gain_db</code></td><td>0</td><td class="good">统一</td><td>代价只落在 ten 且很小</td></tr>
+<tr><td><code>threshold</code></td><td>0.5</td><td class="mid">退化 1 分</td><td>silero 0.3 / ten 0.5（fsmn 不适用）。<strong>对音色多样性敏感，换环境要重测</strong></td></tr>
+<tr><td><code>min_speech_s</code></td><td>—</td><td class="bad">必须各调</td><td>fsmn 0.6 vs silero/ten 0.1；强行统一退化 10 分</td></tr>
+</table>
+
+<h2>5 · ASR 引擎横评</h2>
+<p>用<strong>真值窗口切分</strong>（VAD 变量固定），同一批录音喂 5 个引擎。</p>
+<table>
+<tr><th>ASR</th><th>near 全对</th><th>near CER</th><th>far 全对</th><th>far CER</th><th>每段解码</th><th>RTF</th></tr>
+<tr class="win"><td><strong>qwen3</strong></td><td class="good">14/14</td><td class="good">0.000</td>
+  <td class="good">13/14</td><td class="good">0.036</td><td class="bad">1.20s</td><td>0.752</td></tr>
+<tr><td><strong>paraformer</strong></td><td class="good">14/14</td><td class="good">0.000</td>
+  <td class="good">13/14</td><td class="mid">0.143</td><td class="good">0.09s</td><td class="good">0.056</td></tr>
+<tr><td>funasr <em>(当前)</em></td><td>14/14</td><td>0.000</td><td class="bad">11/14</td><td>0.131</td><td>0.56s</td><td>0.351</td></tr>
+<tr><td>sensevoice</td><td class="mid">12/14</td><td>0.100</td><td>12/14</td><td class="good">0.035</td><td class="good">0.11s</td><td>0.071</td></tr>
+<tr><td>whisper</td><td class="bad">6/14</td><td class="bad">0.211</td><td class="bad">5/14</td><td class="bad">0.474</td><td>—</td><td>RTF≈2</td></tr>
+</table>
+
+<p>近距离时 funasr / qwen3 / paraformer <strong>并列满分</strong>，差距全在远距离。逐句看，三家各自只错这些：</p>
+<table>
+<tr><th>引擎</th><th>far 上的全部错误</th></tr>
+<tr><td>qwen3</td><td>「后退」→「后悔」。<strong>唯一把「停」念对的引擎</strong></td></tr>
+<tr><td>paraformer</td><td>「停」→「暂屏」。CER 0.143 全由这一句贡献——1 字真值配 2 字猜测，那一项 CER 就是 2.0</td></tr>
+<tr><td>funasr</td><td>「停」→「平」、「再来一次」→「再买椅子」、「摄像头…」前面凭空加了个「把」</td></tr>
+</table>
+
+<div class="box warn"><strong>funasr 被两边夹住</strong>
+比 paraformer 慢 6 倍，又比 qwen3 差。换不换取决于大脑类型：<br>
+· <strong>omni 大脑</strong>：ASR 文本只用于 GUI 显示（模型直接听原始音频），但 ASR 在
+<code>_asr_then_turn</code> 里<strong>阻塞</strong>在起轮之前 → 选 paraformer，每轮省约 0.47 秒，转写质量只是观感。<br>
+· <strong>hermes 大脑</strong>：ASR 文本<strong>就是</strong>模型输入 → 选 qwen3，且它是唯一念对「停」的。<br>
+顺带一个还没做的优化：omni 路径下 ASR 与起轮<strong>本可以并行</strong>，现在白等一个纯显示用的结果。</div>
+
+<h2>6 · 麦克风：板子麦在词首爆破音上吃亏</h2>
+<p>同一次播放、板子麦和 Mac 麦<strong>同时录</strong>（播两次比的是两个时刻的房间，不是两只麦），
+同一个 Fun-ASR、oracle 切分。两只麦差 15 dB 信噪比，直接比就是比距离——所以把干净那份
+<strong>掺入它自己的底噪</strong>降到对方的信噪比再比。</p>
+<table>
+<tr><th>来源</th><th>1–3.4k SNR</th><th>逐字全对</th><th>CER</th></tr>
+<tr><td>数字语料（不过麦克风）</td><td>—</td><td>14/14</td><td>0.000</td></tr>
+<tr><td>Mac 麦</td><td>+27.1 dB</td><td>14/14</td><td>0.000</td></tr>
+<tr><td><strong>Mac 麦降到同信噪比</strong></td><td>+12.1 dB</td><td class="good">14/14</td><td class="good">0.000</td></tr>
+<tr><td><strong>板子麦</strong></td><td>+12.1 dB</td><td class="mid">12/14</td><td class="mid">0.155</td></tr>
+</table>
+<p>错的两句是<strong>同一个现象</strong>：词首的「停」（tíng，送气清塞音）。
+「停」→「一瓶」，「停下来别动了」→「接下来别动了」。其余 12 句含长句全对。</p>
+
+<div class="box err"><strong>机制假说：MCP01 的硬件降噪门</strong>
+daemon 注释里早已写明这块卡「静时输出近似静音，ALSA 增益调了没用」。降噪门从静音开启需要几毫秒，
+<strong>正好吃掉词首爆破音的起音</strong>。这也解释了为什么加 <code>pre_roll</code> 救不了——
+被吃掉的采样在硬件层就没了，前置再多只是多拿几帧静音。<br>
+<strong>边界</strong>：掺噪降的是信噪比，没有复现距离带来的混响和高频衰减，所以这 2 句的差距里
+有一部分该记在房间而不是麦克风上。<br>
+<strong>实际影响</strong>：「停」是这套指令里唯一的安全指令，恰好是这条音频链路最不擅长的那个。</div>
+
+<h2>7 · 增益：纯亏损项，不是旋钮</h2>
+<p>MCP01 <strong>自带 AGC</strong>：数字上差 12 dB 的两次播放，录进来峰值都是 -9.3 dBFS，
+far 的中位电平反而更高。所以任何正的软件增益都必然削顶。</p>
+<table>
+<tr><th>gain_db</th><th>near 召回</th><th>削顶采样</th><th>说明</th></tr>
+<tr class="win"><td><strong>0</strong></td><td class="good">14/14</td><td class="good">0%</td><td>已落盘</td></tr>
+<tr><td>+6</td><td>12/14</td><td>—</td><td>silero 其他参数不变</td></tr>
+<tr><td>+15 <em>(原生产)</em></td><td class="bad">12/14</td><td class="bad">14.8%</td><td>把最响的音节直接切平</td></tr>
+</table>
+
+<h2>8 · omni 大脑播放偏轻（独立问题，已修）</h2>
+<p>Qwen3-Omni 的声码器输出比机器人自己的 TTS 低约 11 dB：五次回复实测 rms 中位
+<strong>-29.5 dBFS</strong>，Matcha 是 <strong>-18.0</strong>。两条播放路径都是原始 PCM 直接进
+<code>aplay</code>，谁都没加增益，所以 omni 就是板上最小声的那个嗓子。</p>
+<p>修法：<code>_omni_play</code> 加 <code>OMNI_PLAY_GAIN_DB = 6.0</code>（preset 可用 <code>play_gain_db</code> 覆盖）。
+五个样本里最响的峰值 -8.0 dBFS，+6 dB 后 -2.0 dBFS，<strong>零削顶</strong>（实测复核：rms -25.1 → -19.1，
+削顶采样 0/59520）。<strong>没动板上的播放混音器</strong>——那 90% 是 daemon 每次发现设备时主动设的
+（声卡上电默认只有 29%），且对所有路径一视同仁，抬它会把 TTS 一起抬上去。</p>
+
+<h2>9 · 十二种「测了个空气还报通过」</h2>
+<div class="box warn"><strong>核心教训</strong>
+测量失效时<strong>不会报错</strong>，它会给你一张漂亮的表。看到「全部通过」或「完美的 0」，
+先怀疑测量本身——尤其当它和之前的观测矛盾时。</div>
+
+<details>
+<summary>展开：本次撞到的全部 12 种形态（前 4 种来自同期的 omni 大脑开发）</summary>
+<ol>
+<li><strong>测试对象在测量期间是崩的</strong>。MLX 线程 bug 让聊天轮从 2.5s 缩到 700ms，
+「并发应得 503」和「取消正在跑的请求」<strong>同时假阳性</strong>——worker 早空了。</li>
+<li><strong>输入信号是空的</strong>。macOS 新中文神经语音接受 <code>-o</code> 却静默写出 ~0.02s 的桩，
+模型什么都没听见，跑出一整张「看起来很真」的延迟表。</li>
+<li><strong>被测代码根本没在跑</strong>。VAD 只在 LISTENING 下运行，daemon 处于 idle 时
+每组配置都测出完美的 0%，看着像「参数全都最优」。</li>
+<li><strong>输入不受控</strong>。活麦上顺序 A/B，环境噪声漂了 30 dB，
+跑出 threshold 0.7 比 0.5「更差」这种物理上不可能的结果。</li>
+<li><strong>宽带正常，关键频段已经死了</strong>。录音宽带上语音比静音高 15.4 dB 很体面；
+按频段拆开，1–3.4 kHz 辅音带里语音比房间噪声<strong>低 2.6 dB</strong>。
+silero 只截出 4/12，而同一套语料的干净数字文件是 12/12。
+→ 录完立刻算辅音带信噪比并当硬闸门。<strong>总能量会替你把失败藏起来。</strong></li>
+<li><strong>对齐锚点被杂音顶掉</strong>。靠开头 1 kHz 标记音对齐，衰减 12 dB 那一轨的标记
+被一声房间杂音盖过，偏移差了 2.45 秒——检查表照样打印得整整齐齐。
+→ 改用整段 68 秒能量包络互相关，锚点越长越难被冒充。</li>
+<li><strong>指标口径把失败算成成功</strong>。扫参把「一个 20 秒大段吞掉 9 句」记成 9 次召回，
+该配置在表里是 12/12，实际 ASR 转写只有 3/12、CER 47.8。
+→ 按<strong>下游真正消费的单位</strong>记账：一段就是一轮，一轮只送一条指令。</li>
+<li><strong><code>0 == 0</code> 被当成验证通过</strong>。「fsmn 忽略 threshold」那条断言跑在一段太安静的
+噪声上，两组参数都切出 0 段，于是报「一致」。→ 验证「两者相同」前先断言两者<strong>非空</strong>。</li>
+<li><strong>容差比它要分辨的间距还大</strong>。匹配用了 ±0.25s 容差，而语料最短句间距 0.8s，
+正确切成两段被判成粘连。→ 要求与真值窗口有<strong>实打实的重叠</strong>。</li>
+<li><strong>采集工具静默丢采样</strong>。ffmpeg + avfoundation 在这台 Mac 上稳定丢 <strong>23%</strong>
+（20.5 秒墙钟录到 15.9 秒，原生 48 kHz 不重采样也一样），不报错。
+录出来不只是短，<strong>时间轴是拼接的</strong>，任何基于时间的对齐都锁不住。
+→ 断言 <code>实际时长/墙钟 ≈ 1</code>；换 <code>sounddevice</code>(PortAudio) 后是 0.992。</li>
+<li><strong>两个对象在不同条件下比较</strong>。两只麦一远一近，信噪比差 15.5 dB，
+直接比 CER 比的是距离。→ 把干净那份掺入自身底噪降到对方的信噪比。
+结论从「差一倍」变成「多错 2 个字」。</li>
+<li><strong>仪器本身不可复现，而且没人怀疑过它</strong>。Matcha 是流匹配模型，每次从新的高斯噪声起步：
+同一个「停」三次是 0.29 / 0.39 / 0.41 秒（41% 抖动）。于是同一份数字语料解码一次 11/14、
+一次 13/14——<strong>看起来像系统在波动，其实是尺子在变</strong>。
+→ 选定 TTS 前先合成三次比时长；edge-tts 裁剪后逐次完全一致。</li>
+</ol>
+<p>还有一条不算缺陷但同样会误导：<strong>采样太短就是在测天气</strong>。
+90 秒噪声录一次抓到一声撞击、再录一次什么都没有（误触发全 0，看着像「参数全都完美」）。
+改成 5 分钟才稳定。</p>
+</details>
+
+<details>
+<summary>展开：Matcha 那一轮被推翻的两条结论</summary>
+<p>第一版实验用 Matcha 单音色语料，得出过两条<strong>错误</strong>结论，换 edge-tts 六音色后被推翻：</p>
+<ul>
+<li><strong>「阈值该取 0.70」</strong> → 实际是 0.30。单一嗓子上 0.70 拿 14/14+14/14；
+六个音色里有偏轻偏柔的，0.70 掉到 12/14+10/14。而误触发那侧几乎没代价：
+0.30 每 5 分钟多切 1 段，那段解码为空被下游挡掉，<strong>真正起轮反而更少</strong>（1.0 vs 1.2 次/分）。</li>
+<li><strong>「板子麦克风没问题」</strong> → 实际在词首爆破音上确实吃亏。
+Matcha 语料自己就念不清（「往前走一点点」→「往前存做点点」，<strong>不过麦克风就错</strong>），
+把差异盖住了。</li>
+</ul>
+<p><strong>没被影响的</strong>：三引擎排名和参数统一的结论。480 组配置吃的是同一份录音的同一批字节，
+对比有效。被影响的只是<strong>跨批次重新生成语料</strong>得出的绝对数字。</p>
+</details>
+
+<h2>10 · 工具与复现</h2>
+<pre><code># Mac 端一次性准备
+python3.12 -m venv ~/.cache/lekiwi-mac-tts/venv
+~/.cache/lekiwi-mac-tts/venv/bin/pip install sherpa-onnx numpy edge-tts sounddevice
+
+V=~/.cache/lekiwi-mac-tts/venv/bin/python
+$V scripts/vad_corpus.py --tts edge                 # 六音色语料(可复现)
+$V scripts/vad_corpus.py --tts edge --voice-check --name voicecheck   # 音色体检
+$V scripts/vad_record.py --ip &lt;board&gt; --noise-secs 300               # 录三段+可用性闸门
+$V scripts/mic_compare.py --ip &lt;board&gt; --source mac                  # 双麦同录
+
+# 板上(voice venv)
+P=~/work/lekiwi-jetson-orin/voice/.venv/bin/python
+$P /tmp/vadtune/vad_sweep.py --engines fsmn,silero,ten   # 480 组,约 55 分钟
+$P /tmp/vadtune/vad_asr.py --asr funasr --config '{...}' # 帕累托前沿做 ASR 验证
+$P /tmp/vadtune/vad_asr.py --asr qwen3 --oracle near-oracle   # ASR 横评
+$P /tmp/vadtune/vad_asr.py --asr funasr --compare mic-mac     # 麦克风对比
+
+# Mac 端分析
+scripts/vad_pick.py sweep.json    # 各引擎最优 + 帧级准确率 + 参数能否统一</code></pre>
+<p><code>vad_sweep.py</code> 把<strong>每组配置的段位置也写进结果 JSON</strong>——以后想换任何指标都是
+重读一次 JSON，不用再跑 55 分钟。</p>
+
+<h2>11 · 未完成 / 待办</h2>
+<ul>
+<li><strong>真人验证</strong>：所有数字都来自合成语音。合成语音的时长和能量分布与真人不同，
+尤其「停」这类单音节。<span class="bad">尚未验证。</span></li>
+<li><strong>「停」的安全指令问题</strong>：硬件降噪门吃掉词首送气音，<code>pre_roll</code> 救不了。
+方向是换不带降噪门的麦克风，或指令层不依赖单字（接受「停下来」「别动了」）。超出调参范围。</li>
+<li><strong>ASR 换不换</strong>：数据支持 omni 路径换 paraformer（省 0.47s/轮）、hermes 路径换 qwen3。
+<span class="mid">未改动，等决定。</span></li>
+<li><strong>一个未定位的异常</strong>：某次重启后 vad 配置被写回 <code>fsmn</code>，形态是
+「engine 与 threshold 回默认值、min_silence 与 pre_roll 保留」。重设后连续观察 150 秒
+并再重启一次<strong>未复现</strong>。若再次出现（特征：部分字段回默认），按这个特征查写入方。</li>
+</ul>
+
+<p class="sub" style="margin-top:48px">相关：<code>.memory/vad-asr-tuning-results.md</code>、
+<code>.memory/measurement-validity.md</code>、<code>docs/omni-brain-lan.html</code>、
+<code>docs/voice-asr-tts-engines.html</code></p>
+
+</div>
+</body>
+</html>

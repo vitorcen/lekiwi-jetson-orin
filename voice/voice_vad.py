@@ -30,7 +30,7 @@ FRAME_MS = 20
 SAMPLE_RATE = 16000
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000          # 320
 
-VAD_ENGINES = ["silero", "fsmn", "ten", "webrtc", "energy"]
+VAD_ENGINES = ["silero", "ten", "fsmn", "webrtc", "energy"]   # order: voice_config
 TEN_MODEL = "ten-vad.onnx"                              # under voice/models/
 # FSMN-VAD (FunASR) runs via the patched llama-funasr-vad serve binary — built from the
 # Fun-ASR fork outside the repo tree (see voice/patches/ + .memory/voice-asr-engines).
