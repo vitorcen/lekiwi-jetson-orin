@@ -230,6 +230,15 @@ function curVad() {
   };
 }
 
+// A blank engine or an unparseable number reaches the daemon as "" / null, and
+// normalize_vad's job is to never reject a hand-edited file — so it fills the
+// gaps from DEFAULT_CONFIG and the save silently downgrades the engine instead
+// of failing. Catch it here, where we still know it came from a form.
+function vadComplete(v) {
+  return !!v.engine && ['threshold', 'min_speech_s', 'min_silence_s', 'pre_roll_s']
+    .every(k => Number.isFinite(v[k]));
+}
+
 function curGain() {
   const g = parseFloat($('vlAudioGain').value);
   return Number.isFinite(g) ? g : 0;
@@ -360,14 +369,27 @@ async function refreshConfig() {
 
 // feedId 决定反馈落哪个台:VAD/增益/ASR 属左边 ASR 台(vlAsrFeed),TTS/Vision 属右边
 // TTS 台(vlTtsFeed,默认)。之前一律写 vlTtsFeed,导致切 VAD 的提示跑到右边。
-async function postConfig(patch, feedNote, feedId = 'vlTtsFeed') {
-  if (!invoke) return;
-  try {
-    await invoke('voice_post', { ip: curIp(), path: '/config', body: JSON.stringify(patch) });
-    if (feedNote) addRow(feedId, feedNote, 'ask');
-  } catch (e) {
-    addRow(feedId, '配置失败: ' + e, 'error');
+// asr/vad are engine switches serialised behind one daemon-side lock, and the
+// endpoint answers 202 the moment the job is QUEUED — so awaiting the response
+// tells you nothing about when the lock frees. Anything sent meanwhile bounces
+// off a 409 "switch in progress". Retry on exactly that, with a backoff long
+// enough for a real load (funasr ~3s, qwen3 ~8s).
+async function postConfig(patch, feedNote, feedId = 'vlTtsFeed', tries = 8) {
+  if (!invoke) return false;
+  for (let i = 0; i < tries; i++) {
+    try {
+      await invoke('voice_post', { ip: curIp(), path: '/config', body: JSON.stringify(patch) });
+      if (feedNote) addRow(feedId, feedNote, 'ask');
+      return true;
+    } catch (e) {
+      if (!String(e).includes('switch in progress') || i === tries - 1) {
+        addRow(feedId, '配置失败: ' + e, 'error');
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 500 * (i + 1)));
+    }
   }
+  return false;
 }
 
 // ---- ASR transcription tail ----------------------------------------------
@@ -779,7 +801,10 @@ $('vlVadEngine') && ($('vlVadEngine').onchange = () => {
 });
 for (const id of ['vlVadThreshold', 'vlVadMinSpeech', 'vlVadMinSilence', 'vlVadPreRoll']) {
   $(id) && ($(id).onchange = () => {
-    postConfig({ axis: 'vad', value: curVad(), ephemeral: true }, '临时改 VAD 参数', 'vlAsrFeed');
+    const v = curVad();
+    // An emptied box parses to NaN, ships as null, and comes back as a default.
+    if (!vadComplete(v)) { addRow('vlAsrFeed', 'VAD 参数为空,未提交', 'error'); return; }
+    postConfig({ axis: 'vad', value: v, ephemeral: true }, '临时改 VAD 参数', 'vlAsrFeed');
   });
 }
 $('vlAudioGain') && ($('vlAudioGain').onchange = () => {
@@ -788,16 +813,34 @@ $('vlAudioGain') && ($('vlAudioGain').onchange = () => {
 });
 // 保存(唯一按钮,一级行): 按当前识别模式落盘整套识别配置。识别模式本身也持久化
 // (stream.enabled) —— 否则存过流式后切回 VAD,重开永远回到流式。
-$('vlSaveAll') && ($('vlSaveAll').onclick = () => {
-  if (recMode() === 'stream') {
-    postConfig({ axis: 'stream', value: curStream() }, '', 'vlAsrFeed');
-    postConfig({ axis: 'audio', value: { gain_db: curGain() } },
-               '已保存 流式模式+模型+端点+增益', 'vlAsrFeed');
-  } else {
-    postConfig({ axis: 'asr', value: $('vlModelSel').value }, '', 'vlAsrFeed');
-    postConfig({ axis: 'vad', value: curVad() }, '已保存 VAD模式+离线引擎+参数+增益', 'vlAsrFeed');
-    postConfig({ axis: 'audio', value: { gain_db: curGain() } });
-    postConfig({ axis: 'stream', value: { enabled: false } });   // 模式=VAD 持久化
+let savingAll = false;
+$('vlSaveAll') && ($('vlSaveAll').onclick = async () => {
+  // Sequential, not parallel: the four axes share one switch lock, so firing
+  // them together made two of them 409 and the save half-applied without saying
+  // so. Re-entry is blocked with a flag rather than the native `disabled`
+  // attribute — that swallows the click outright (see .memory/gui-disabled-*).
+  if (savingAll) return;
+  savingAll = true;
+  try {
+    if (recMode() === 'stream') {
+      await postConfig({ axis: 'stream', value: curStream() }, '', 'vlAsrFeed');
+      await postConfig({ axis: 'audio', value: { gain_db: curGain() } },
+                       '已保存 流式模式+模型+端点+增益', 'vlAsrFeed');
+      return;
+    }
+    const vad = curVad();
+    if (!vadComplete(vad)) {
+      addRow('vlAsrFeed', '保存中止: VAD 引擎或参数为空,先等配置载入', 'error');
+      return;
+    }
+    const ok = await postConfig({ axis: 'asr', value: $('vlModelSel').value }, '', 'vlAsrFeed')
+      && await postConfig({ axis: 'vad', value: vad }, '', 'vlAsrFeed')
+      && await postConfig({ axis: 'audio', value: { gain_db: curGain() } }, '', 'vlAsrFeed')
+      && await postConfig({ axis: 'stream', value: { enabled: false } }, '', 'vlAsrFeed');
+    addRow('vlAsrFeed', ok ? '已保存 VAD模式+离线引擎+参数+增益' : '保存未完成,见上方错误',
+           ok ? 'ask' : 'error');
+  } finally {
+    savingAll = false;
   }
 });
 
