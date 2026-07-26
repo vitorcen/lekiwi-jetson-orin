@@ -35,3 +35,4 @@
 - [MLX stream 是线程局部的](mlx-thread-local-stream.md) — 主线程加载+worker推理会炸且只炸talker;附并发/取消用例假阳性陷阱
 - [VAD/ASR 调参结论](vad-asr-tuning-results.md) — silero(thr0.30)完胜fsmn已落盘;增益必须0;语料必须多音色可复现否则阈值调偏;MCP01降噪门吃掉词首「停」
 - [测量必须断言前提](measurement-validity.md) — 一天撞出十二种「测了个空气还报通过」;宽带正常但关键频段已死/对齐锚点被顶掉/口径把失败算成成功;写测试和调参前必读
+- [Mac 侧语音工具链](mac-side-speech.md) — 板子没外网所以 edge 只能在 Mac 跑;HF 大文件在这台机上不可用改走 ModelScope;f5 时长必须按参考语速推,edge 输出要裁静音

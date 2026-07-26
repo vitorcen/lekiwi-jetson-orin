@@ -142,6 +142,29 @@ async def h_config_post(request: web.Request) -> web.Response:
                                      status=500)
         await D.set_vision_speak(bool(value))
         return web.json_response({"ok": True, "vision_speak": bool(value)})
+    if axis == "remote_asr":
+        # 只是地址和模型名,不是换引擎 —— 不抢切换锁,不建 job。若 remote 正在当值,
+        # apply_remote_asr 会当场复探一次,打错的地址立刻现形(502 带原因)。
+        D.config = vconfig.apply_axis(D.config, "remote_asr", value)
+        try:
+            vconfig.save_config(D.config)
+        except OSError as exc:
+            return web.json_response({"error": f"config save failed: {exc}"},
+                                     status=500)
+        applied = await D.apply_remote_asr()
+        if applied.get("error"):
+            return web.json_response(applied, status=502)
+        return web.json_response({"ok": True, **applied})
+    if axis == "auto_listen":
+        # 只写盘,不动当前会话:它决定的是 daemon 下次启动开不开麦,现在这一路
+        # 由开始对话按钮独占。当场生效会变成第二个开关麦入口,和按钮打架。
+        D.config = vconfig.apply_axis(D.config, "auto_listen", value)
+        try:
+            vconfig.save_config(D.config)
+        except OSError as exc:
+            return web.json_response({"error": f"config save failed: {exc}"},
+                                     status=500)
+        return web.json_response({"ok": True, "auto_listen": bool(value)})
     if axis == "stream":
         # DEBUG 流式模式开关 + 模型 + 端点静音(ephemeral 不落盘 / 否则存参)。模型可能
         # 700M,同步载入会超 GUI HTTP 超时 → 后台加载、立即返回,GUI 轮询 /health.stream.loaded。

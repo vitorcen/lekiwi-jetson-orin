@@ -21,12 +21,14 @@
 // The /config, /asr_debug and /asr_debug/tail endpoints are added by the daemon
 // P0b work; every call is defensive so a not-yet-deployed daemon degrades
 // gracefully instead of throwing.
-import { $, S, invoke } from './state.js';
+import { $, S, invoke, getCfg, setCfg } from './state.js';
 
 const HEALTH_MS = 1000;   // 1 Hz device telemetry while online
 const DBG_HEALTH_MS = 300; // faster telemetry in DEBUG — 1Hz misses 320ms speech peaks
 const PROBE_MS  = 2500;   // slow reconnect probe while offline
 const TAIL_MS   = 400;    // ASR transcript tail poll, only while transcribing
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // dBFS thresholds (from .memory/voice-frontend-s2.md, MCP01 field rules):
 //   >= -34  → energy gate open, real speech level (green)
@@ -38,10 +40,15 @@ const LVL_MUTE = -70;     // at/below this the mic is effectively silent
 let active = false, online = false;
 let healthTimer = null, tailTimer = null;
 let asrOn = false;        // ASR debug transcription is running
-let tailSeq = 0;          // /asr_debug/tail cursor
+// 清空的水位线,落盘。板端 TailRing 是个 200 条的环,GET 时按 since 回放 —— 只清
+// DOM 的话,下次开 GUI(或重连)整环原样回来,「清空」就是句谎话。同 agent.js 的
+// agentClearedSeq。
+let asrClearedSeq = +getCfg('vlAsrClearedSeq', 0) || 0;
+let tailSeq = asrClearedSeq;   // /asr_debug/tail cursor
 let partialRow = null;    // the single live partial-transcript row (overwritten)
 let vadEnums = [];        // enums.vad from GET /config (engine availability + defaults)
 let vadFlashUntil = 0;    // wall-clock ms until the "just cut a segment" yellow dot ends
+let lastHealth = null;    // last /health payload, so a UI change can repaint at once
 
 // Health cadence: fast (300ms) in DEBUG so the level meter tracks speech peaks; 1Hz
 // otherwise; slow probe while offline. Re-armed whenever online/asrOn change.
@@ -94,6 +101,21 @@ function paintVadDot(h) {
   }
 }
 
+// edge 需要外网(微软的语音服务)。板子连不上时 daemon 静默回落 Melo,于是换哪个
+// edge 音色听起来都一样 —— 表现和「切换不生效」完全一致。熔断状态 /health 一直有,
+// 只是没人画。不画出来,这个坑每次都得靠 ssh 上板子 curl 才能定位。
+function paintTtsWarn(h) {
+  const el = $('vlTtsWarn');
+  if (!el) return;
+  const isEdge = $('vlTtsEngine') && $('vlTtsEngine').value === 'edge';
+  const tripped = !!(online && h && h.edge_breaker);
+  el.style.display = (isEdge && tripped) ? '' : 'none';
+  if (isEdge && tripped) {
+    el.textContent = '⚠ edge 连不上(板子需要外网),已回落本地 Melo —— '
+      + '此时换任何 edge 音色都不会有变化。要 edge 的语气,用右下角「电脑播报」(走 Mac 的网)。';
+  }
+}
+
 function paintDevice(h) {
   const okPill = $('vdAudioOk');
   const fill = $('vdMicFill');
@@ -125,6 +147,7 @@ function paintDevice(h) {
     okPill.textContent = ok ? '音频就绪' : '音频缺失';
     okPill.className = 'pill ' + (ok ? 'ok' : 'bad');
   }
+  paintTtsWarn(h);
   // Built-in diagnosis (the MCP01 field rules, made visible instead of guessed):
   if (hint) {
     if (!cap || !play) {
@@ -260,11 +283,14 @@ function fillModelSel(eph) {
   fillEngineSel(sel, list, keep);
 }
 
-// 参数区随模式显隐(VAD 参数 vs 端点静音)
+// 参数区随模式显隐(VAD 参数 vs 端点静音);电脑 ASR 那行只在选中 remote 时出现。
 function applyModeUI() {
   const stream = recMode() === 'stream';
   if ($('vlVadRow')) $('vlVadRow').style.display = stream ? 'none' : '';
   if ($('vlStreamRow')) $('vlStreamRow').style.display = stream ? '' : 'none';
+  const rr = $('vlRemoteRow');
+  if (rr) rr.style.display = (!stream && $('vlModelSel') &&
+                              $('vlModelSel').value === 'remote') ? '' : 'none';
 }
 
 function curStream() {
@@ -289,6 +315,92 @@ function applyStreamFromConfig(cfg) {
   paintInput('vlStreamSilence', st.endpoint_silence_s, eph);
   fillModelSel(eph);
   applyModeUI();
+}
+
+// ---- 电脑 ASR(remote 引擎的地址/模型 + 本机服务的下载与启停) ----------------
+// 板端只认地址;下载和起服务是本机(Mac)的事,所以走 Tauri 命令而不是 voice-daemon。
+// 没有第二个「位置」开关 —— 二级模型下拉里选中 remote 就是选了电脑 ASR。
+
+function applyRemoteFromConfig(cfg) {
+  const desired = (cfg && cfg.desired) || cfg || {};
+  const rc = desired.remote_asr || {};
+  // 空串不回填:板上没配地址时,不该把用户刚敲进框里还没保存的地址清掉。
+  if (rc.url) paintInput('vlRemoteUrl', rc.url, false);
+  paintInput('vlRemoteModel', rc.model, false);
+}
+
+function curRemote() {
+  return { url: ($('vlRemoteUrl') && $('vlRemoteUrl').value.trim()) || '',
+           model: ($('vlRemoteModel') && $('vlRemoteModel').value.trim()) || '' };
+}
+
+// 本机服务状态:模型下了多少、服务在不在、这台机器的局域网地址是什么。
+let remoteStatTimer = null;
+async function pollRemoteStatus() {
+  const el = $('vlRemoteStat');
+  if (!el || !invoke) return;
+  const rr = $('vlRemoteRow');
+  if (!rr || rr.style.display === 'none') return;      // 不看的时候不查
+  try {
+    const s = JSON.parse(await invoke('mac_asr_status', { model: curRemote().model }));
+    const parts = [s.running ? '服务在跑' : '服务未启动',
+                   s.cached_mb > 0 ? `模型已下载 ${s.cached_mb}MB` : '模型未下载'];
+    if (s.lan_ip) parts.push(`本机 http://${s.lan_ip}:${s.port}`);
+    el.textContent = '状态 ' + parts.join(' · ');
+    // 地址空着就把本机地址填进去 —— 这是唯一正确的候选值,让人手抄 IP 是浪费
+    const u = $('vlRemoteUrl');
+    if (u && !u.value.trim() && s.lan_ip) u.value = `http://${s.lan_ip}:${s.port}`;
+  } catch (e) {
+    el.textContent = '状态读取失败: ' + e;
+  }
+}
+
+$('vlRemoteDl') && ($('vlRemoteDl').onclick = async () => {
+  const btn = $('vlRemoteDl');
+  const model = curRemote().model;
+  if (!model) { addRow('vlAsrFeed', '先填模型仓库 id', 'error'); return; }
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '下载中…';
+  addRow('vlAsrFeed', `下载 ${model} 到本机 HF 缓存(首次约几分钟,不要关 GUI)`, 'ask');
+  try {
+    await invoke('mac_asr_download', { model });
+    addRow('vlAsrFeed', '模型已就绪: ' + model, 'answer');
+  } catch (e) {
+    addRow('vlAsrFeed', '下载失败: ' + e, 'error');
+  } finally {
+    btn.textContent = old;
+    btn.disabled = false;
+    pollRemoteStatus();
+  }
+});
+
+$('vlRemoteSrv') && ($('vlRemoteSrv').onclick = async () => {
+  const btn = $('vlRemoteSrv');
+  const start = btn.textContent.indexOf('停') < 0;
+  btn.disabled = true;
+  try {
+    const out = await invoke('mac_asr_serve',
+                             { action: start ? 'start' : 'stop', model: curRemote().model });
+    addRow('vlAsrFeed', start ? ('本机 ASR 服务已启动,日志 ' + out) : '本机 ASR 服务已停止',
+           'answer');
+    btn.textContent = start ? '停止服务' : '启动服务';
+  } catch (e) {
+    addRow('vlAsrFeed', (start ? '启动失败: ' : '停止失败: ') + e, 'error');
+  } finally {
+    btn.disabled = false;
+    setTimeout(pollRemoteStatus, 1200);   // uv 冷启动要一会儿才 listen
+  }
+});
+
+// 地址/模型改动 → 立刻落盘(它不是引擎切换,不抢切换锁)。remote 正在当值时
+// daemon 会顺手复探,地址打错当场 502。
+async function saveRemote(note) {
+  return postConfig({ axis: 'remote_asr', value: curRemote() }, note, 'vlAsrFeed');
+}
+for (const id of ['vlRemoteUrl', 'vlRemoteModel']) {
+  const el = $(id);
+  if (el) el.onchange = () => { saveRemote('已保存电脑 ASR 地址/模型'); pollRemoteStatus(); };
 }
 
 function applyTtsFromConfig(cfg) {
@@ -341,6 +453,7 @@ function applyTtsFromConfig(cfg) {
   if (vl && desired.vision_speak_limit != null) vl.value = desired.vision_speak_limit;
   applyVadFromConfig(cfg);
   applyStreamFromConfig(cfg);
+  applyRemoteFromConfig(cfg);
   syncTtsUi();
 }
 
@@ -360,11 +473,23 @@ function curTts() {
   return tts;
 }
 
-async function refreshConfig() {
+// 每个下拉的选项都来自这里。它失败时旧代码整条吞掉,页面就剩一排空下拉 —— 看起来
+// 和「代码写坏了」一模一样,实际是板子答不上来(内存被挤爆时 /config 直接超时,
+// 或刚重启还没 bind 端口)。所以:重试几次,仍失败就把原因写进转写台。
+async function refreshConfig(tries = 3) {
   if (!invoke) return;
-  try {
-    applyTtsFromConfig(JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/config' })));
-  } catch { /* /config not up yet — dropdowns keep their static defaults */ }
+  for (let i = 1; i <= tries; i++) {
+    try {
+      applyTtsFromConfig(JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/config' })));
+      return;
+    } catch (e) {
+      if (i === tries) {
+        addRow('vlAsrFeed', '读取板端配置失败,下拉框留空(不是配置丢了): ' + e, 'error');
+        return;
+      }
+      await sleep(600 * i);
+    }
+  }
 }
 
 // feedId 决定反馈落哪个台:VAD/增益/ASR 属左边 ASR 台(vlAsrFeed),TTS/Vision 属右边
@@ -566,7 +691,12 @@ async function pollTail() {
   if (!active || !online || !asrOn || !invoke) return;
   try {
     const r = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/asr_debug/tail?since=' + tailSeq }));
-    if (r.last_seq != null && r.last_seq < tailSeq) { tailSeq = 0; return; }  // daemon restart
+    // daemon 重启:seq 从头编号,旧水位线指向的是不相干的事件,只能丢掉。
+    if (r.last_seq != null && r.last_seq < tailSeq) {
+      tailSeq = 0;
+      if (asrClearedSeq) { asrClearedSeq = 0; setCfg('vlAsrClearedSeq', 0); }
+      return;
+    }
     for (const ev of r.events || []) {
       // 流式行(kind 'stream')带「流式」徽章,与 VAD+离线的 seg 行并排区分;
       // seg 行带 outcome+回放;其余(旧 partial/final)走 addAsrEvent。
@@ -593,7 +723,7 @@ async function setAsr(on) {
     asrOn = on;
     paintAsrBtn();
     armHealth();               // DEBUG → 300ms telemetry so the level meter tracks peaks
-    if (on) { tailSeq = 0; startTail(); }
+    if (on) { tailSeq = asrClearedSeq; startTail(); }
     else { stopTail(); partialRow = null; streamPartialRow = null; }
   } catch (e) {
     addRow('vlAsrFeed', '转写开关失败: ' + e, 'error');
@@ -614,6 +744,7 @@ async function pollHealth() {
   if (!active || !invoke) return;
   try {
     const h = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/health' }));
+    lastHealth = h;
     if (!online) goOnline();
     paintDevice(h);
     // The daemon owns the DEBUG state (another window / a restart may flip it):
@@ -665,12 +796,16 @@ function startActive() {
   online = false;
   healthTimer = setInterval(pollHealth, PROBE_MS);
   pollHealth();
+  macInit();                                    // say -v ? once, on first visit
+  if (!remoteStatTimer) remoteStatTimer = setInterval(pollRemoteStatus, 3000);
+  pollRemoteStatus();
 }
 
 function stopActive() {
   if (!active) return;
   active = false;
   stopTail();
+  if (remoteStatTimer) { clearInterval(remoteStatTimer); remoteStatTimer = null; }
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = null;
   online = false;
@@ -683,7 +818,12 @@ export function onLeaveVoice() { stopActive(); }
 // ---- wiring --------------------------------------------------------------
 
 $('vlAsrBtn') && ($('vlAsrBtn').onclick = () => { if (online) setAsr(!asrOn); });
-$('vlAsrClear') && ($('vlAsrClear').onclick = () => { $('vlAsrFeed').innerHTML = ''; partialRow = null; streamPartialRow = null; });
+$('vlAsrClear') && ($('vlAsrClear').onclick = () => {
+  $('vlAsrFeed').innerHTML = '';
+  partialRow = null; streamPartialRow = null;
+  asrClearedSeq = tailSeq;                       // 记住清到哪,否则重连全回来
+  setCfg('vlAsrClearedSeq', asrClearedSeq);
+});
 
 // 切换是异步 job(载新卸旧数秒)。/health 的 applied.asr 是 daemon 上「真正运行」的
 // 引擎(非下拉选值);轮询它直到 == 目标,才算对应模型服务就绪。给出明确确认。
@@ -741,11 +881,15 @@ $('vlRecMode') && ($('vlRecMode').onchange = () => {
 // 二级:模型切换。VAD 模式→切离线引擎(asr 轴);流式模式→切流式模型(stream 轴)。均 ephemeral。
 $('vlModelSel') && ($('vlModelSel').onchange = async () => {
   const m = $('vlModelSel').value;
+  applyModeUI();                // 电脑 ASR 那行随选择出现/消失
   if (recMode() === 'stream') {
     postConfig({ axis: 'stream', value: curStream(), ephemeral: true },
                '临时切流式模型: ' + m, 'vlAsrFeed');
     confirmStreamSwitch(m);     // 后台加载,轮询到就绪
   } else {
+    // 切到电脑 ASR 前先把地址存下:切换会当场探活,探的必须是框里这个地址,
+    // 而不是上次保存的那个 —— 否则「改了地址再切」永远探错目标。
+    if (m === 'remote') { await saveRemote(''); pollRemoteStatus(); }
     await postConfig({ axis: 'asr', value: m, ephemeral: true });
     confirmAsrSwitch(m);        // 轮询 /health 直到服务就绪
   }
@@ -755,6 +899,7 @@ $('vlModelSel') && ($('vlModelSel').onchange = async () => {
 // POST /config body shape is {axis, value, ephemeral} — by-axis whole replacement.
 $('vlTtsEngine') && ($('vlTtsEngine').onchange = () => {
   syncTtsUi();
+  paintTtsWarn(lastHealth);      // 切到/切走 edge 时提示要立刻跟上,不等下一次轮询
   postConfig({ axis: 'tts', value: curTts(), ephemeral: true },
              '临时切引擎: ' + $('vlTtsEngine').value);
 });
@@ -831,6 +976,11 @@ $('vlSaveAll') && ($('vlSaveAll').onclick = async () => {
     const vad = curVad();
     if (!vadComplete(vad)) {
       addRow('vlAsrFeed', '保存中止: VAD 引擎或参数为空,先等配置载入', 'error');
+      return;
+    }
+    // 电脑 ASR:地址先落盘,再切引擎 —— 反过来的话引擎会拿旧地址去探活。
+    if ($('vlModelSel').value === 'remote' && !await saveRemote('')) {
+      addRow('vlAsrFeed', '保存中止: 电脑 ASR 地址无效或不可达', 'error');
       return;
     }
     const ok = await postConfig({ axis: 'asr', value: $('vlModelSel').value }, '', 'vlAsrFeed')
@@ -973,3 +1123,215 @@ $('asvcAuto') && ($('asvcAuto').onchange = async e => {
     cb.disabled = false;
   }
 });
+
+// ---- 电脑播报 (Mac speaker) ----------------------------------------------
+// This Mac speaks; the robot listens. Deliberately NOT gated on `online` and it
+// never calls voice-daemon — the whole value is a sound source the board did not
+// produce (VAD/ASR tuning, echo tests, wake drills). Rust owns the `say` child;
+// this side owns the script, the gaps and the stop flag.
+let macRunning = false;    // a script is playing right now
+let macStopped = false;    // 停止 pressed — ends the line, the gap and the loop
+let macVoicesLoaded = false;
+
+
+// Same full-width-dot rule as numVal, plus a default for empty input.
+function macNum(id, dflt) {
+  const v = parseFloat((($(id) && $(id).value) || '').replace(/[。，]/g, '.').trim());
+  return Number.isFinite(v) ? v : dflt;
+}
+
+// "文本 | 停顿秒" — the gap falls back to the panel default. Blank lines and
+// #-comments are skipped so a script can be annotated in place.
+//
+// The voice is NOT per line. It used to be, and that was a bug factory: say and
+// edge have different voice namespaces, so a script written for one engine fed
+// edge a `Tingting` it rejects outright. One dropdown, one voice per run.
+// Old three-column scripts still load: the gap is read off the LAST field and
+// anything between is ignored.
+function macParse() {
+  const gap0 = macNum('vlMacGap', 2);
+  const out = [];
+  for (const raw of (($('vlMacScript') && $('vlMacScript').value) || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split('|').map(s => s.trim());
+    const text = parts[0];
+    if (!text) continue;
+    const g = parts.length > 1
+      ? parseFloat((parts[parts.length - 1] || '').replace(/[。，]/g, '.')) : NaN;
+    out.push({ text, gap: Number.isFinite(g) ? g : gap0 });
+  }
+  return out;
+}
+
+function paintMacBtns() {
+  const b = $('vlMacBtn'), s = $('vlMacStop');
+  if (b) { b.disabled = macRunning || !invoke; b.textContent = macRunning ? '播报中…' : '开始播报'; }
+  if (s) s.disabled = !macRunning;
+}
+
+// edge/f5 are rendered to files BEFORE the first line plays. Synthesis latency
+// must not leak into the gaps: the gap is the measured variable in a VAD run
+// (0.8-10s, deliberately unequal), and f5 costs 1.4-2.6s per line. Rendering
+// up front also loads f5's model once instead of once per line.
+// Returns text -> file path, or null if the user stopped / it failed.
+async function macRender(lines, engine, voice) {
+  const seed = 1234;                    // fixed: same script -> same audio, always
+  const uniq = [...new Set(lines.map(l => l.text))];
+  const items = uniq.map(text => ({ text, key: macKey(engine, voice, seed, text) }));
+  addRow('vlMacFeed', `生成中: ${engine} / ${voice} / ${uniq.length} 句…`, 'ask');
+  let res;
+  try {
+    res = JSON.parse(await invoke('mac_tts_render', { engine, voice, seed, items }));
+  } catch (e) {
+    addRow('vlMacFeed', '生成失败: ' + e, 'error');
+    return null;
+  }
+  if (macStopped) return null;
+  addRow('vlMacFeed', `就绪: 新生成 ${res.rendered} 句, 命中缓存 ${res.cached} 句`, 'answer');
+  return new Map(uniq.map((text, i) => [text, res.paths[i]]));
+}
+
+async function macRun() {
+  if (macRunning || !invoke) return;
+  const lines = macParse();
+  if (!lines.length) { addRow('vlMacFeed', '脚本是空的(每行:文本 | 音色 | 停顿秒)', 'error'); return; }
+  const engine = macEngine();
+  const volume = Math.max(0, Math.min(100, Math.round(macNum('vlMacVol', 70))));
+  const rate = Math.max(0, Math.round(macNum('vlMacRate', 0)));
+  macRunning = true;
+  macStopped = false;
+  paintMacBtns();
+  try {
+    const voice = ($('vlMacVoice') && $('vlMacVoice').value) || '';
+    let rendered = null;
+    if (engine !== 'say') {
+      rendered = await macRender(lines, engine, voice);
+      if (!rendered) return;            // stopped or failed; macRender already said why
+    }
+    do {
+      for (const ln of lines) {
+        if (macStopped) break;
+        addRow('vlMacFeed', '▶ ' + ln.text, 'answer');
+        try {
+          if (rendered) {
+            await invoke('mac_play', { path: rendered.get(ln.text), volume });
+          } else {
+            await invoke('mac_say', { text: ln.text, voice, volume, rate });
+          }
+        } catch (e) {
+          addRow('vlMacFeed', '播报失败: ' + e, 'error');
+          macStopped = true;
+          break;
+        }
+        // Sliced so 停止 cuts the gap too — a 10s pause must not outlive the button.
+        for (let left = ln.gap * 1000; left > 0 && !macStopped; left -= 100) {
+          await sleep(Math.min(100, left));
+        }
+      }
+    } while (!macStopped && $('vlMacLoop') && $('vlMacLoop').checked);
+  } finally {
+    addRow('vlMacFeed', macStopped ? '已停止' : '播报结束', 'ask');
+    macRunning = false;
+    paintMacBtns();
+  }
+}
+
+async function macStop() {
+  macStopped = true;
+  try { await invoke('mac_say_stop'); } catch { /* nothing was speaking */ }
+}
+
+// edge/f5 share one voice namespace on purpose: f5 clones an edge voice, so the
+// same name means the same sound and the engine only decides online-every-time
+// vs clone-once-then-offline. Mirrors voice_config.EDGE_VOICES.
+const EDGE_VOICES = [
+  'zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-YunxiNeural',
+  'zh-CN-YunyangNeural', 'zh-CN-YunjianNeural', 'zh-CN-YunxiaNeural',
+  'zh-CN-liaoning-XiaobeiNeural', 'zh-CN-shaanxi-XiaoniNeural',
+  'zh-HK-HiuMaanNeural', 'zh-TW-HsiaoChenNeural',
+];
+let sayVoices = [];        // "name\tlocale" rows from `say -v ?`, loaded once
+
+function macEngine() { return ($('vlMacEngine') && $('vlMacEngine').value) || 'edge'; }
+
+// Voice dropdown follows the engine; 语速 only exists for say.
+function fillMacVoices() {
+  const sel = $('vlMacVoice');
+  if (!sel) return;
+  const say = macEngine() === 'say';
+  const want = sel.value || getCfg(say ? 'macVoiceSay' : 'macVoice',
+                                  say ? 'Tingting' : EDGE_VOICES[0]);
+  sel.innerHTML = '';
+  const rows = say ? sayVoices.map(r => r.split('\t')) : EDGE_VOICES.map(v => [v, '']);
+  for (const [name, locale] of rows) {
+    const o = document.createElement('option');
+    o.value = name;
+    o.textContent = locale ? name + '  (' + locale + ')' : name;
+    sel.append(o);
+  }
+  if ([...sel.options].some(o => o.value === want)) sel.value = want;
+  const rw = $('vlMacRateWrap');
+  if (rw) rw.style.display = say ? '' : 'none';
+}
+
+// `say -v ?` once, on first visit to the page — not at app boot, where nobody is
+// looking at this panel.
+async function macInit() {
+  if (macVoicesLoaded || !invoke) return;
+  macVoicesLoaded = true;
+  try {
+    sayVoices = await invoke('mac_voices');
+  } catch (e) {
+    addRow('vlMacFeed', '读取系统音色失败: ' + e, 'error');
+  }
+  fillMacVoices();
+}
+
+// Cache key over everything that changes the audio. FNV-1a in two 32-bit halves:
+// a collision would play the wrong cached line, so 64 bits, not 32.
+function macKey(engine, voice, seed, text) {
+  const s = engine + '|' + voice + '|' + seed + '|' + text;
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b) >>> 0;
+  }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+}
+
+// Persistence rides the one config file (state.js getCfg/setCfg) — same rule as
+// everything else here: no localStorage second source of truth.
+const MAC_FIELDS = { vlMacEngine: 'macEngine', vlMacVol: 'macVolume',
+                     vlMacRate: 'macRate', vlMacGap: 'macGap',
+                     vlMacScript: 'macScript' };
+for (const [id, key] of Object.entries(MAC_FIELDS)) {
+  const el = $(id);
+  if (!el) continue;
+  const saved = getCfg(key, null);
+  if (saved !== null && saved !== undefined) el.value = saved;
+  el.addEventListener('change', () => setCfg(key, el.value));
+}
+$('vlMacLoop') && ($('vlMacLoop').checked = !!getCfg('macLoop', false));
+$('vlMacLoop') && ($('vlMacLoop').onchange = e => setCfg('macLoop', e.target.checked));
+// The voice is remembered per engine — say's names and edge's names are
+// different namespaces, and one shared slot would keep clobbering the other.
+$('vlMacVoice') && ($('vlMacVoice').onchange = () =>
+  setCfg(macEngine() === 'say' ? 'macVoiceSay' : 'macVoice', $('vlMacVoice').value));
+$('vlMacEngine') && ($('vlMacEngine').addEventListener('change', fillMacVoices));
+$('vlMacBtn') && ($('vlMacBtn').onclick = macRun);
+$('vlMacStop') && ($('vlMacStop').onclick = macStop);
+$('vlMacClear') && ($('vlMacClear').onclick = () => { $('vlMacFeed').innerHTML = ''; });
+// The built-in script lives in index.html's textarea, so the default IS the
+// markup — keep a copy at load time rather than duplicating it here, or the two
+// drift apart the first time one of them is edited.
+const MAC_DEFAULT_SCRIPT = ($('vlMacScript') && $('vlMacScript').defaultValue) || '';
+$('vlMacReset') && ($('vlMacReset').onclick = () => {
+  const el = $('vlMacScript');
+  if (!el) return;
+  el.value = MAC_DEFAULT_SCRIPT;
+  setCfg('macScript', el.value);
+  addRow('vlMacFeed', '已恢复默认脚本(14 句调参语料)', 'ask');
+});
+paintMacBtns();

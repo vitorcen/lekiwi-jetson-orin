@@ -357,6 +357,20 @@
         </label>
         <span class="tip">VAD 切段喂上面二级选的离线引擎。改动<b>临时</b>,「保存」写入 config。</span>
       </div>
+      <!-- 电脑 ASR:二级模型选到「电脑 ASR」才出现 —— 位置不另设开关,那会变成两个
+           控件描述同一件事。地址可以是任何 OpenAI 形状的 /v1/audio/transcriptions;
+           下载/启停伺候的是本机 scripts/mac_asr_server.py。 -->
+      <div class="watchrow" id="vlRemoteRow" style="display:none">
+        <label class="ivlabel" title="机器人把每段语音 POST 到这里(OpenAI 形状 /v1/audio/transcriptions)。留空=没配,切过去会直接报错,不会装死。">地址
+          <input type="text" id="vlRemoteUrl" placeholder="http://192.168.x.x:8094" style="width:15em">
+        </label>
+        <label class="ivlabel" title="Hugging Face 仓库 id。下载到默认缓存 ~/.cache/huggingface/hub($HF_HOME 覆盖)。">模型
+          <input type="text" id="vlRemoteModel" style="width:19em">
+        </label>
+        <button id="vlRemoteDl" class="minibtn" title="把权重下载到本机 HF 缓存(约 3GB,首次要几分钟)">下载模型</button>
+        <button id="vlRemoteSrv" class="minibtn" title="在这台 Mac 上起/停 scripts/mac_asr_server.py(uv 自动装依赖)">启动服务</button>
+        <span class="tip" id="vlRemoteStat">状态 —</span>
+      </div>
       <!-- 流式模式参数(一级=流式 时显示;默认 VAD 模式,先隐藏) -->
       <div class="watchrow" id="vlStreamRow" style="display:none">
         <label class="ivlabel" title="端点静音(秒):停顿这么久判为一句结束。小=收句快易切断,大=稳但慢。默认1.2">端点静音
@@ -373,6 +387,10 @@
       <div id="vlAsrFeed"></div>
     </section>
 
+    <!-- 右列:两个「让它出声」的台子叠在一起。必须是一个网格子项 —— 否则
+         第三个 panel 被自动排到第二行,行高由左边那个会长高的转写台决定,
+         电脑播报就被推到屏幕下方去了。 -->
+    <div class="vlcol">
     <!-- TTS 试听台 -->
     <section class="panel">
       <h2>TTS 试听台 <span class="en">TTS audition</span></h2>
@@ -398,6 +416,9 @@
       <div class="askrow">
         <input id="vlTtsText" type="text" placeholder="输入要试听的文本…回车即播">
       </div>
+      <!-- edge 熔断提示:板子连不上微软的语音服务时,edge 会静默回落 Melo —— 于是
+           换哪个 edge 音色听起来都一样。/health 早就报了 edge_breaker,以前没人画。 -->
+      <span class="tip vlwarn" id="vlTtsWarn" style="display:none"></span>
       <span class="tip">改引擎/音色为<b>临时覆盖</b>(不落盘,退出调试自动还原);「保存」写入所有大脑搭配,Agent 对话即刻生效。</span>
       <!-- 操作行:与 ASR 台同布局,按钮统一在最下面 -->
       <div class="watchrow">
@@ -406,6 +427,69 @@
       </div>
       <div id="vlTtsFeed"></div>
     </section>
+
+    <!-- 电脑播报台:这台 Mac 自己出声,给机器人当固定声源(测 VAD/ASR/回声)。
+         与 voice-daemon 无关,端侧离线也能用 —— 它就是「另一个人说话」。 -->
+    <section class="panel" id="vlMacPanel">
+      <h2>电脑播报 <span class="en">Mac speaker</span></h2>
+      <div class="watchrow">
+        <label class="ivlabel" title="edge=微软在线神经音色,最自然,要联网(Mac 有网,板子没有)。&#10;f5=F5-TTS 零样本克隆,离线跑在本机 GPU,克隆的就是上面选的 edge 音色 —— 首次会先联网生成一段参考录音,之后不再需要网。&#10;say=macOS 自带,零依赖,断网也能用,自然度最低。">引擎
+          <select id="vlMacEngine">
+            <option value="edge">edge(在线,最自然)</option>
+            <option value="f5">f5(离线克隆 edge)</option>
+            <option value="say">say(系统自带)</option>
+          </select>
+        </label>
+        <label class="ivlabel" title="每行没写音色时用它。edge/f5 用同一套音色名(f5 克隆的就是那个 edge 音色);say 用 macOS 已装语音(系统设置→辅助功能→朗读内容→系统声音)">默认音色
+          <select id="vlMacVoice" class="voicesel"></select>
+        </label>
+        <!-- type=text + inputmode:同 VAD 参数,type=number 会吞掉中文输入法打出的
+             全角「。」,把 0.5 变成空值。解析在 JS 里做,顺手把全角点换回来。 -->
+        <label class="ivlabel" title="逐句音量缩放(say 的 [[volm]]),0-100%。不改系统音量,所以退出/崩溃都不会把电脑留在小音量">音量
+          <input type="text" inputmode="decimal" id="vlMacVol" value="70">%
+        </label>
+        <!-- 语速只有 say 认;edge/f5 的节奏由音色/参考录音决定,留着会是个骗人的旋钮 -->
+        <label class="ivlabel" id="vlMacRateWrap" style="display:none" title="字/分钟。留 0 = 该音色的默认语速。仅 say 引擎有效">语速
+          <input type="text" inputmode="decimal" id="vlMacRate" value="0">
+        </label>
+        <label class="ivlabel" title="每行没写停顿时用它:念完等这么久再念下一行">默认停顿
+          <input type="text" inputmode="decimal" id="vlMacGap" value="2">s
+        </label>
+      </div>
+      <!-- 默认脚本 = VAD/ASR 调参用的那 14 句(docs/vad-asr-tuning.html):真实指令、
+           停顿 0.8~10s 故意不等距(等距会让「切得准」和「刚好每 3 秒切一刀」分不开)。
+           音色由上面的下拉决定,不写在行里 —— say 和 edge 的音色名不是一套,写进脚本
+           就会出现「换个引擎整份脚本报错」。textarea 内容必须顶格,缩进会进正文。 -->
+      <textarea id="vlMacScript" class="macscript" rows="12" spellcheck="false"
+                placeholder="每行一句:文本 | 停顿秒(停顿可省,用上面的默认值)"># 电脑出声给机器人听:测 VAD 切段和 ASR 识别率。停顿故意长短不一。
+停 | 1
+后退 | 0.8
+左转九十度 | 3
+往前走一点点 | 1.5
+帮我看一下桌子上面放着什么 | 5
+现在电池还有多少电 | 2
+好的 | 7
+你看看前面有什么东西 | 3
+回到原来的位置然后停下来 | 4
+不对 | 1.2
+再来一次 | 10
+摄像头看到的画面描述一下 | 2.5
+停下来别动了 | 6
+谢谢 | 8</textarea>
+      <span class="tip">这台 Mac 出声,<b>完全不经过机器人</b>。格式 <code>文本 | 停顿秒</code>,停顿省略就用上面的默认值;<b>音色只在上面的下拉里选</b>。脚本和参数随 GUI 配置落盘。<br>
+        edge/f5 会在开播前<b>整份预生成</b>(f5 每句约 1.4–2.6 秒),否则合成耗时会混进句间停顿 —— 而停顿正是测 VAD 时的被测变量。改一行只重生成那一行。</span>
+      <div class="watchrow">
+        <button id="vlMacBtn" class="primary">开始播报</button>
+        <button id="vlMacStop" class="minibtn" disabled>停止</button>
+        <button id="vlMacClear" class="minibtn" title="清空下方播报记录(仅本机显示)">清空</button>
+        <button id="vlMacReset" class="minibtn" title="把脚本框恢复成内置的 14 句调参语料(会覆盖你现在的内容)">默认脚本</button>
+        <label class="svcauto" title="念完最后一行回到第一行,一直循环到按停止">
+          <input type="checkbox" id="vlMacLoop"> 循环
+        </label>
+      </div>
+      <div id="vlMacFeed"></div>
+    </section>
+    </div>
   </div>
 </div>
 
@@ -439,6 +523,11 @@
           <button id="aIntBtn" disabled>打断</button>
           <label class="svcauto" title="按「开始对话」后麦克风常开的时长，期间免按键连续对话；每轮对话自动续期，到期自动关麦。">
             常开 <input id="aWin" type="number" min="1" max="60" value="30" style="width:52px"> 分钟
+          </label>
+          <!-- 开机默认对话:板端 voice-daemon 启动时替你按「开始对话」。只写盘、只在
+               下次启动生效 —— 当场开麦会变成第二个开关麦入口,和上面的按钮打架。 -->
+          <label class="svcauto" title="板端语音服务启动时自动进入常开对话(等于替你按「开始对话」)。改动立即落盘,下次启动生效,不影响当前会话。">
+            <input type="checkbox" id="aAutoListen" disabled> 开机默认对话
           </label>
           <button id="voClear" class="minibtn" title="开一段新对话:清空本机记录(记住位置,重开 GUI 也不会回来),同时让大脑忘掉之前的会话历史。板端事件环不删。">新对话</button>
         </div>

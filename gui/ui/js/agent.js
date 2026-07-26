@@ -220,6 +220,12 @@ function paintState() {
 // Populated from GET /config. The endpoint may not exist yet (added by the
 // daemon P0b work) — any failure just leaves the strip in its neutral state.
 
+// "remote" is an engine id, not a place a reader can picture — the strip and the
+// chain line both describe WHERE the turn goes, so spell it out there.
+function asrDesc(asr) {
+  return asr === 'remote' ? '电脑ASR(局域网)' : (asr || '—');
+}
+
 function ttsDesc(tts) {
   if (!tts) return '—';
   if (typeof tts === 'string') return tts;
@@ -268,7 +274,7 @@ function renderBrain(cfg) {
   const pairEl = $('aBrainPair');
   if (pairEl) {
     const pair = cur && cur.pair;
-    const asr = (pair && pair.asr) || '—';
+    const asr = asrDesc(pair && pair.asr);
     pairEl.textContent = kind === 'omni'
       ? `搭配 ASR ${asr}(仅转写) · 原生语音`
       : (pair ? `搭配 ASR ${asr} · TTS ${ttsDesc(pair.tts)}` : '搭配 —');
@@ -276,13 +282,21 @@ function renderBrain(cfg) {
   const chain = $('aChain');
   if (chain) {
     const pair = cur && cur.pair;
-    const asr = (pair && pair.asr) || '—';
+    const asr = asrDesc(pair && pair.asr);
     chain.textContent = kind === 'omni'
       ? `麦克风 → ${asr} 识别(仅显示文字) → omni 大脑(局域网，听原始音频) → 模型原生语音`
         + `（voice-daemon，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。`
       : `麦克风 → ${asr} 识别 → Hermes(${(cur && cur.model) || brain.preset || '—'})`
         + ` → ${ttsDesc(pair && pair.tts)} 播报`
         + `（voice-daemon，端口 8092，Bearer 鉴权）。半双工：播报中闭麦，可随时打断。`;
+  }
+  // 开机默认对话 — a plain persisted flag, mirrored from `desired` so a config
+  // hand-edit or another GUI shows up here. Default true matches the daemon's own
+  // `config.get("auto_listen", True)`; disagreeing would paint a lie.
+  const al = $('aAutoListen');
+  if (al && !al.dataset.busy) {
+    al.checked = desired.auto_listen !== false;
+    al.disabled = !online;
   }
   const drift = $('aBrainDrift');
   if (drift) {
@@ -291,6 +305,24 @@ function renderBrain(cfg) {
     drift.style.display = has ? '' : 'none';
   }
 }
+
+$('aAutoListen') && ($('aAutoListen').onchange = async e => {
+  const cb = e.target;
+  const want = cb.checked;
+  cb.dataset.busy = '1';       // keep the poll from repainting a stale value
+  cb.disabled = true;
+  try {
+    await invoke('voice_post', { ip: curIp(), path: '/config',
+                                 body: JSON.stringify({ axis: 'auto_listen', value: want }) });
+    addRow(`开机默认对话已${want ? '开启' : '关闭'}(下次启动语音服务生效)`, 'sys');
+  } catch (err) {
+    cb.checked = !want;
+    addRow('开机默认对话设置失败: ' + err, 'error');
+  } finally {
+    delete cb.dataset.busy;
+    cb.disabled = false;
+  }
+});
 
 async function refreshBrain() {
   if (!invoke) return;
@@ -445,6 +477,7 @@ function goOffline() {
   if (feedTimer) { clearInterval(feedTimer); feedTimer = null; }
   if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
   vadSt = null; paintVad();
+  const al = $('aAutoListen'); if (al) al.disabled = true;
   paintState();
 }
 

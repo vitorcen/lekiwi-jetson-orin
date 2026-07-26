@@ -365,6 +365,10 @@ class Daemon:
         # 切换 = 载新→卸旧(见 _apply_asr)。self.asr 始终指向当前运行宿主。
         self.asr_hosts = {n: cls() for n, cls in vengines.REGISTRY["asr"].items()}
         self.asr = self.asr_hosts["sensevoice"]  # 下方按 pair 重定向
+        # remote 宿主没有模型,只有地址 —— 建好就把 config 里的地址灌进去,免得
+        # "已选电脑 ASR 但没配地址" 这种状态只能在第一次说话时才暴露。
+        _rc = vconfig.current_remote_asr(self.config)
+        self.asr_hosts["remote"].configure(_rc["url"], _rc["model"])
         self.melo = vengines.MeloTts()           # 本地 Melo(edge 兜底也用它,常驻)
         self.matcha = vengines.MatchaTts()       # 本地 Matcha(实时,按需载/卸)
         self.vad = None                          # VadEngine(daemon 所有,可切换)
@@ -1785,7 +1789,16 @@ class Daemon:
         desc = self.vad_desc
 
         def _load():
-            self.asr.load()                          # SenseVoice(引擎宿主)
+            try:
+                self.asr.load()                      # 当前 pair 的 ASR 宿主
+            except Exception as exc:                 # noqa: BLE001
+                # 只有 remote 会因为「另一台机器没开」而载不上。那不该让整个 daemon
+                # 起不来 —— 麦克风、VAD、播报都还是好的,等 Mac 醒了下一句就通。
+                # 本地引擎载不上是真故障(模型缺/损坏),照样抛。
+                if self.asr_engine != "remote":
+                    raise
+                print(f"[voice-daemon] remote asr not reachable at boot: {exc}",
+                      flush=True)
             self.melo.load()                         # Melo(含预热,edge 兜底常驻)
             if self.tts_engine == "matcha":          # pair 选了 matcha 才载(按需)
                 self.matcha.load()
@@ -2070,6 +2083,24 @@ class Daemon:
             except OSError as exc:
                 self.emit("error", message=f"config save failed: {exc}")
         return gain
+
+    async def apply_remote_asr(self) -> dict:
+        """把 config.remote_asr 灌进 remote 宿主;它正在当值就顺手复探一次 —— 地址
+        打错要在保存时当场报,而不是等下次说话时才让机器人装聋。不走切换执行器:
+        改地址不是换引擎。"""
+        rc = vconfig.current_remote_asr(self.config)
+        host = self.asr_hosts.get("remote")
+        if host is None:                                  # REGISTRY 被裁过
+            return {"error": "remote asr host missing"}
+        host.configure(rc["url"], rc["model"])
+        out = {"url": rc["url"], "model": rc["model"]}
+        if self.asr_engine == "remote" and rc["url"]:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(self._asr_pool, host.load)
+            except Exception as exc:                      # noqa: BLE001
+                out["error"] = str(exc)
+        return out
 
     async def restore_frontend(self) -> None:
         """退出 DEBUG:把音频前端(VAD + 增益)从 ephemeral 改动还原回 config。VAD 引擎/

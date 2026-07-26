@@ -41,6 +41,10 @@ DEFAULT_CONFIG = {
     "vad": {"engine": "silero", "threshold": 0.3,
             "min_speech_s": 0.1, "min_silence_s": 0.4, "pre_roll_s": 0.6},
     "audio": {"gain_db": 0},
+    # Where the "remote" ASR engine sends segments. Empty url = not configured;
+    # selecting the remote engine then fails loudly instead of silently doing
+    # nothing. Kept out of the preset pair on purpose — see REMOTE_ASR_ENGINE.
+    "remote_asr": {"url": "", "model": "mlx-community/whisper-large-v3-mlx"},
     # DEBUG-only streaming recognition mode (免VAD, 对比验证). enabled 时调试转写台走
     # 流式 OnlineRecognizer 连续解码+端点检测,不影响对话链路(对话恒走 VAD+离线)。
     "stream": {"enabled": False, "model": "x-asr-zh-en", "endpoint_silence_s": 1.2},
@@ -77,7 +81,13 @@ DEFAULT_CONFIG = {
 # CER 0.036 and is the only one that hears 「停」. paraformer matches its exact
 # count 13x faster but loses that same 「停」. funasr, previously listed first, is
 # slower than paraformer AND less accurate than qwen3. whisper is not a choice.
-ASR_ENGINES = ["qwen3", "paraformer", "funasr", "sensevoice", "whisper"]
+ASR_ENGINES = ["qwen3", "paraformer", "funasr", "sensevoice", "whisper", "remote"]
+# "remote" is the odd one out: not a model on this board but an address on the LAN.
+# It sits in the same axis because from the turn's point of view it IS the ASR —
+# same transcribe(samples)->text contract, same switch path, same drift accounting.
+# Its endpoint lives in the top-level `remote_asr` block, NOT in the pair: a URL is
+# deployment (like the board IP), and moving it must not take the engine-switch lock.
+REMOTE_ASR_ENGINE = "remote"
 # matcha first/default (realtime offline); edge online quality; melo resident fallback
 TTS_ENGINES = ["matcha", "edge", "melo"]
 # Ranked by the 2026-07-25 sweep (480 configs, three engines, one fixed recording:
@@ -114,6 +124,10 @@ ASR_META = {
                    "params_b": 0.234, "disk_mb": 229},
     "whisper": {"id": "whisper", "label": "Whisper large-v3-turbo (6/14,淘汰)",
                 "params_b": 0.809, "disk_mb": 989},
+    # No params_b/disk_mb on purpose: the size is whatever the other machine loaded,
+    # and this file has never guessed a number it did not measure.
+    "remote": {"id": "remote", "label": "电脑 ASR (局域网大模型,端侧不占内存)",
+               "params_b": None, "disk_mb": None},
 }
 # Order stays offline-first: matcha leads because it is the only local engine that
 # runs realtime, not because it sounds best. It does not — fed back through
@@ -261,6 +275,7 @@ def apply_axis(config, axis, value):
       axis 'asr'         -> every preset's pair.asr (str)
       axis 'tts'         -> every preset's pair.tts (dict)
       axis 'vision_speak'-> top-level bool
+      axis 'auto_listen' -> top-level bool (boot behaviour only)
       axis 'brain'       -> top-level brain dict (P2)
     """
     cfg = copy.deepcopy(config)
@@ -280,6 +295,11 @@ def apply_axis(config, axis, value):
             pair[axis] = copy.deepcopy(value)
     elif axis == "vision_speak":
         cfg["vision_speak"] = bool(value)
+    elif axis == "auto_listen":
+        # Boot-time only: read once in main() to decide LISTENING vs IDLE. Toggling
+        # it never touches the running session — that would be a second, hidden way
+        # to open/close the mic, competing with the one button that owns it.
+        cfg["auto_listen"] = bool(value)
     elif axis == "vision_speak_limit":
         try:
             cfg["vision_speak_limit"] = max(1, int(value))
@@ -296,6 +316,8 @@ def apply_axis(config, axis, value):
     elif axis == "audio":
         gain = value.get("gain_db") if isinstance(value, dict) else value
         cfg["audio"] = {"gain_db": clamp_gain(gain)}
+    elif axis == "remote_asr":
+        cfg["remote_asr"] = normalize_remote_asr(value)
     elif axis == "stream":
         cfg["stream"] = normalize_stream(value)
     else:
@@ -351,6 +373,30 @@ def normalize_stream(value):
         out["endpoint_silence_s"] = _clamp(d["endpoint_silence_s"], STREAM_SILENCE_RANGE[0],
                                            STREAM_SILENCE_RANGE[1], out["endpoint_silence_s"])
     return out
+
+
+def normalize_remote_asr(value):
+    """Whole-axis remote_asr value: url + model, both trimmed. An http(s) scheme is
+    added when the operator typed a bare host:port (they will), a trailing slash is
+    dropped, and anything unparseable becomes "" — i.e. "not configured", which the
+    engine refuses loudly. Never raises: a bad hand-edit must not brick the daemon."""
+    d = value if isinstance(value, dict) else {"url": value}
+    out = copy.deepcopy(DEFAULT_CONFIG["remote_asr"])
+    url = str(d.get("url") or "").strip().rstrip("/")
+    if url and "://" not in url:
+        url = "http://" + url
+    if url and not url.startswith(("http://", "https://")):
+        url = ""
+    out["url"] = url
+    model = str(d.get("model") or "").strip()
+    if model:
+        out["model"] = model
+    return out
+
+
+def current_remote_asr(config):
+    """The persistent remote_asr block with defaults filled + guards applied."""
+    return normalize_remote_asr(config.get("remote_asr"))
 
 
 def current_stream(config):

@@ -1021,6 +1021,394 @@ async fn voice_service(ip: String, action: String) -> Result<String, String> {
     .map_err(|e| format!("voice_service task failed: {e}"))?
 }
 
+// ---------------------------------------------------------------- mac speaker
+// The Voice page's "电脑播报" bench: THIS Mac speaks a script through its own
+// speakers while the robot listens. Deliberately does not touch voice-daemon —
+// the whole point is to have a sound source the board did not produce (VAD/ASR
+// field tuning, echo tests, wake-word drills).
+//
+// Volume rides in `say`'s inline [[volm x]] command, not the system output
+// volume: a global mute/restore pair is one crash away from leaving the user's
+// Mac at 20%, and there is no correct place to restore it from.
+
+/// PID of the `say` child currently speaking, so 停止 can cut a long line.
+#[derive(Default)]
+struct MacSay {
+    pid: std::sync::Arc<std::sync::Mutex<Option<u32>>>,
+}
+
+/// Installed `say` voices as "name\tlocale" rows, Chinese ones first (this is a
+/// Mandarin robot; en_US voices are still listed, just not in the way).
+#[tauri::command]
+async fn mac_voices() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let out = std::process::Command::new("say")
+            .args(["-v", "?"])
+            .output()
+            .map_err(|e| format!("say unavailable: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let (mut zh, mut other) = (Vec::new(), Vec::new());
+        for line in text.lines() {
+            // "Tingting            zh_CN    # 你好！我叫婷婷。" — the name itself
+            // can contain spaces and parens ("Eddy (中文（中国大陆）)"), so split
+            // at the LAST whitespace run before the locale, not the first.
+            let head = line.split('#').next().unwrap_or("").trim_end();
+            let Some(cut) = head.rfind(char::is_whitespace) else { continue };
+            let (name, locale) = (head[..cut].trim(), head[cut..].trim());
+            if name.is_empty() || locale.is_empty() {
+                continue;
+            }
+            let row = format!("{name}\t{locale}");
+            if locale.starts_with("zh") { zh.push(row) } else { other.push(row) }
+        }
+        zh.append(&mut other);
+        Ok(zh)
+    })
+    .await
+    .map_err(|e| format!("mac_voices task failed: {e}"))?
+}
+
+/// Speak one line and block until it finishes. voice/rate empty-or-0 = system
+/// default. Killed-by-signal is a deliberate 停止, not an error.
+#[tauri::command]
+async fn mac_say(
+    text: String,
+    voice: String,
+    volume: u8,
+    rate: u32,
+    state: State<'_, MacSay>,
+) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let vol = f32::from(volume.min(100)) / 100.0;
+    let slot = state.pid.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("say");
+        let voice = voice.trim();
+        if !voice.is_empty() {
+            cmd.args(["-v", voice]);
+        }
+        if rate > 0 {
+            cmd.args(["-r", &rate.to_string()]);
+        }
+        // "[[" in the payload would be read as another embedded command; break it.
+        cmd.arg(format!("[[volm {vol:.3}]]{}", text.replace("[[", "[ [")));
+        let mut child = cmd.spawn().map_err(|e| format!("say failed: {e}"))?;
+        *slot.lock().unwrap() = Some(child.id());
+        let st = child.wait();
+        *slot.lock().unwrap() = None;
+        match st {
+            // code() is None when a signal ended it — that is our own 停止.
+            Ok(s) if s.success() || s.code().is_none() => Ok(()),
+            Ok(s) => Err(format!("say exited {s}")),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("mac_say task failed: {e}"))?
+}
+
+/// Cut whatever is speaking right now (`say`, `afplay`, or a renderer). No-op
+/// when nothing is running.
+#[tauri::command]
+fn mac_say_stop(state: State<'_, MacSay>) -> Result<(), String> {
+    let pid = *state.pid.lock().unwrap();
+    if let Some(p) = pid {
+        let _ = std::process::Command::new("kill")
+            .arg(p.to_string())
+            .status();
+    }
+    Ok(())
+}
+
+/// Render a whole script to files in one helper process (see
+/// scripts/mac_tts_render.py for why it is not one call per line). `items` is
+/// [{text, out}] with `out` already cache-keyed by the frontend; the helper only
+/// fills the missing ones, so editing one line re-renders one line.
+#[tauri::command]
+async fn mac_tts_render(
+    engine: String,
+    voice: String,
+    seed: u32,
+    items: serde_json::Value,
+    state: State<'_, MacSay>,
+) -> Result<String, String> {
+    // Each engine pulls a different dependency; declaring both would make the
+    // network-only path drag in a 1.4GB model resolver.
+    // f5 needs edge-tts too: its "voice" is a reference clip, and the reference is
+    // minted with edge on first use. numpy is for the silence trim.
+    let deps = match engine.as_str() {
+        "edge" => "--with edge-tts --with numpy",
+        "f5" => "--with f5-tts-mlx --with edge-tts --with numpy",
+        other => return Err(format!("bad engine: {other}")),
+    };
+    let script = token_dir().join("scripts/mac_tts_render.py");
+    if !script.exists() {
+        return Err(format!("找不到 {}", script.display()));
+    }
+    let cache = tts_cache_dir();
+    std::fs::create_dir_all(&cache).map_err(|e| format!("cache dir: {e}"))?;
+    // The frontend sends [{text, key}]; the cache path is derived here so only
+    // one side owns the layout, and the paths go back so it can play them.
+    let src = items.as_array().ok_or("items must be an array")?;
+    let mut job_items = Vec::with_capacity(src.len());
+    let mut paths = Vec::with_capacity(src.len());
+    for it in src {
+        let text = it.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let key = it.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        if text.is_empty() || key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(format!("bad item: {it}"));
+        }
+        let out = cache.join(format!("{key}.wav"));
+        paths.push(out.to_string_lossy().to_string());
+        job_items.push(serde_json::json!({"text": text, "out": out.to_string_lossy()}));
+    }
+    let job = serde_json::json!({
+        "engine": engine, "voice": voice, "seed": seed,
+        "cache_dir": cache.to_string_lossy(), "items": job_items,
+    })
+    .to_string();
+    let slot = state.pid.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = std::process::Command::new("sh")
+            .args(["-lc", &sh_env(&format!(
+                "exec uv run --quiet {deps} '{}'", script.display()))])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn failed: {e}"))?;
+        *slot.lock().unwrap() = Some(child.id());
+        child.stdin.take().unwrap().write_all(job.as_bytes())
+            .map_err(|e| format!("write job: {e}"))?;
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        *slot.lock().unwrap() = None;
+        if !out.status.success() {
+            // The helper's traceback is the only useful thing here; keep the tail.
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(err.lines().rev().take(3).collect::<Vec<_>>().join(" / "));
+        }
+        let mut res: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+                .unwrap_or_else(|_| serde_json::json!({"ok": true}));
+        res["paths"] = serde_json::json!(paths);
+        Ok(res.to_string())
+    })
+    .await
+    .map_err(|e| format!("mac_tts_render task failed: {e}"))?
+}
+
+/// Where rendered lines and f5 reference clips live. Keyed by content upstream,
+/// so this is a pure cache — deleting it costs a re-render, nothing else.
+fn tts_cache_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".cache/lekiwi-console/tts")
+}
+
+/// Play one rendered file and block until it finishes. `volume` is a percentage;
+/// afplay's -v is a linear gain where 1.0 is unity.
+#[tauri::command]
+async fn mac_play(path: String, volume: u8, state: State<'_, MacSay>) -> Result<(), String> {
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("找不到音频 {path}"));
+    }
+    let vol = f32::from(volume.min(100)) / 100.0;
+    let slot = state.pid.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = std::process::Command::new("afplay")
+            .args(["-v", &format!("{vol:.3}"), &path])
+            .spawn()
+            .map_err(|e| format!("afplay failed: {e}"))?;
+        *slot.lock().unwrap() = Some(child.id());
+        let st = child.wait();
+        *slot.lock().unwrap() = None;
+        match st {
+            Ok(s) if s.success() || s.code().is_none() => Ok(()),   // signal = 停止
+            Ok(s) => Err(format!("afplay exited {s}")),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("mac_play task failed: {e}"))?
+}
+
+// ------------------------------------------------------------- mac ASR server
+// "电脑 ASR": a recognizer far bigger than the board can hold, running on THIS
+// Mac and reached over the LAN (voice/voice_engines.py RemoteAsr ->
+// scripts/mac_asr_server.py). The GUI happens to run on the same Mac, so it owns
+// the weight download and the process lifecycle — otherwise every use of the
+// feature starts with "open a terminal".
+//
+// Every shell-out goes through `sh -lc` on purpose: a GUI app inherits launchd's
+// minimal PATH, which has neither `uv` nor `hf` in it. A login shell reads the
+// user's profile and finds them where they actually are.
+
+const MAC_ASR_PORT: u16 = 8094;
+
+#[derive(Default)]
+struct MacAsr {
+    child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+}
+
+/// Run a shell snippet with the tool dirs actually on PATH.
+///
+/// `sh -lc` alone is NOT enough and this was measured, not assumed: with a clean
+/// environment (what launchd hands a .app) a login sh reads /etc/profile +
+/// ~/.profile and ends up without ~/.local/bin, so `uv` and `hf` are both
+/// missing. The user's PATH lives in ~/.zshrc, which a login *sh* never reads.
+/// So name the standard install dirs explicitly and keep the login shell for
+/// everything else it does give us.
+fn sh_env(script: &str) -> String {
+    format!(
+        "export PATH=\"$HOME/.local/bin:$HOME/.homebrew/bin:/opt/homebrew/bin:\
+         /usr/local/bin:$PATH\"; {script}"
+    )
+}
+
+fn login_sh(script: &str) -> std::io::Result<std::process::Output> {
+    std::process::Command::new("sh")
+        .args(["-lc", &sh_env(script)])
+        .output()
+}
+
+/// Bytes already on disk for a HF repo id, in the normal hub cache.
+fn hf_cached_bytes(repo: &str) -> u64 {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let hub = std::env::var("HF_HUB_CACHE")
+        .or_else(|_| std::env::var("HF_HOME").map(|h| format!("{h}/hub")))
+        .unwrap_or_else(|_| format!("{home}/.cache/huggingface/hub"));
+    let dir = format!("{hub}/models--{}", repo.replace('/', "--"));
+    fn walk(p: &std::path::Path) -> u64 {
+        let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+        rd.flatten()
+            .map(|e| match e.file_type() {
+                // symlinks are the hub's norm (snapshots -> blobs); follow them
+                // for size or every cached repo reads as 0 bytes.
+                Ok(t) if t.is_dir() => walk(&e.path()),
+                _ => std::fs::metadata(e.path()).map(|m| m.len()).unwrap_or(0),
+            })
+            .sum()
+    }
+    walk(std::path::Path::new(&dir))
+}
+
+/// {cached_mb, running, port, lan_ip} — everything the GUI needs to paint the
+/// 电脑 ASR block without guessing.
+#[tauri::command]
+async fn mac_asr_status(model: String, state: State<'_, MacAsr>) -> Result<String, String> {
+    let mine = {
+        let mut slot = state.child.lock().unwrap();
+        match slot.as_mut().map(|c| c.try_wait()) {
+            Some(Ok(None)) => true,          // still running
+            Some(_) => { *slot = None; false }
+            None => false,
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        // A server someone started in a terminal counts as running too — the port
+        // is the truth, our child handle is only how we can stop it.
+        let listening = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], MAC_ASR_PORT)),
+            Duration::from_millis(300),
+        )
+        .is_ok();
+        let lan_ip = login_sh("ipconfig getifaddr en0 || ipconfig getifaddr en1")
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        Ok(serde_json::json!({
+            "cached_mb": hf_cached_bytes(&model) / (1024 * 1024),
+            "running": listening,
+            "owned": mine,
+            "port": MAC_ASR_PORT,
+            "lan_ip": lan_ip,
+        })
+        .to_string())
+    })
+    .await
+    .map_err(|e| format!("mac_asr_status task failed: {e}"))?
+}
+
+/// Fetch the weights into the normal Hugging Face cache. Blocking on purpose:
+/// the frontend disables the button and shows 下载中…, and a fake progress bar
+/// would be worse than an honest wait.
+#[tauri::command]
+async fn mac_asr_download(model: String) -> Result<String, String> {
+    if model.trim().is_empty() || model.contains('\'') {
+        return Err(format!("bad model id: {model}"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = login_sh(&format!("hf download '{model}'"))
+            .map_err(|e| format!("spawn failed: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(err.lines().rev().take(3).collect::<Vec<_>>().join(" / "))
+        }
+    })
+    .await
+    .map_err(|e| format!("mac_asr_download task failed: {e}"))?
+}
+
+/// start | stop the local ASR server. start is detached-but-owned: we keep the
+/// Child so stop actually works, and uv resolves the script's PEP 723 deps.
+#[tauri::command]
+async fn mac_asr_serve(
+    action: String,
+    model: String,
+    state: State<'_, MacAsr>,
+) -> Result<String, String> {
+    let slot = state.child.clone();
+    match action.as_str() {
+        "stop" => {
+            let mut g = slot.lock().unwrap();
+            if let Some(mut c) = g.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+                return Ok("stopped".into());
+            }
+            // Not ours (started from a terminal) — say so instead of lying.
+            Err("本进程没有启动它,请在启动它的终端里停止".into())
+        }
+        "start" => {
+            if model.trim().is_empty() || model.contains('\'') {
+                return Err(format!("bad model id: {model}"));
+            }
+            {
+                let mut g = slot.lock().unwrap();
+                if let Some(c) = g.as_mut() {
+                    if matches!(c.try_wait(), Ok(None)) {
+                        return Ok("already running".into());
+                    }
+                    *g = None;
+                }
+            }
+            let repo = token_dir();
+            let script = repo.join("scripts/mac_asr_server.py");
+            if !script.exists() {
+                return Err(format!("找不到 {}", script.display()));
+            }
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+            let log = format!("{home}/.config/lekiwi-console/mac-asr.log");
+            let cmd = format!(
+                "cd '{}' && exec uv run --quiet scripts/mac_asr_server.py \
+                 --port {MAC_ASR_PORT} --model '{model}' >> '{log}' 2>&1",
+                repo.display()
+            );
+            let child = std::process::Command::new("sh")
+                .args(["-lc", &sh_env(&cmd)])
+                .spawn()
+                .map_err(|e| format!("spawn failed: {e}"))?;
+            *slot.lock().unwrap() = Some(child);
+            Ok(log)
+        }
+        other => Err(format!("bad action: {other}")),
+    }
+}
+
 fn main() {
     let tx = spawn_worker();
     let zmq_tx_for_leader = tx.clone();
@@ -1030,6 +1418,8 @@ fn main() {
             tx,
             endpoint: Mutex::new(None),
         })
+        .manage(MacSay::default())
+        .manage(MacAsr::default())
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -1056,6 +1446,14 @@ fn main() {
             voice_get,
             voice_post,
             voice_service,
+            mac_voices,
+            mac_say,
+            mac_say_stop,
+            mac_tts_render,
+            mac_play,
+            mac_asr_status,
+            mac_asr_download,
+            mac_asr_serve,
         ])
         .setup(move |app| {
             app.manage(spawn_leader(app.handle().clone(), zmq_tx_for_leader));

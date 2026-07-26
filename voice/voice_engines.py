@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import json
 import os
 import re
+import uuid
 
 MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
@@ -469,11 +471,120 @@ class MatchaTts:
         return (pcm * 32767.0).astype(np.int16)
 
 
+def _multipart(fields, file_field, filename, blob):
+    """Minimal multipart/form-data writer (no requests dependency on the board).
+    Returns (body, content_type)."""
+    bound = "----lekiwi" + uuid.uuid4().hex
+    out = bytearray()
+    for k, v in fields.items():
+        out += (f"--{bound}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n"
+                f"{v}\r\n").encode("utf-8")
+    out += (f"--{bound}\r\nContent-Disposition: form-data; name=\"{file_field}\";"
+            f" filename=\"{filename}\"\r\nContent-Type: audio/wav\r\n\r\n").encode("utf-8")
+    out += blob + b"\r\n"
+    out += f"--{bound}--\r\n".encode("utf-8")
+    return bytes(out), f"multipart/form-data; boundary={bound}"
+
+
+class RemoteAsr:
+    """ASR that runs on another machine. transcribe() ships the segment over the LAN
+    to an OpenAI-shaped POST /v1/audio/transcriptions and returns its text.
+
+    Why: the board fits a 0.6B model, a Mac fits a 30x bigger one. The price is a
+    network round trip inside every turn and a second machine that must be up — so
+    this is a choice the operator makes, never a fallback something degrades into.
+    A dead endpoint raises; it must not return "" , because a robot that ignores you
+    and a robot that mis-heard you look identical from the outside.
+
+    Nothing is resident here, so `load()` is a reachability probe, not a model load —
+    and switching TO remote unloads whatever local engine was holding ~1GB of board
+    RAM (that is a real, measurable side benefit, not a rationalisation).
+
+    Speaks the same shape as whisper.cpp server / LM Studio / vLLM, so the endpoint
+    does not have to be scripts/mac_asr_server.py.
+    """
+
+    name = "remote"
+    DEFAULT_MODEL = "mlx-community/whisper-large-v3-mlx"
+
+    def __init__(self):
+        self.url = ""
+        self.model = self.DEFAULT_MODEL
+        # A turn already costs seconds; a hung socket must not add minutes.
+        self.timeout = float(os.environ.get("REMOTE_ASR_TIMEOUT", "20"))
+        self._off = True
+
+    def configure(self, url, model=None):
+        """Point at an endpoint. Config-driven, deliberately outside load()."""
+        url = (url or "").strip().rstrip("/")
+        self.url = url
+        self.model = (model or "").strip() or self.DEFAULT_MODEL
+
+    @property
+    def loaded(self):
+        # For a stateless engine "loaded" means CONFIGURED. Reachability is a
+        # property of this instant, not of load time — caching it gives a stuck
+        # False that never heals when the Mac wakes back up, and every turn would
+        # keep failing long after the cause was gone.
+        return bool(self.url) and not self._off
+
+    def load(self):
+        """Configure-check + one real probe. Raises on either, so an operator who
+        switches to 电脑 ASR while the Mac is asleep keeps the working local engine
+        and gets told why — no silent fallback, no half-switched state."""
+        if not self.url:
+            raise RuntimeError("remote asr: 未配置电脑 ASR 地址")
+        import numpy as np
+        # An open TCP port proves nothing about whether the peer speaks this API;
+        # 100 ms of silence is the cheapest request that does.
+        # Note the flag flips BEFORE the probe and is not rolled back: a failed
+        # probe means "the Mac is asleep right now", not "this engine is broken".
+        # Rolling it back would leave a False that never heals once it wakes.
+        self._off = False
+        self.transcribe(np.zeros(1600, dtype=np.float32))
+
+    def unload(self):
+        self._off = True
+
+    def _wav16k(self, samples):
+        import io
+        import wave
+        import numpy as np
+        pcm = np.clip(np.asarray(samples, dtype=np.float32) * 32768.0,
+                      -32768, 32767).astype("<i2")
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(pcm.tobytes())
+        return buf.getvalue()
+
+    def transcribe(self, samples):
+        import urllib.error
+        import urllib.request
+        body, ctype = _multipart(
+            {"model": self.model, "language": "zh", "response_format": "json"},
+            "file", "seg.wav", self._wav16k(samples))
+        req = urllib.request.Request(f"{self.url}/v1/audio/transcriptions",
+                                     data=body, method="POST",
+                                     headers={"Content-Type": ctype})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"remote asr {exc.code}: "
+                               f"{exc.read()[:200].decode('utf-8', 'replace')}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"remote asr unreachable ({self.url}): {exc}") from exc
+        return clean_transcript(payload.get("text") or "")
+
+
 # Metadata registry: which engines exist per axis. edge is a playback mode over the
 # shared Melo model (its fallback), so only the model-owning engines appear as hosts.
 REGISTRY = {
     "asr": {"sensevoice": OfflineAsr, "paraformer": OfflineParaformer,
             "whisper": OfflineWhisper, "qwen3": OfflineQwen3Asr,
-            "funasr": OfflineFunAsr},
+            "funasr": OfflineFunAsr, "remote": RemoteAsr},
     "tts": {"melo": MeloTts, "matcha": MatchaTts},
 }
