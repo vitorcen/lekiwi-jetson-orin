@@ -33,6 +33,24 @@ metadata:
   Tab 可见时轮询,进 Tab promote watch、离开发 idle(dead-man 同遥控 Tab)。
 - 相机 /dev/v4l/by-id/usb-CN02KX4NLG…-video-index0,MJPEG 1280x720 抓帧(ffmpeg 单帧)。
 
+## llama-server 的 prompt cache 默认 8GiB —— 在 8GB 板上,必须关
+
+2026-07-26 实测:每次一次性视觉推理 llama-server RSS 涨 **~33MB 且不收敛**(8 次 +266MB,
+第 8 次还在 +34MB)。不是显存泄漏,是 llama.cpp 的**主机 RAM prompt cache**:
+`-cram/--cache-ram` 默认 **8192 MiB**,外加 `--ctx-checkpoints` 默认 32/slot。
+它把每次请求的 KV 状态存下来等复用 —— 而视觉请求每张图 prefix 都不同,**永远命中不了**。
+
+unit 加 `--cache-ram 0 --ctx-checkpoints 0` 后:前 4 次仍涨(compute buffer / CUDA 池
+爬到最大图那一档,正常),**第 5 次起彻底平**,24 次连打 2786-2817MB 上下浮动,末值比
+第 8 次还低。**延迟零代价**(前后都是 1.34s 均值)—— 因为那个 cache 本来就没命中过。
+
+**How to apply:** 板上任何 llama.cpp 服务都要显式关掉 cache-ram。看到「显存/内存越用
+越涨」先查这个,再怀疑泄漏。判据是**打 20 次看收不收敛**,别只打 5 次。
+
+**内存账(2026-07-26 实测)**:llama-server 稳态 2.80GB + voice-daemon 2.35GB = 5.15GB
+/ 7.6GB。连打视觉时 voice-daemon 会被全局压力(不是 cgroup 上限,`high` 计数是 0)
+推进 swap 1.5GB。两个都要同时灵敏就得停一个 —— 见 [[board-memory-ceiling]]。
+
 **Why:** 三层解耦(引擎/采集调度/只读工具)+ 按需推理是 8GB 统一内存上「常驻但不耗」
 的关键;caption 属不可信观测,安全边界见 [[hermes-voice-agent-plan]]。
 

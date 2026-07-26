@@ -17,7 +17,8 @@ ExecStart=%h/work/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8091 \
     -m ${VLM_MODEL} \
     --mmproj ${VLM_MMPROJ} \
-    -ngl 99 -c 4096 -fa on --no-webui
+    -ngl 99 -c 4096 -fa on --no-webui \
+    --cache-ram 0 --ctx-checkpoints 0
 Restart=on-failure
 RestartSec=3
 
