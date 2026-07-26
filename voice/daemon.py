@@ -110,9 +110,20 @@ HERMES_READY_TIMEOUT = float(_env("VOICE_HERMES_READY_TIMEOUT", "30"))
 # So 10s could never pass: it expired mid-init, the daemon deleted the session,
 # and the model then answered fine 2s later (latency=2.6s in the gateway log).
 # Every switch to a cloud brain reverted with "probe failed: timeout >10s" while
-# the provider was perfectly healthy. 30s is ~2x the measured cold path; the
-# openrouter failure is a network timeout, so its duration is not ours to bound.
-HERMES_PROBE_TIMEOUT = float(_env("VOICE_HERMES_PROBE_TIMEOUT", "30"))
+# the provider was perfectly healthy.
+#
+# 30s covered that. It does NOT cover a LAN preset, because there the first call
+# also swaps the weights: the Mac's mlx_lm server loads whatever `model` names and
+# drops the previous one, so switching 9B -> 35B reads 35 GB before a token is
+# produced. Measured 2026-07-26, same switch: probe window 25.7s (the model call
+# alone 17.4s) — inside 30s by 4s, and that was with the weights still warm in the
+# page cache from the download. A cold read is slower and would revert a config
+# that is completely healthy, which is the worse failure: a probe that times out
+# early does not protect anything, it just throws away a working switch.
+#
+# 60s is ~2.3x the measured worst case. The cost is that a genuinely dead endpoint
+# takes 60s to say so instead of 30s — paid only when something is already broken.
+HERMES_PROBE_TIMEOUT = float(_env("VOICE_HERMES_PROBE_TIMEOUT", "60"))
 
 # TTS
 EDGE_VOICE = _env("VOICE_EDGE_VOICE", "zh-CN-XiaoxiaoNeural")
@@ -1870,7 +1881,9 @@ class Daemon:
     def brain_drift(self) -> dict | None:
         """desired 大脑(config.json 当前 preset 的 provider/model)vs applied(实际
         config.yaml 的 model.provider/default)。人手改了 yaml 就在这里现形(§5.5)。
-        yaml 读不了 → None(不报假漂移)。key 值不涉及,只比 provider/model 名。"""
+        yaml 读不了 → None(不报假漂移)。key 值不涉及,只比 provider/model 名。
+
+        """
         try:
             with open(HERMES_YAML, "r", encoding="utf-8") as fh:
                 data = vbrain._yaml().load(fh.read())

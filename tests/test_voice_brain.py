@@ -134,7 +134,11 @@ def test_validate_good_cloud_preset():
     {"api": "https://localhost"},                 # localhost
     {"api": "https://127.0.0.1"},                 # loopback
     {"api": "https://169.254.169.254"},           # cloud metadata / link-local
-    {"api": "https://192.168.1.5"},               # bare LAN IP (cloud forbids)
+    # NOTE: https://192.168.1.5 used to be listed here as "bare LAN IP, cloud
+    # forbids". It is accepted now, on purpose: the address decides the shape, so
+    # a private IP is a LAN preset by definition rather than a malformed cloud one
+    # — which is what made a local model impossible to configure at all. See
+    # test_validate_private_ip_is_lan_and_may_use_http.
     {"api": "https://8.8.8.8"},                   # bare public IP (needs domain)
     {"api": "https://nodots"},                    # no public domain
     {"model": "bad model name"},                  # space in model
@@ -152,13 +156,27 @@ def test_validate_bad_provider_name():
         vb.validate_preset("Bad Name", DEEPSEEK)
 
 
-def test_validate_allow_lan_permits_private_ip():
-    lan = dict(DEEPSEEK, api="https://192.168.13.2")
-    vb.validate_preset("omni", lan, allow_lan=True)   # no raise
-    # but a link-local address is blocked even with allow_lan
-    with pytest.raises(vb.BrainError):
-        vb.validate_preset("omni", dict(lan, api="https://169.254.169.254"),
-                           allow_lan=True)
+def test_validate_private_ip_is_lan_and_may_use_http():
+    # A private IP literal IS the LAN — no caller flag says so, the address does.
+    # http is allowed there and only there: the Mac's mlx_lm server has no cert.
+    vb.validate_preset("local", dict(DEEPSEEK, api="https://192.168.13.2"))
+    vb.validate_preset("local", dict(DEEPSEEK, api="http://192.168.13.238:8090/v1"))
+    for bad in ("http://169.254.169.254",     # link-local: the SSRF classic
+                "http://127.0.0.1:8090",      # loopback is not the LAN
+                "https://8.8.8.8",            # a bare IP that is not private
+                "http://api.deepseek.com"):   # a hostname can never take the http path
+        with pytest.raises(vb.BrainError):
+            vb.validate_preset("local", dict(DEEPSEEK, api=bad))
+
+
+def test_validate_model_name_takes_a_hf_repo_id():
+    # A local model is named by its HuggingFace repo id, so one interior slash
+    # has to pass — while nothing that could climb out of one does.
+    vb.validate_preset("local", dict(DEEPSEEK, api="http://192.168.13.238:8090/v1",
+                                     model="mlx-community/Qwen3.5-9B-8bit"))
+    for bad in ("/leading", "trailing/", "a//b", "a/../b", "a/b/c"):
+        with pytest.raises(vb.BrainError):
+            vb.validate_preset("local", dict(DEEPSEEK, model=bad))
 
 
 # --------------------------------------------------------------------------- #
@@ -197,3 +215,6 @@ def test_patch_wizard_yaml_to_custom_xiaomi_provider():
     assert data["agent"]["disabled_toolsets"] == [
         "terminal", "file", "browser", "cronjob", "skills_hub"]
     assert set(data["mcp_servers"]) == {"vlm", "drive"}
+
+
+# --------------------------------------------------------------------------- #

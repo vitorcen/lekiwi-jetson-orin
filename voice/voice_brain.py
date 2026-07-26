@@ -24,7 +24,13 @@ PROVIDER_PREFIX = "custom:"
 # Format whitelists (§5.5). Names go into a yaml key and a URL-ish provider id,
 # so keep them boring: no spaces, no path/query metacharacters.
 _PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# One "/" is allowed because a local model IS a HuggingFace repo id — the LAN
+# mlx_lm server loads whatever `model` names, e.g. mlx-community/Qwen3.5-9B-8bit.
+# A cloud model name never contains one, so this only widens the local case.
+# It stays a single interior slash: no leading/trailing one, no "..", nothing that
+# could climb out of a repo id and into a path.
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}"
+                       r"(/[A-Za-z0-9][A-Za-z0-9._:-]{0,63})?$")
 _KEY_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _TRANSPORTS = {"openai_chat", "openai_responses", "anthropic"}
 
@@ -36,11 +42,24 @@ class BrainError(Exception):
 # --------------------------------------------------------------------------- #
 # Preset validation (stdlib only)
 # --------------------------------------------------------------------------- #
-def _check_api(api, *, allow_lan):
+def _check_api(api):
+    """Two shapes are legal and the ADDRESS decides which, not a caller flag:
+
+      * a private IP literal  -> the LAN. http:// allowed (the Mac's mlx_lm server
+        has no certificate and never will); nothing leaves the house.
+      * a public https domain -> the cloud. https only, because a key rides along.
+
+    There used to be an `allow_lan=` parameter for this, and it was the wrong
+    shape: it asked the CALLER to declare something the URL already states, so the
+    two could disagree. It also had no production caller — both call sites took
+    the default — while `allow_lan=True` silently permitted any hostname at all.
+    Classifying off the address is both simpler and strictly narrower: a hostname
+    can never be "private", so it can never reach the http concession.
+    """
     if not isinstance(api, str) or not api:
         raise BrainError("preset.api missing")
-    if not api.startswith("https://"):
-        raise BrainError(f"preset.api must be https:// (got {api!r})")
+    if not api.startswith(("https://", "http://")):
+        raise BrainError(f"preset.api must be http(s):// (got {api!r})")
     parts = urlsplit(api)
     host = parts.hostname
     if not host:
@@ -54,25 +73,26 @@ def _check_api(api, *, allow_lan):
     except ValueError:
         ip = None
     if ip is not None:
-        # An IP literal. Block the SSRF-relevant ranges outright; for the rest,
-        # a bare IP is only allowed for a LAN preset (omni), never a cloud one.
+        # An IP literal. Block the SSRF-relevant ranges outright; what survives
+        # is a LAN address, and only those may be bare IPs.
         if ip.is_loopback or ip.is_link_local or ip.is_multicast \
                 or ip.is_unspecified or ip.is_reserved:
             raise BrainError(f"preset.api points at a blocked address: {host}")
-        if not allow_lan:
-            raise BrainError(
-                f"cloud preset.api must be a public https domain, not a bare IP: {host}")
         if not ip.is_private:
-            raise BrainError(f"LAN preset.api must be a private IP, got public {host}")
-    else:
-        # A hostname. Cloud presets need a real public domain (has a dot).
-        if not allow_lan and "." not in low:
-            raise BrainError(f"cloud preset.api needs a public domain: {host}")
+            raise BrainError(
+                f"a bare IP must be a private LAN address, got public {host}")
+        return
+    # A hostname: cloud. Needs a real public domain, and https because the key
+    # crosses the internet.
+    if "." not in low:
+        raise BrainError(f"cloud preset.api needs a public domain: {host}")
+    if not api.startswith("https://"):
+        raise BrainError(f"cloud preset.api must be https:// (got {api!r})")
 
 
-def validate_preset(name, preset, *, allow_lan=False):
-    """Raise BrainError on anything unsafe/malformed. allow_lan=True only for the
-    offline omni preset (LAN endpoint); cloud presets must be public https domains."""
+def validate_preset(name, preset):
+    """Raise BrainError on anything unsafe/malformed. Whether the endpoint is LAN
+    or cloud is read off preset.api itself — see _check_api."""
     if not _PROVIDER_RE.match(str(name or "")):
         raise BrainError(f"bad provider/preset name: {name!r}")
     if not isinstance(preset, dict):
@@ -86,7 +106,7 @@ def validate_preset(name, preset, *, allow_lan=False):
     transport = preset.get("transport")
     if transport not in _TRANSPORTS:
         raise BrainError(f"unknown transport: {transport!r}")
-    _check_api(preset.get("api"), allow_lan=allow_lan)
+    _check_api(preset.get("api"))
 
 
 # --------------------------------------------------------------------------- #
@@ -128,11 +148,11 @@ def _strip_allowed(data, name):
     return d
 
 
-def plan_yaml_patch(yaml_text, name, preset, *, allow_lan=False):
+def plan_yaml_patch(yaml_text, name, preset):
     """Return the patched config.yaml text. name = the provider/preset key.
     Raises BrainError on preset validation failure, provider drift (existing block
     disagrees), or any structural change outside the two allowed spots."""
-    validate_preset(name, preset, allow_lan=allow_lan)
+    validate_preset(name, preset)
 
     y = _yaml()
     import io

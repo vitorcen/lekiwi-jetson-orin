@@ -27,7 +27,8 @@
 - [板子 sudo 密码在钥匙串](board-sudo-keychain.md) — 密码不入仓库;security find-generic-password 取,只经 stdin 喂 sudo -S
 - [板子内存已见底](board-memory-ceiling.md) — 空闲 195MB/swap 2.2GB;fork 变慢会伪装成设备故障;MemoryHigh 设在稳态之下=永久刹车且零日志,排查先 free -m + 看 cgroup memory.events
 - [GUI 语音改版计划](agent-voice-pages-plan.md) — 2026-07-21 定稿经 codex+kimi 双评审:Agent/Voice 分页、三轴切换、板端统一 config;动语音/GUI 前必读 docs/agent-voice-pages-plan.html
-- [大脑切换探针](hermes-brain-switch-probe.md) — /brain 探针判据:网关把 provider 4xx 伪装成 assistant.completed,必须靠 delta/output_tokens 判过;网关重启就绪>20s;改探针/加大脑前必读
+- [大脑切换探针](hermes-brain-switch-probe.md) — /brain 探针判据:网关把 provider 4xx 伪装成 assistant.completed,必须靠 delta/output_tokens 判过;探针恒吃网关冷启(冷15.3s/热1.7s)+本地模型换权重,预算60s;preset 是 tagged union,切换路径须按 kind 分派;改探针/加大脑前必读
+- [Mac 本地 LLM 大脑](local-llm-brain-mac.md) — mlx_lm.server 一个服务供两个模型(按请求 model 换入);思考模式默认开=空回答必须关;本地模型 prompt 长度就是延迟(cache 22%/83%/100% → 24.8s/11.8s/1.2s);无鉴权
 - [voice 双 venv + sherpa 1.13.4](voice-venv-dual-sherpa113.md) — .venv 软链→.venv-exp(1.13.4/TEN)vs .venv-stable(1.10.46)秒级回滚;TEN 同阈值比 Silero 低幅更敏感;升级/回滚 voice sherpa 前必读
 - [语音 ASR 引擎阵容](voice-asr-engines.md) — qwen3-asr sherpa 原生抗噪主力+四离线四流式热切换+两级选择;流式现场不可用/nemotron已否;加换 ASR 前必读
 - [GUI 按钮别用原生 disabled](gui-disabled-swallows-clicks.md) — disabled 吞掉点击致故障不可证伪;附 ZMQ PUSH 不自愈坑与 lsof 诊断法;动 GUI 按钮/ZMQ 前必读

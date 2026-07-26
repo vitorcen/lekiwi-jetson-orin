@@ -38,8 +38,38 @@ let curAnswer = null;       // the assistant bubble currently receiving deltas
 let brainSwitching = false; // a /brain job is in flight (select frozen)
 let brainJob = null;        // current job_id we are tracking
 let brainPreset = null;     // last-known selected preset (to revert on failure)
+let presetMap = {};         // last-known presets, for labelling by preset key
 
 function curIp() { return ($('voip') && $('voip').value.trim()) || '127.0.0.1'; }
+
+// What to CALL a brain. The preset key ("local-9b", "deepseek") is a config
+// handle, not a name a person picks a model by — two of them differing only in
+// quantisation would read identically. So label by the model itself, and keep the
+// key as the option's value: the switch API still speaks keys.
+//
+//   deepseek  -> deepseek-v4-flash
+//   local-9b  -> Qwen3.5-9B-8bit(Local)
+//   omni-mac  -> omni-mac(Local)
+//
+// The HF org prefix ("mlx-community/") is packaging and gets dropped; the quant
+// suffix does NOT — it is the difference between two otherwise identical presets,
+// and the whole point of running local models is comparing them.
+//
+// "(Local)" is decided by the endpoint being http://, which is sound rather than
+// convenient: voice_brain._check_api only accepts a plaintext scheme for a
+// private IP, so http:// here provably means the LAN.
+//
+// omni has no `model` in its preset — deliberately, since the daemon's drift
+// check compares that field against config.yaml and omni does not go through the
+// gateway at all. The board therefore does not know which model the Mac loaded,
+// and falls back to the key rather than inventing a name.
+function brainLabel(name, preset) {
+  const p = preset || presetMap[name] || {};
+  const endpoint = p.api || p.url || '';
+  const model = p.model || '';
+  const base = model ? model.split('/').pop() : name;
+  return endpoint.startsWith('http://') ? base + '(Local)' : base;
+}
 
 // ---- feed rendering ------------------------------------------------------
 
@@ -59,7 +89,10 @@ function addRow(text, kind, brain) {
   if (brain) {   // 角标:哪个大脑答的话(feed 事件带 brain 字段时)
     const badge = document.createElement('span');
     badge.className = 'brainbadge';
-    badge.textContent = brain;   // untrusted; textContent only
+    // The daemon stamps the preset KEY here. Show the model, same as the
+    // dropdown: when you are A/B-ing two local models, "which one said this"
+    // is the entire question, and the key does not answer it.
+    badge.textContent = brainLabel(brain);   // untrusted; textContent only
     meta.append(' ', badge);
   }
   const msg = document.createElement('div');
@@ -173,8 +206,10 @@ function handleBrainJob(ev) {
   }
   if (ev.phase === 'done') {
     brainSwitching = false; brainJob = null;
-    setBrainStatus('✓ 已切换到 ' + (ev.preset || ''), 'ok');
-    addRow('🧠 大脑已切换到 ' + (ev.preset || ''), 'sys');
+    // Same label as the dropdown, or the two disagree about what just happened.
+    const label = ev.preset ? brainLabel(ev.preset) : '';
+    setBrainStatus('✓ 已切换到 ' + label, 'ok');
+    addRow('🧠 大脑已切换到 ' + label, 'sys');
     setTimeout(() => setBrainStatus(''), 4000);
     refreshBrain();
   } else if (ev.phase === 'reverted') {
@@ -246,13 +281,14 @@ function renderBrain(cfg) {
   const brain = desired.brain || {};
   const caps = (cfg && cfg.capabilities) || [];
   brainPreset = brain.preset || null;
+  presetMap = presets;        // so a job event can label by key alone
   const sel = $('aBrainSel');
   if (sel) {
     sel.innerHTML = '';
     for (const name of Object.keys(presets)) {
       const o = document.createElement('option');
-      o.value = name;
-      o.textContent = name;   // untrusted config; textContent only
+      o.value = name;         // the switch API speaks preset keys, not labels
+      o.textContent = brainLabel(name, presets[name]);   // untrusted; textContent only
       if (name === brain.preset) o.selected = true;
       sel.append(o);
     }
