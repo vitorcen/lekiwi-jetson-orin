@@ -2404,7 +2404,12 @@ class Daemon:
                 # 与对话互斥:先内部停对话并向 feed 广播,再进 DEBUG
                 await self.do_stop()
                 self.emit("debug", status="took_over", message="对话被转写台终止")
-            self.debug_tail.clear()
+            # 这里**不清** debug_tail。清过,是错的:环里的转写只在转写台显示,清掉就
+            # 永远没了,而「开转写台」这个动作会在用户没预期的时候发生(GUI 重连、
+            # 从对话态抢占、手滑关了再开)。2026-07-26 实锅:板子把 14 句全认对了,
+            # 用户看到的是一片空白,因为开关被拨了一次。
+            # 清空是**客户端**的事:GUI 有落盘的 asrClearedSeq 水位线,一个机制就够。
+            # 服务端只管往 200 条环里追加,seq 单调递增,谁想跳过自己抬水位线。
             self.set_state(DEBUG)
             # 流式模式已开则后台载流式引擎(免VAD 走它);仅 DEBUG 期常驻,退出即卸。
             # 不能内联 await:xlarge 700M 载 ~20s,会把 /asr_debug 拖到 GUI HTTP 超时

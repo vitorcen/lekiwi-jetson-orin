@@ -13,8 +13,15 @@ ExecStart=%h/work/lekiwi-jetson-orin/voice/.venv/bin/python %h/work/lekiwi-jetso
 Restart=on-failure
 RestartSec=3
 StartLimitBurst=5
-# 稳态 RSS ~955MB(三套 ONNX 模型常驻);MemoryHigh 给软上限、不硬杀。
-MemoryHigh=900M
+# MemoryHigh 是**软上限**:超了不杀进程,改成每次分配都进直接回收 + 把匿名页压进 swap。
+# 所以它必须高于稳态工作集,否则就是一条永久刹车。2026-07-26 实锅:上限 900M(注释还写着
+# sensevoice 年代的「稳态 955M」),而 qwen3-asr + melo + matcha 三套常驻的真实稳态是
+# **anon 2350M**(实测:90 秒采集 281 chunk / 14 段,anon 2353→2351 纹丝不动,不是泄漏)。
+# 差出去的 1.4G 热页被反复换出换入:16 小时节流 1050 万次、major fault 3874 万次,
+# 一个纯内存读的 HTTP handler 要 40s 才回(修好后 2.6ms)。表现就是「识别率突然特别低」。
+# 3G 是**跑飞护栏**,不是运行点:给热切换期两套模型同时在的瞬时双份留余量。
+# 改这个值之前先量稳态(cgroup memory.stat 的 anon),别照抄注释里的旧数字。
+MemoryHigh=3G
 
 [Install]
 WantedBy=default.target

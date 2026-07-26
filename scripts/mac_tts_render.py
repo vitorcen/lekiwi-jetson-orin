@@ -69,8 +69,23 @@ import numpy as np
 TRIM_FLOOR_DB = 40.0      # below (peak - this) counts as silence
 TRIM_MARGIN_S = 0.05      # keep a hair so plosive onsets are not clipped
 
+# Peak-normalise on the way out. Two reasons, both measured on 2026-07-26:
+#
+#   * Loudness is per-voice. Ten edge voices rendering the same line came out
+#     between -6.1 and -3.5 dBFS, and `say` sits lower still. Without this the
+#     acoustic level at the robot's microphone depends on which voice you picked,
+#     so the volume knob means a different thing on every line.
+#   * There is nothing to spend the headroom on. This audio exists to be played
+#     across a room into an MCP01 array whose recorded peak came back at
+#     -25 dBFS — the whole chain is starved for level, and 3-5 dB sitting unused
+#     above the waveform is 3-5 dB the recogniser never sees.
+#
+# -1 dBFS, not 0: leaves room for the resampler's intersample overshoot.
+NORM_PEAK_DB = -1.0
 
-def trim_silence(path: str) -> None:
+
+def trim_and_level(path: str) -> None:
+    """Cut head/tail silence, then peak-normalise. One read, one write."""
     with wave.open(path, "rb") as w:
         n, sr, ch, width = w.getnframes(), w.getframerate(), w.getnchannels(), w.getsampwidth()
         raw = w.readframes(n)
@@ -90,11 +105,15 @@ def trim_silence(path: str) -> None:
     m = int(TRIM_MARGIN_S * sr)
     a = max(0, idx[0] * hop - m)
     b = min(len(x), (idx[-1] + 1) * hop + m)
+    y = x[a:b]
+    peak = np.abs(y).max()
+    if peak > 0:
+        y = y * (32768.0 * 10 ** (NORM_PEAK_DB / 20.0) / peak)
     with wave.open(path, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(sr)
-        w.writeframes(x[a:b].astype("<i2").tobytes())
+        w.writeframes(np.clip(y, -32768, 32767).astype("<i2").tobytes())
 
 # The reference sentence f5 clones from. Long enough to carry prosody, short
 # enough that minting it costs one edge call. Its length is also the denominator
@@ -114,7 +133,7 @@ def edge_render(text: str, voice: str, out: str) -> None:
                     "-c", "1", mp3, out], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     os.unlink(mp3)
-    trim_silence(out)
+    trim_and_level(out)
 
 
 def wav_seconds(path: str) -> float:
@@ -155,7 +174,7 @@ def main() -> None:
                      ref_audio_text=REF_TEXT, seed=int(job.get("seed", 1234)),
                      steps=F5_STEPS, output_path=it["out"],
                      duration=ref_s + rate * len(it["text"]) + F5_MARGIN_S)
-            trim_silence(it["out"])
+            trim_and_level(it["out"])
             result["rendered"] += 1
     else:
         raise SystemExit(f"unknown engine: {engine}")

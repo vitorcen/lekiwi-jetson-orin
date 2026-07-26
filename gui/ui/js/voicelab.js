@@ -691,11 +691,19 @@ async function pollTail() {
   if (!active || !online || !asrOn || !invoke) return;
   try {
     const r = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/asr_debug/tail?since=' + tailSeq }));
-    // daemon 重启:seq 从头编号,旧水位线指向的是不相干的事件,只能丢掉。
+    // 水位线只在**同一个 daemon 进程内**有意义,靠环自己报的两个边界校正,不看时钟:
+    //   cursor > last_seq  → daemon 重启过,seq 从头编号,旧水位线指向不相干的事件
+    //   cursor < oldest-1  → 环转过去了(200 条),再按旧 cursor 拉只会漏,不会补
+    // 少了后一条,「GUI 关着的时候 daemon 重启并涨过了水位线」会把整段转写吞掉,
+    // 表现和 2026-07-26 那次一模一样:板子认对了,台上一片空白。
     if (r.last_seq != null && r.last_seq < tailSeq) {
       tailSeq = 0;
       if (asrClearedSeq) { asrClearedSeq = 0; setCfg('vlAsrClearedSeq', 0); }
       return;
+    }
+    if (r.oldest_seq > 0 && tailSeq < r.oldest_seq - 1) {
+      tailSeq = r.oldest_seq - 1;
+      if (asrClearedSeq > tailSeq) { asrClearedSeq = tailSeq; setCfg('vlAsrClearedSeq', tailSeq); }
     }
     for (const ev of r.events || []) {
       // 流式行(kind 'stream')带「流式」徽章,与 VAD+离线的 seg 行并排区分;
@@ -723,7 +731,15 @@ async function setAsr(on) {
     asrOn = on;
     paintAsrBtn();
     armHealth();               // DEBUG → 300ms telemetry so the level meter tracks peaks
-    if (on) { tailSeq = asrClearedSeq; startTail(); }
+    // 开台 = 「显示自上次清空以来的全部转写」。从水位线重放,所以先清 DOM,否则
+    // 关了再开会把屏幕上已有的行再追加一遍。板端不再清环(见 daemon.set_debug),
+    // 清空这件事只有这一个机制:asrClearedSeq。
+    if (on) {
+      $('vlAsrFeed').innerHTML = '';
+      partialRow = null; streamPartialRow = null;
+      tailSeq = asrClearedSeq;
+      startTail();
+    }
     else { stopTail(); partialRow = null; streamPartialRow = null; }
   } catch (e) {
     addRow('vlAsrFeed', '转写开关失败: ' + e, 'error');
@@ -1140,26 +1156,22 @@ function macNum(id, dflt) {
   return Number.isFinite(v) ? v : dflt;
 }
 
-// "文本 | 停顿秒" — the gap falls back to the panel default. Blank lines and
-// #-comments are skipped so a script can be annotated in place.
+// One line = one sentence. Blank lines and #-comments are skipped so a script
+// can be annotated in place.
 //
-// The voice is NOT per line. It used to be, and that was a bug factory: say and
-// edge have different voice namespaces, so a script written for one engine fed
-// edge a `Tingting` it rejects outright. One dropdown, one voice per run.
-// Old three-column scripts still load: the gap is read off the LAST field and
-// anything between is ignored.
+// Voice and gap come from the controls above and apply
+// to the whole script — a per-line override was two extra namespaces to keep
+// straight (say's voice names are not edge's, and a stray "| 1" read as a gap)
+// for a knob nobody turned. Anything after the first "|" is dropped, so scripts
+// saved in the old `文本 | 音色 | 停顿` form still load instead of speaking their
+// own column separators out loud.
 function macParse() {
-  const gap0 = macNum('vlMacGap', 2);
   const out = [];
   for (const raw of (($('vlMacScript') && $('vlMacScript').value) || '').split('\n')) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
-    const parts = line.split('|').map(s => s.trim());
-    const text = parts[0];
-    if (!text) continue;
-    const g = parts.length > 1
-      ? parseFloat((parts[parts.length - 1] || '').replace(/[。，]/g, '.')) : NaN;
-    out.push({ text, gap: Number.isFinite(g) ? g : gap0 });
+    const text = line.split('|')[0].trim();
+    if (text) out.push(text);
   }
   return out;
 }
@@ -1177,7 +1189,7 @@ function paintMacBtns() {
 // Returns text -> file path, or null if the user stopped / it failed.
 async function macRender(lines, engine, voice) {
   const seed = 1234;                    // fixed: same script -> same audio, always
-  const uniq = [...new Set(lines.map(l => l.text))];
+  const uniq = [...new Set(lines)];
   const items = uniq.map(text => ({ text, key: macKey(engine, voice, seed, text) }));
   addRow('vlMacFeed', `生成中: ${engine} / ${voice} / ${uniq.length} 句…`, 'ask');
   let res;
@@ -1195,10 +1207,11 @@ async function macRender(lines, engine, voice) {
 async function macRun() {
   if (macRunning || !invoke) return;
   const lines = macParse();
-  if (!lines.length) { addRow('vlMacFeed', '脚本是空的(每行:文本 | 音色 | 停顿秒)', 'error'); return; }
+  if (!lines.length) { addRow('vlMacFeed', '脚本是空的(每行一句话)', 'error'); return; }
   const engine = macEngine();
-  const volume = Math.max(0, Math.min(100, Math.round(macNum('vlMacVol', 70))));
+  const volume = Math.max(0, Math.min(100, Math.round(macNum('vlMacVol', 100))));
   const rate = Math.max(0, Math.round(macNum('vlMacRate', 0)));
+  const gap = Math.max(0, macNum('vlMacGap', 3));
   macRunning = true;
   macStopped = false;
   paintMacBtns();
@@ -1210,14 +1223,14 @@ async function macRun() {
       if (!rendered) return;            // stopped or failed; macRender already said why
     }
     do {
-      for (const ln of lines) {
+      for (const text of lines) {
         if (macStopped) break;
-        addRow('vlMacFeed', '▶ ' + ln.text, 'answer');
+        addRow('vlMacFeed', '▶ ' + text, 'answer');
         try {
           if (rendered) {
-            await invoke('mac_play', { path: rendered.get(ln.text), volume });
+            await invoke('mac_play', { path: rendered.get(text), volume });
           } else {
-            await invoke('mac_say', { text: ln.text, voice, volume, rate });
+            await invoke('mac_say', { text, voice, volume, rate });
           }
         } catch (e) {
           addRow('vlMacFeed', '播报失败: ' + e, 'error');
@@ -1225,7 +1238,7 @@ async function macRun() {
           break;
         }
         // Sliced so 停止 cuts the gap too — a 10s pause must not outlive the button.
-        for (let left = ln.gap * 1000; left > 0 && !macStopped; left -= 100) {
+        for (let left = gap * 1000; left > 0 && !macStopped; left -= 100) {
           await sleep(Math.min(100, left));
         }
       }
@@ -1290,8 +1303,15 @@ async function macInit() {
 
 // Cache key over everything that changes the audio. FNV-1a in two 32-bit halves:
 // a collision would play the wrong cached line, so 64 bits, not 32.
+//
+// RENDER_REV is part of the key because the renderer's post-processing is too:
+// r2 added peak normalisation, and without a bump every already-cached line
+// would keep playing at the old, quieter level and the fix would look inert.
+// Bump it whenever scripts/mac_tts_render.py changes the samples it writes.
+const RENDER_REV = 'r2';
+
 function macKey(engine, voice, seed, text) {
-  const s = engine + '|' + voice + '|' + seed + '|' + text;
+  const s = RENDER_REV + '|' + engine + '|' + voice + '|' + seed + '|' + text;
   let h1 = 0x811c9dc5, h2 = 0x01000193;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
@@ -1313,6 +1333,15 @@ for (const [id, key] of Object.entries(MAC_FIELDS)) {
   if (saved !== null && saved !== undefined) el.value = saved;
   el.addEventListener('change', () => setCfg(key, el.value));
 }
+// Scripts saved in the old `文本 | 音色 | 停顿` form: macParse ignores the columns
+// anyway, but leaving them in the box shows the operator a format that no longer
+// means anything. Rewrite once, on load. Only the separators go — every line's
+// text is untouched, so this cannot lose anything the user typed.
+if ($('vlMacScript') && $('vlMacScript').value.includes('|')) {
+  $('vlMacScript').value = $('vlMacScript').value.split('\n')
+    .map(l => l.split('|')[0].replace(/\s+$/, '')).join('\n');
+  setCfg('macScript', $('vlMacScript').value);
+}
 $('vlMacLoop') && ($('vlMacLoop').checked = !!getCfg('macLoop', false));
 $('vlMacLoop') && ($('vlMacLoop').onchange = e => setCfg('macLoop', e.target.checked));
 // The voice is remembered per engine — say's names and edge's names are
@@ -1320,6 +1349,34 @@ $('vlMacLoop') && ($('vlMacLoop').onchange = e => setCfg('macLoop', e.target.che
 $('vlMacVoice') && ($('vlMacVoice').onchange = () =>
   setCfg(macEngine() === 'say' ? 'macVoiceSay' : 'macVoice', $('vlMacVoice').value));
 $('vlMacEngine') && ($('vlMacEngine').addEventListener('change', fillMacVoices));
+
+// The two volumes multiply and only one of them lives in this window, so show
+// the product: a bench at 100% behind a system volume of 69 is 3dB down, and
+// 8dB is the whole difference between 3/10 and 9/10 lines recognised.
+async function paintSysVol() {
+  const el = $('vlMacSysVol');
+  if (!el) return;
+  let sys;
+  try { sys = await invoke('mac_sysvol_get'); }
+  catch (e) { el.textContent = '(系统音量读不到)'; return; }
+  const raw = $('vlMacVol') ? numVal('vlMacVol') : 100;
+  const bench = Math.max(0, Math.min(100, isFinite(raw) ? raw : 100));
+  const eff = Math.round(sys * bench / 100);
+  el.textContent = `×系统 ${sys}% = ${eff}%`;
+  el.classList.toggle('vlwarn', eff < 95);
+}
+// "拉满" means the thing the operator is looking at — the product. Maxing only
+// the system volume looked broken the one time it was already 100 and the bench
+// sat at 70: the readout said 70% and the button did nothing visible.
+$('vlMacSysMax') && ($('vlMacSysMax').onclick = async () => {
+  const v = $('vlMacVol');
+  if (v) { v.value = '100'; setCfg('macVolume', '100'); }   // programmatic set fires no 'change'
+  try { await invoke('mac_sysvol_set', { volume: 100 }); }
+  catch (e) { addRow('vlMacFeed', '设置系统音量失败: ' + e, 'error'); }
+  paintSysVol();
+});
+$('vlMacVol') && ($('vlMacVol').addEventListener('input', paintSysVol));
+paintSysVol();
 $('vlMacBtn') && ($('vlMacBtn').onclick = macRun);
 $('vlMacStop') && ($('vlMacStop').onclick = macStop);
 $('vlMacClear') && ($('vlMacClear').onclick = () => { $('vlMacFeed').innerHTML = ''; });

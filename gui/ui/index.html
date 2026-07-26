@@ -440,43 +440,56 @@
             <option value="say">say(系统自带)</option>
           </select>
         </label>
-        <label class="ivlabel" title="每行没写音色时用它。edge/f5 用同一套音色名(f5 克隆的就是那个 edge 音色);say 用 macOS 已装语音(系统设置→辅助功能→朗读内容→系统声音)">默认音色
+        <label class="ivlabel" title="整份脚本一个音色。edge/f5 用同一套音色名(f5 克隆的就是那个 edge 音色);say 用 macOS 已装语音(系统设置→辅助功能→朗读内容→系统声音)">音色
           <select id="vlMacVoice" class="voicesel"></select>
         </label>
-        <!-- type=text + inputmode:同 VAD 参数,type=number 会吞掉中文输入法打出的
-             全角「。」,把 0.5 变成空值。解析在 JS 里做,顺手把全角点换回来。 -->
-        <label class="ivlabel" title="逐句音量缩放(say 的 [[volm]]),0-100%。不改系统音量,所以退出/崩溃都不会把电脑留在小音量">音量
-          <input type="text" inputmode="decimal" id="vlMacVol" value="70">%
+        <!-- 第一行放「选什么声音」(引擎+音色),第二行放「放多大声、隔多久」(音量+停顿)。
+             显式断行,不靠宽度自然折 —— 自然折是哪个控件先撑不下就把哪个甩到第二行,
+             结果是「停顿」一个人掉下去。 -->
+        <span class="rowbreak"></span>
+        <!-- 下面两个 type=text + inputmode:同 VAD 参数,type=number 会吞掉中文输入法
+             打出的全角「。」,把 0.5 变成空值。解析在 JS 里做,顺手把全角点换回来。 -->
+        <!-- 音量、系统音量、合计、拉满是**一个** label:两个乘数分成两个 flex item 时,
+             窄栏里会从中间断开,断成「音量 %」独自一行。.ivlabel 是 nowrap,合成一组
+             就只会在组与组之间换行。
+             默认 100:wav 已经峰值归一化到 -1dBFS,这里再压就是白扔电平 —— 实测板子麦
+             收到 -24.7dBFS 时 10 句只对 3 句,-16.8dBFS 时对 9 句。 -->
+        <label class="ivlabel" title="播出电平。台音量(say 的 [[volm]] / afplay -v)乘以 macOS 系统音量,合计才是真正播出去的。&#10;系统音量是这条链上唯一在 GUI 外面的乘数 —— 板子听不清先看合计是不是 100%">音量
+          <input type="text" inputmode="decimal" id="vlMacVol" value="100">%
+          <span id="vlMacSysVol">…</span>
+          <button id="vlMacSysMax" class="minibtn" title="台音量和 macOS 系统音量都设成 100%,把播出电平拉到满档">拉满</button>
         </label>
         <!-- 语速只有 say 认;edge/f5 的节奏由音色/参考录音决定,留着会是个骗人的旋钮 -->
         <label class="ivlabel" id="vlMacRateWrap" style="display:none" title="字/分钟。留 0 = 该音色的默认语速。仅 say 引擎有效">语速
           <input type="text" inputmode="decimal" id="vlMacRate" value="0">
         </label>
-        <label class="ivlabel" title="每行没写停顿时用它:念完等这么久再念下一行">默认停顿
-          <input type="text" inputmode="decimal" id="vlMacGap" value="2">s
+        <label class="ivlabel" title="每句念完等这么久再念下一句,整份脚本统一。3s 是留给板子的余量:一段 ASR 解码约 1.2s,再加半双工静默">停顿
+          <input type="text" inputmode="decimal" id="vlMacGap" value="3">s
         </label>
       </div>
-      <!-- 默认脚本 = VAD/ASR 调参用的那 14 句(docs/vad-asr-tuning.html):真实指令、
-           停顿 0.8~10s 故意不等距(等距会让「切得准」和「刚好每 3 秒切一刀」分不开)。
-           音色由上面的下拉决定,不写在行里 —— say 和 edge 的音色名不是一套,写进脚本
-           就会出现「换个引擎整份脚本报错」。textarea 内容必须顶格,缩进会进正文。 -->
+      <!-- 默认脚本 = VAD/ASR 调参用的那 14 句(docs/vad-asr-tuning.html)的文本部分。
+           **一行就是一句话,没有列**:音色和停顿都由上面的下拉/输入框统一决定。
+           曾经支持过每行写音色和停顿,拆掉了 —— say 和 edge 的音色名不是一套
+           (`| Tingting |` 喂给 edge 直接 ValueError),而每行不同的停顿只是把
+           「切得准」和「刚好每 N 秒切一刀」搅在一起,谁都没真去调它。
+           textarea 内容必须顶格,缩进会进正文。 -->
       <textarea id="vlMacScript" class="macscript" rows="12" spellcheck="false"
-                placeholder="每行一句:文本 | 停顿秒(停顿可省,用上面的默认值)"># 电脑出声给机器人听:测 VAD 切段和 ASR 识别率。停顿故意长短不一。
-停 | 1
-后退 | 0.8
-左转九十度 | 3
-往前走一点点 | 1.5
-帮我看一下桌子上面放着什么 | 5
-现在电池还有多少电 | 2
-好的 | 7
-你看看前面有什么东西 | 3
-回到原来的位置然后停下来 | 4
-不对 | 1.2
-再来一次 | 10
-摄像头看到的画面描述一下 | 2.5
-停下来别动了 | 6
-谢谢 | 8</textarea>
-      <span class="tip">这台 Mac 出声,<b>完全不经过机器人</b>。格式 <code>文本 | 停顿秒</code>,停顿省略就用上面的默认值;<b>音色只在上面的下拉里选</b>。脚本和参数随 GUI 配置落盘。<br>
+                placeholder="每行一句话。音色和停顿用上面的设置,整份统一"># 电脑出声给机器人听:测 VAD 切段和 ASR 识别率。
+停
+后退
+左转九十度
+往前走一点点
+帮我看一下桌子上面放着什么
+现在电池还有多少电
+好的
+你看看前面有什么东西
+回到原来的位置然后停下来
+不对
+再来一次
+摄像头看到的画面描述一下
+停下来别动了
+谢谢</textarea>
+      <span class="tip">这台 Mac 出声,<b>完全不经过机器人</b>。<b>一行一句话,不写列</b> —— 引擎/音色/音量/停顿都在上面统一设,整份脚本一个值。脚本和参数随 GUI 配置落盘。<br>
         edge/f5 会在开播前<b>整份预生成</b>(f5 每句约 1.4–2.6 秒),否则合成耗时会混进句间停顿 —— 而停顿正是测 VAD 时的被测变量。改一行只重生成那一行。</span>
       <div class="watchrow">
         <button id="vlMacBtn" class="primary">开始播报</button>

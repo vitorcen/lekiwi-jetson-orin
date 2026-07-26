@@ -25,7 +25,7 @@
 - [Commit 纪律](commit-discipline.md) — 实施期不 commit 不 amend,留工作区等用户指示收尾
 - [板子账号已改名 jetson](board-account-jetson.md) — 2026-07-20 usermod -l 就地改名;改路径时 grep 扫不到符号链接和 ELF RUNPATH,搬家前必读
 - [板子 sudo 密码在钥匙串](board-sudo-keychain.md) — 密码不入仓库;security find-generic-password 取,只经 stdin 喂 sudo -S
-- [板子内存已见底](board-memory-ceiling.md) — 空闲 195MB/swap 2.2GB,llama-server 独占 3.4GB;fork 变慢会伪装成设备故障,排查前先 free -m
+- [板子内存已见底](board-memory-ceiling.md) — 空闲 195MB/swap 2.2GB;fork 变慢会伪装成设备故障;MemoryHigh 设在稳态之下=永久刹车且零日志,排查先 free -m + 看 cgroup memory.events
 - [GUI 语音改版计划](agent-voice-pages-plan.md) — 2026-07-21 定稿经 codex+kimi 双评审:Agent/Voice 分页、三轴切换、板端统一 config;动语音/GUI 前必读 docs/agent-voice-pages-plan.html
 - [大脑切换探针](hermes-brain-switch-probe.md) — /brain 探针判据:网关把 provider 4xx 伪装成 assistant.completed,必须靠 delta/output_tokens 判过;网关重启就绪>20s;改探针/加大脑前必读
 - [voice 双 venv + sherpa 1.13.4](voice-venv-dual-sherpa113.md) — .venv 软链→.venv-exp(1.13.4/TEN)vs .venv-stable(1.10.46)秒级回滚;TEN 同阈值比 Silero 低幅更敏感;升级/回滚 voice sherpa 前必读
@@ -35,4 +35,4 @@
 - [MLX stream 是线程局部的](mlx-thread-local-stream.md) — 主线程加载+worker推理会炸且只炸talker;附并发/取消用例假阳性陷阱
 - [VAD/ASR 调参结论](vad-asr-tuning-results.md) — silero(thr0.30)完胜fsmn已落盘;增益必须0;语料必须多音色可复现否则阈值调偏;MCP01降噪门吃掉词首「停」
 - [测量必须断言前提](measurement-validity.md) — 一天撞出十二种「测了个空气还报通过」;宽带正常但关键频段已死/对齐锚点被顶掉/口径把失败算成成功;写测试和调参前必读
-- [Mac 侧语音工具链](mac-side-speech.md) — 板子没外网所以 edge 只能在 Mac 跑;HF 大文件在这台机上不可用改走 ModelScope;f5 时长必须按参考语速推,edge 输出要裁静音
+- [Mac 侧语音工具链](mac-side-speech.md) — 板子没外网所以 edge 只能在 Mac 跑;HF 大文件在这台机上不可用改走 ModelScope;播出电平 8dB 决定识别 3/10 还是 9/10,渲染要归一化

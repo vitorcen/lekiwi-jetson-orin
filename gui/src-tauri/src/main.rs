@@ -1234,6 +1234,34 @@ async fn mac_play(path: String, volume: u8, state: State<'_, MacSay>) -> Result<
     .map_err(|e| format!("mac_play task failed: {e}"))?
 }
 
+/// macOS output volume, 0-100. It multiplies `afplay -v`, so a bench sitting at
+/// 100% can still be 6 dB down without anything in the GUI saying so — read it
+/// out instead of letting the operator guess.
+#[tauri::command]
+async fn mac_sysvol_get() -> Result<u8, String> {
+    let out = std::process::Command::new("osascript")
+        .args(["-e", "output volume of (get volume settings)"])
+        .output()
+        .map_err(|e| format!("osascript failed: {e}"))?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<i32>()
+        .map(|v| v.clamp(0, 100) as u8)
+        .map_err(|_| "读不到系统音量".to_string())
+}
+
+/// Set the macOS output volume. Only ever called from the explicit 拉满 button —
+/// changing a machine-wide setting behind the operator's back is not ours to do.
+#[tauri::command]
+async fn mac_sysvol_set(volume: u8) -> Result<u8, String> {
+    let v = volume.min(100);
+    std::process::Command::new("osascript")
+        .args(["-e", &format!("set volume output volume {v}")])
+        .status()
+        .map_err(|e| format!("osascript failed: {e}"))?;
+    mac_sysvol_get().await
+}
+
 // ------------------------------------------------------------- mac ASR server
 // "电脑 ASR": a recognizer far bigger than the board can hold, running on THIS
 // Mac and reached over the LAN (voice/voice_engines.py RemoteAsr ->
@@ -1451,6 +1479,8 @@ fn main() {
             mac_say_stop,
             mac_tts_render,
             mac_play,
+            mac_sysvol_get,
+            mac_sysvol_set,
             mac_asr_status,
             mac_asr_download,
             mac_asr_serve,

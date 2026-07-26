@@ -120,8 +120,8 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 /* Caption cadence input, inline with the 开始解读 button. */
 .ivlabel { font-size: 13px; color: #a9b4d8; white-space: nowrap; }
 .ivlabel input { width: 56px; }
-/* 电脑播报 script box — the one multi-line input in the app. Monospace so the
-   `文本 | 音色 | 停顿` columns line up by eye; resizable vertically only. */
+/* 电脑播报 script box — the one multi-line input in the app. One line = one
+   sentence, no columns; resizable vertically only. */
 .macscript {
   width: 100%; box-sizing: border-box; resize: vertical;
   background: #161a26; color: #cdd6f4; border: 1px solid #31344b;
@@ -171,6 +171,10 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 /* A tip inside a packed control row: break onto its own full-width line instead
    of being squeezed into a sliver by the flex siblings. */
 .watchrow .tip { flex-basis: 100%; margin: 2px 0 0; }
+/* Deliberate line break inside a wrapping .watchrow. Without it the row breaks
+   wherever it runs out of width, which drops one orphan control onto line 2;
+   put the break where the controls actually group instead. */
+.rowbreak { flex-basis: 100%; height: 0; margin: 0; }
 #keypad.focus + * , #keypad.focus { }
 
 /* ---- keypad ---- */
