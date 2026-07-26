@@ -36,6 +36,21 @@ mimo↔deepseek 真实双向往返全过（探针拿真 token），mimo preset �
 而且那还是权重刚下完、page cache 是热的。冷盘会更慢 —— 炸了的后果是
 **把一个完全健康的配置回滚掉**，这比慢报错糟得多。60s ≈ 实测最坏值的 2.3 倍。
 
+## preset 是个 tagged union，切换路径却只认一种形状
+
+2026-07-26 实锅：`POST /brain {"preset":"omni-mac"}` 回 `bad model name: None`。
+`h_brain`/`switch_brain` **对 `kind` 一个判断都没有**，整条路只会 hermes 那套
+（校验 model/api/key_env/transport → 补 config.yaml → 重启网关 → 探针），
+而 omni preset 这四个字段一个都没有、且**从不碰网关**。GUI 下拉里列着它，
+点下去必错；板子当初能在 omni 上，只能是手改 config.json + 重启 daemon。
+修法是三处按 kind 分派：`validate_preset` 校验 omni **有**的东西（`url` 走同一套
+地址规则、`speaker`）；`_switch_brain_omni` 是独立短路径（探 Mac `/health` → 写
+preset，不备份/不补 yaml/不重启网关）；`h_brain` 的 key 前置只对 hermes 生效。
+
+**顺带修掉恒亮的 ⚠ drift**：`brain_drift` 比的是网关配置，而 config.yaml
+**没有任何写法能表达「大脑不在网关里」**，所以切到 omni 后它永远消不掉。
+当前 preset 不是 hermes 就直接返回 None。一个恒亮的警告灯只会训练人忽略它。
+
 **How to apply:** 探针失败先看**网关日志**再看 provider —— 日志里有 `latency=` 和真实
 答复长度，能一眼分清「模型不行」和「我们等太短」。这类"重启后第一次特别慢"的超时，
 别去加预热请求（预热本身就要付那一次冷启，总时间不变还多一套机制），

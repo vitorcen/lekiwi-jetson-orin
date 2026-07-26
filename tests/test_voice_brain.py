@@ -218,3 +218,33 @@ def test_patch_wizard_yaml_to_custom_xiaomi_provider():
 
 
 # --------------------------------------------------------------------------- #
+# omni presets are a different SHAPE, not a variant of the hermes one
+# --------------------------------------------------------------------------- #
+OMNI = {"kind": "omni", "url": "http://192.168.13.238:8093", "speaker": "ethan"}
+
+
+def test_validate_accepts_an_omni_preset():
+    # No model, no key_env, no transport, no api — and that is correct: an omni
+    # brain never reaches the gateway. Validating it as hermes is what made
+    # POST /brain answer "bad model name: None" for a preset the GUI was listing.
+    vb.validate_preset("omni-mac", OMNI)
+
+
+def test_validate_omni_still_checks_the_address():
+    # The url goes through the same address rules as an api — before this it went
+    # through nothing at all, because validation died on the missing model first.
+    for bad in (None, "", "http://127.0.0.1:8093", "http://169.254.169.254",
+                "ftp://192.168.13.238", "http://omni.local", "https://8.8.8.8"):
+        with pytest.raises(vb.BrainError):
+            vb.validate_preset("omni-mac", dict(OMNI, url=bad))
+    # A public https domain passes, same as for a cloud preset. The omni server is
+    # meant to sit on the LAN, but that is not forced here on purpose: a per-kind
+    # "must be LAN" knob would be the allow_lan flag again, wearing a new hat.
+    vb.validate_preset("omni-mac", dict(OMNI, url="https://omni.example.com"))
+
+
+def test_preset_kind_defaults_to_hermes():
+    assert vb.preset_kind(OMNI) == "omni"
+    assert vb.preset_kind(DEEPSEEK) == "hermes"     # no kind key at all
+    assert vb.preset_kind({}) == "hermes"
+    assert vb.preset_kind(None) == "hermes"

@@ -42,7 +42,7 @@ class BrainError(Exception):
 # --------------------------------------------------------------------------- #
 # Preset validation (stdlib only)
 # --------------------------------------------------------------------------- #
-def _check_api(api):
+def _check_api(api, field="api"):
     """Two shapes are legal and the ADDRESS decides which, not a caller flag:
 
       * a private IP literal  -> the LAN. http:// allowed (the Mac's mlx_lm server
@@ -57,17 +57,17 @@ def _check_api(api):
     can never be "private", so it can never reach the http concession.
     """
     if not isinstance(api, str) or not api:
-        raise BrainError("preset.api missing")
+        raise BrainError(f"preset.{field} missing")
     if not api.startswith(("https://", "http://")):
-        raise BrainError(f"preset.api must be http(s):// (got {api!r})")
+        raise BrainError(f"preset.{field} must be http(s):// (got {api!r})")
     parts = urlsplit(api)
     host = parts.hostname
     if not host:
-        raise BrainError(f"preset.api has no host: {api!r}")
+        raise BrainError(f"preset.{field} has no host: {api!r}")
     low = host.lower()
     if low == "localhost" or low.endswith(".localhost") or low.endswith(".local") \
             or low.endswith(".internal"):
-        raise BrainError(f"preset.api host not allowed: {host}")
+        raise BrainError(f"preset.{field} host not allowed: {host}")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -77,7 +77,7 @@ def _check_api(api):
         # is a LAN address, and only those may be bare IPs.
         if ip.is_loopback or ip.is_link_local or ip.is_multicast \
                 or ip.is_unspecified or ip.is_reserved:
-            raise BrainError(f"preset.api points at a blocked address: {host}")
+            raise BrainError(f"preset.{field} points at a blocked address: {host}")
         if not ip.is_private:
             raise BrainError(
                 f"a bare IP must be a private LAN address, got public {host}")
@@ -85,18 +85,42 @@ def _check_api(api):
     # A hostname: cloud. Needs a real public domain, and https because the key
     # crosses the internet.
     if "." not in low:
-        raise BrainError(f"cloud preset.api needs a public domain: {host}")
+        raise BrainError(f"cloud preset.{field} needs a public domain: {host}")
     if not api.startswith("https://"):
-        raise BrainError(f"cloud preset.api must be https:// (got {api!r})")
+        raise BrainError(f"cloud preset.{field} must be https:// (got {api!r})")
+
+
+def preset_kind(preset):
+    """"hermes" | "omni". Absent means hermes — every preset that predates the
+    omni brain is one. Mirrors voice_config.current_brain_kind, kept here so this
+    module stays import-clean."""
+    return (preset or {}).get("kind") or "hermes"
 
 
 def validate_preset(name, preset):
-    """Raise BrainError on anything unsafe/malformed. Whether the endpoint is LAN
-    or cloud is read off preset.api itself — see _check_api."""
+    """Raise BrainError on anything unsafe/malformed.
+
+    Dispatches on the preset's kind, because the two kinds are not variations on
+    one shape — they are different things. A hermes preset configures the gateway
+    (model + key + transport, patched into config.yaml). An omni preset is an
+    address the daemon talks to directly; it has no model name, no key and no
+    transport, and the gateway never sees it.
+
+    Validating both as hermes is what the code did before, and it made the omni
+    preset unselectable: `POST /brain {"preset":"omni-mac"}` came back "bad model
+    name: None" while sitting right there in the GUI dropdown. The only way onto
+    the omni brain was hand-editing config.json and restarting the daemon.
+    """
     if not _PROVIDER_RE.match(str(name or "")):
         raise BrainError(f"bad provider/preset name: {name!r}")
     if not isinstance(preset, dict):
         raise BrainError("preset must be an object")
+    if preset_kind(preset) == "omni":
+        _check_api(preset.get("url"), field="url")
+        speaker = preset.get("speaker")
+        if speaker is not None and not _MODEL_RE.match(str(speaker)):
+            raise BrainError(f"bad speaker: {speaker!r}")
+        return
     model = preset.get("model")
     if not isinstance(model, str) or not _MODEL_RE.match(model):
         raise BrainError(f"bad model name: {model!r}")

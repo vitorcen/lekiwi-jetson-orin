@@ -246,11 +246,16 @@ async def h_brain(request: web.Request) -> web.Response:
         vbrain.validate_preset(preset_name, preset)
     except vbrain.BrainError as exc:
         return web.json_response({"error": f"preset invalid: {exc}"}, status=400)
-    key_env = preset.get("key_env")
-    if not _hermes_env_has(key_env):
-        return web.json_response(
-            {"error": f"{key_env} 未在 {HERMES_ENV} 配置或为空 —— 先手工写入 key 再切"},
-            status=409)
+    # The key check is a HERMES precondition: that flow patches the gateway, and
+    # the gateway reads the key from its own .env. An omni brain never reaches the
+    # gateway and carries no key_env at all — demanding one here is what made the
+    # omni preset unselectable.
+    if vbrain.preset_kind(preset) != "omni":
+        key_env = preset.get("key_env")
+        if not _hermes_env_has(key_env):
+            return web.json_response(
+                {"error": f"{key_env} 未在 {HERMES_ENV} 配置或为空 —— 先手工写入 key 再切"},
+                status=409)
     job_id = D.new_job_id()
     if not D.switcher.try_begin(job_id):
         return web.json_response(

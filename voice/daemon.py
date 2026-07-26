@@ -1883,7 +1883,15 @@ class Daemon:
         config.yaml 的 model.provider/default)。人手改了 yaml 就在这里现形(§5.5)。
         yaml 读不了 → None(不报假漂移)。key 值不涉及,只比 provider/model 名。
 
+        当前 preset 不是 hermes 时**恒返回 None**:这条比的是网关配置,而 omni 大脑
+        根本不经网关。留着的话 config.yaml 里无论写什么都算「漂移」——2026-07-26
+        实锅:切到 omni 后 ⚠ drift 常亮,内容是 desired(custom:omni-mac, model=null)
+        vs applied(上一个云端 preset),而这个差异**永远消不掉**,因为 config.yaml
+        没有任何写法能表达「大脑不在网关里」。一个恒亮的警告灯只会训练人忽略它,
+        等真漂移时就没人看了。切回 hermes preset 时那次切换本来就会重写 config.yaml。
         """
+        if vconfig.current_brain_kind(self.config) != "hermes":
+            return None
         try:
             with open(HERMES_YAML, "r", encoding="utf-8") as fh:
                 data = vbrain._yaml().load(fh.read())
@@ -2310,6 +2318,61 @@ class Daemon:
                   status="reverted", preset=prev_name, reason=reason,
                   old_probe=("ok" if ok else preason), drift=self.drift())
 
+    async def _switch_brain_omni(self, preset_name: str, preset: dict,
+                                 job_id: str) -> None:
+        """Switch to an omni preset. Deliberately NOT the hermes flow.
+
+        The hermes flow exists to move the gateway: back up config.yaml, patch two
+        scalars, restart the unit, wait for readiness, probe a completion, revert
+        on failure. An omni brain uses none of it — the daemon holds the Mac's
+        address itself and posts audio there. Running the gateway dance for a
+        switch that cannot affect the gateway would restart the robot's tool
+        server for nothing, and then judge the result by probing a model the new
+        brain will never call.
+
+        So the whole transaction here is: prove the Mac answers, then write the
+        preset. There is nothing to roll back — config.json is written only after
+        the probe passes, and config.yaml is never touched.
+        """
+        self.emit("job", job_id=job_id, phase="probe", axis="brain",
+                  target=preset_name)
+        url = preset.get("url") or ""
+        try:
+            h = await omni_client.health(url, self._omni_token())
+        except Exception as exc:                             # noqa: BLE001
+            self.emit("job", job_id=job_id, phase="reverted", axis="brain",
+                      status="error", preset=vconfig.current_preset_name(self.config),
+                      reason=f"omni unreachable at {url}: {exc}")
+            return
+        if not h.get("ok"):
+            self.emit("job", job_id=job_id, phase="reverted", axis="brain",
+                      status="error", preset=vconfig.current_preset_name(self.config),
+                      reason=f"omni not ready: {h}")
+            return
+        # The preset's `model` is a LABEL — the GUI names the brain with it and
+        # nothing else reads it (brain_drift and the yaml patch both return before
+        # they get here now). A name typed into config can therefore disagree with
+        # the weights the Mac actually opened, and nothing would ever notice. The
+        # server reports what it loaded, so say so instead of silently mislabelling
+        # every answer from here on. Not fatal: the brain works either way, and
+        # refusing the switch over a display string would be worse than the string.
+        loaded = h.get("model")
+        want = preset.get("model")
+        if loaded and want and loaded != want:
+            self.emit("drift", axis="brain", desired=want, applied=loaded,
+                      message=f"omni preset 标称 {want},Mac 实际加载 {loaded}")
+        self.config = vconfig.apply_axis(
+            self.config, "brain", {"kind": "omni", "preset": preset_name})
+        try:
+            vconfig.save_config(self.config)
+        except OSError as exc:
+            self.emit("error", message=f"config save failed: {exc}")
+        await self._apply_config_pair_runtime()
+        self.override.clear()
+        self.emit("job", job_id=job_id, phase="done", axis="brain",
+                  status="ok", preset=preset_name, drift=self.drift(),
+                  capabilities=hermes_capabilities())
+
     async def switch_brain(self, preset_name: str, job_id: str) -> None:
         presets = self.config.get("presets") or {}
         preset = presets.get(preset_name)
@@ -2323,6 +2386,9 @@ class Daemon:
             self.set_state(SWITCHING)
             self.emit("job", job_id=job_id, phase="precheck", axis="brain",
                       target=preset_name)
+            if vbrain.preset_kind(preset) == "omni":
+                await self._switch_brain_omni(preset_name, preset, job_id)
+                return
             with open(HERMES_YAML, "r", encoding="utf-8") as fh:
                 orig_text = fh.read()
             h8 = hashlib.sha256(orig_text.encode("utf-8")).hexdigest()[:8]
