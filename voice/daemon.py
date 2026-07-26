@@ -1154,9 +1154,17 @@ class Daemon:
         alive = lambda: gen == self.generation                    # noqa: E731
         play_gain = float(preset.get("play_gain_db", OMNI_PLAY_GAIN_DB) or 0.0)
 
-        spoken = {"secs": 0.0, "text": ""}
+        # wait_s = turn start -> first sample out of the speaker. That span is the
+        # brain's real inference cost (thinker + any tool rounds + talker warm-up),
+        # and it is what the operator experiences as "the robot is slow". Spoken
+        # length is a separate axis: a 4s wait before a 1s answer and a 1s wait
+        # before a 4s answer feel nothing alike and are fixed in different places.
+        t_turn = time.monotonic()
+        spoken = {"secs": 0.0, "text": "", "wait": None}
 
         async def on_audio(pcm: bytes, rate: int) -> None:
+            if spoken["wait"] is None:
+                spoken["wait"] = round(time.monotonic() - t_turn, 2)
             spoken["secs"] += len(pcm) / 2.0 / float(rate)   # s16le mono
             await self._omni_play(gen, pcm, rate, play_gain)
 
@@ -1188,7 +1196,7 @@ class Daemon:
                 self.last_say_s = round(spoken["secs"], 2)
                 self.last_say_backend = "omni"
                 self.emit("tts", sentence=spoken["text"], backend="omni",
-                          secs=self.last_say_s)
+                          secs=self.last_say_s, wait_s=spoken["wait"])
         except omni_client.Ignored:
             # Silence is the correct output here. Counted, not spoken and not
             # written to the transcript — a row per noise burst would bury the

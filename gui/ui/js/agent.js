@@ -85,8 +85,12 @@ function handleEvent(ev) {
       // Show the VAD segment's length/level next to the transcript: a 0.4s blip
       // that decoded into a plausible sentence is almost certainly room noise,
       // and you cannot tell that from the words alone. Typed input has no segment.
-      const row = addRow('🗣 ' + ev.text, 'ask');
-      const slot = row && row.querySelector('.capmeta');   // where time/brain live
+      // addRow returns the .capmsg div, NOT the row — .capmeta is its SIBLING, so
+      // querying it from here finds nothing and the numbers silently never appear.
+      // (Shipped that way once; the 'tts' branch below got it right by accident,
+      // which is why the answer rows had a duration and the 🗣 rows did not.)
+      const msg = addRow('🗣 ' + ev.text, 'ask');
+      const slot = msg && msg.parentElement.querySelector('.capmeta');
       if (slot && ev.secs !== undefined) {
         const s = document.createElement('span');
         s.textContent = ` ${ev.secs.toFixed(1)}s`
@@ -106,12 +110,16 @@ function handleEvent(ev) {
       // Spoken length lands on the bubble it belongs to. It is only known once
       // the turn finished, so it is stamped onto the row after the fact rather
       // than shown as a floating "last utterance" number in the gauge.
+      // `wait_s` is the half the operator actually feels — how long the robot sat
+      // silent before the first sound. Spoken length alone cannot distinguish "the
+      // brain was slow" from "the answer was long", and those need opposite fixes.
       if (ev.secs && curAnswer && curAnswer.parentElement) {
         const m = curAnswer.parentElement.querySelector('.capmeta');
         if (m && !m.dataset.secs) {
           m.dataset.secs = '1';
           const s2 = document.createElement('span');
-          s2.textContent = ` ${ev.secs.toFixed(1)}s`;
+          s2.textContent = (ev.wait_s ? ` 想${ev.wait_s.toFixed(1)}s` : '')
+            + ` 说${ev.secs.toFixed(1)}s`;
           m.appendChild(s2);
         }
       }
@@ -441,10 +449,16 @@ async function pollFeed() {
   if (!active || !online || !invoke) return;
   try {
     const r = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/feed?since=' + lastSeq }));
-    // Daemon restart resets seq; detect and re-pull from scratch.
-    if (r.last_seq < lastSeq) {
-      // Daemon restarted: seq numbering restarts too, so the old watermark now
-      // points at unrelated events. Dropping it is the only safe reading.
+    // A watermark can never legally exceed the ring's newest seq. When one does,
+    // it was written by a daemon process that no longer exists — seq restarts at 0
+    // on restart — and every seq it names now belongs to unrelated events.
+    //
+    // Testing only `lastSeq` here was not enough, and the gap was invisible:
+    // `lastSeq` is per-session and starts at 0, so after an app restart it is
+    // BELOW the fresh ring and the guard stays quiet, while `clearedSeq` is
+    // persisted and sails straight past. The whole feed then vanishes with the
+    // daemon working perfectly — talking out loud with an empty transcript.
+    if (r.last_seq < Math.max(lastSeq, clearedSeq)) {
       lastSeq = 0;
       if (clearedSeq) { clearedSeq = 0; setCfg('agentClearedSeq', 0); }
       return;
