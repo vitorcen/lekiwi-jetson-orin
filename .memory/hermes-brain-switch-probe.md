@@ -22,4 +22,19 @@ providers 块**。`base_url` 对**所有**模型全局生效——补丁器若�
 mimo↔deepseek 真实双向往返全过（探针拿真 token），mimo preset 真值：api
 `https://api.xiaomimimo.com/v1`、model `mimo-v2.5`、key_env `XIAOMI_API_KEY`。
 
-**How to apply:** 改探针 / 加新大脑（mimo、omni）时沿用 delta/output_tokens 判据，别信 completed。用户手动跑过 `hermes model` 向导后，yaml 会回到 base_url 风格并产生 drift——GUI 切一次任意 preset 即归一。切换单测在 `tests/test_voice_brain.py`（yaml 补丁 + preset 校验），跑：`uv run --with pytest --with numpy --with ruamel.yaml pytest tests/ -q`（比 [[unit-tests-board]] 多一个 `--with ruamel.yaml`，voice_brain 用 ruamel round-trip 保 config.yaml 其余字节/注释原样）。
+**4. 探针永远是网关重启后的第一个请求，冷启比热态慢 9 倍。**
+切换流程是「打补丁 → 重启网关 → 探针」，所以探针**必然**吃冷启动成本，而
+`/health` 返绿 ≠ agent 路径已热。2026-07-26 实测（同一请求，跨 `systemctl restart`）：
+**冷 15.3s / 热 1.7s**。其中约 5s 是 hermes 去 `openrouter.ai` 取模型元数据 ——
+这块板子连不通，SSL 握手直接 EOF，得等重试耗尽才轮到问模型；它在**进程内**缓存，
+所以之后每次都快。原来 `HERMES_PROBE_TIMEOUT=10` 于是**永不可能过**：10s 在初始化中途
+就到期、daemon 删了 session，而模型 2s 后照常答出来（网关日志 `latency=2.6s`）。
+现象是每次切云端大脑都以 `probe failed: timeout >10s` 回滚，而 provider 完全健康。
+已改 **30s**（约实测冷启的 2 倍；openrouter 那段是网络超时，时长不归我们管）。
+
+**How to apply:** 探针失败先看**网关日志**再看 provider —— 日志里有 `latency=` 和真实
+答复长度，能一眼分清「模型不行」和「我们等太短」。这类"重启后第一次特别慢"的超时，
+别去加预热请求（预热本身就要付那一次冷启，总时间不变还多一套机制），
+把超时定对就行。相关：[[board-memory-ceiling]]（同样是「上限设在真实成本之下」）。
+
+**How to apply（探针判据）：** 改探针 / 加新大脑（mimo、omni）时沿用 delta/output_tokens 判据，别信 completed。用户手动跑过 `hermes model` 向导后，yaml 会回到 base_url 风格并产生 drift——GUI 切一次任意 preset 即归一。切换单测在 `tests/test_voice_brain.py`（yaml 补丁 + preset 校验），跑：`uv run --with pytest --with numpy --with ruamel.yaml pytest tests/ -q`（比 [[unit-tests-board]] 多一个 `--with ruamel.yaml`，voice_brain 用 ruamel round-trip 保 config.yaml 其余字节/注释原样）。

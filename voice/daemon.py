@@ -98,7 +98,21 @@ HERMES_TURN_TIMEOUT = float(_env("VOICE_HERMES_TIMEOUT", "60"))
 # is internal to the /brain job (POST returns 202 first), so the Rust 15s cap
 # never applies here.
 HERMES_READY_TIMEOUT = float(_env("VOICE_HERMES_READY_TIMEOUT", "30"))
-HERMES_PROBE_TIMEOUT = float(_env("VOICE_HERMES_PROBE_TIMEOUT", "10"))
+# The probe is ALWAYS the first agent call of a freshly restarted gateway — that
+# is the shape of the switch job (patch → restart → probe), not an accident — so
+# it always pays the gateway's cold-start cost, and /health going green does not
+# mean the agent path is warm. Measured on this board 2026-07-26, same request
+# either side of a `systemctl restart`: first delta at **15.3s** cold, **1.7s**
+# warm. About 5s of the cold path is hermes fetching model metadata from
+# openrouter.ai, which this board cannot reach — the SSL handshake dies and the
+# retries have to exhaust, and only then is the model asked. It is cached
+# per-process afterwards, which is exactly why every later call is fast.
+# So 10s could never pass: it expired mid-init, the daemon deleted the session,
+# and the model then answered fine 2s later (latency=2.6s in the gateway log).
+# Every switch to a cloud brain reverted with "probe failed: timeout >10s" while
+# the provider was perfectly healthy. 30s is ~2x the measured cold path; the
+# openrouter failure is a network timeout, so its duration is not ours to bound.
+HERMES_PROBE_TIMEOUT = float(_env("VOICE_HERMES_PROBE_TIMEOUT", "30"))
 
 # TTS
 EDGE_VOICE = _env("VOICE_EDGE_VOICE", "zh-CN-XiaoxiaoNeural")
