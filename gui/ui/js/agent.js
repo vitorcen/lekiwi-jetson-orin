@@ -30,7 +30,11 @@ let lastSeq = 0;
 // Persisted: the daemon keeps a 200-event ring and replays it from 0 on every
 // reconnect, so a clear that only emptied the DOM came straight back on restart.
 let clearedSeq = +getCfg('agentClearedSeq', 0) || 0;
-let vstate = 'idle';        // daemon state machine mirror
+let vstate = 'idle';        // conversation state mirror (idle/listening/thinking/speaking)
+// The transcript bench is a SEPARATE switch, not a value of vstate: it runs
+// alongside the conversation and keeps the mic open on its own. This page only
+// needs it to explain why the mic is live while the conversation is idle.
+let benchOn = false;
 let deadline = 0;           // 常开窗口 server-side deadline (epoch s), 0 = none
 let curAnswer = null;       // the assistant bubble currently receiving deltas
 
@@ -75,10 +79,15 @@ function brainLabel(name, preset) {
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
-function addRow(text, kind, brain) {
+// `ts` is the daemon's epoch-seconds stamp for the event. Pass it whenever the
+// row comes from a feed event: without it a replayed ring is stamped with the
+// moment it was re-rendered, which claims the robot spoke just now when it
+// actually spoke minutes ago. Locally-generated rows (a button's result, an
+// error toast) have no event behind them and correctly fall back to now.
+function addRow(text, kind, brain, ts) {
   const feed = $('vofeed');
   if (!feed) return null;
-  const t = new Date();
+  const t = ts ? new Date(ts * 1000) : new Date();
   const row = document.createElement('div');
   row.className = 'caprow' + (kind ? ' cap-' + kind : '');
   const textwrap = document.createElement('div');
@@ -122,7 +131,7 @@ function handleEvent(ev) {
       // querying it from here finds nothing and the numbers silently never appear.
       // (Shipped that way once; the 'tts' branch below got it right by accident,
       // which is why the answer rows had a duration and the 🗣 rows did not.)
-      const msg = addRow('🗣 ' + ev.text, 'ask');
+      const msg = addRow('🗣 ' + ev.text, 'ask', null, ev.ts);
       const slot = msg && msg.parentElement.querySelector('.capmeta');
       if (slot && ev.secs !== undefined) {
         const s = document.createElement('span');
@@ -133,11 +142,11 @@ function handleEvent(ev) {
       break;
     }
     case 'assistant_delta':
-      if (!curAnswer) curAnswer = addRow('', 'answer', ev.brain);
+      if (!curAnswer) curAnswer = addRow('', 'answer', ev.brain, ev.ts);
       if (curAnswer) curAnswer.textContent += ev.delta || '';
       break;
     case 'tool':
-      addRow('🔧 调用 ' + (ev.tool_name || '?') + ' …', 'ask');
+      addRow('🔧 调用 ' + (ev.tool_name || '?') + ' …', 'ask', null, ev.ts);
       break;
     case 'tts':
       // Spoken length lands on the bubble it belongs to. It is only known once
@@ -165,16 +174,18 @@ function handleEvent(ev) {
       }
       break;
     case 'error':
-      addRow('⚠ ' + (ev.message || '出错'), 'error');
+      addRow('⚠ ' + (ev.message || '出错'), 'error', null, ev.ts);
       break;
     case 'audio':                     // 设备缺失的对称提示:恢复也要看得见
-      addRow('✓ ' + (ev.message || '音频设备已恢复'), 'sys');
+      addRow('✓ ' + (ev.message || '音频设备已恢复'), 'sys', null, ev.ts);
       break;
     case 'barge_in':
-      addRow('✋ 打断' + (ev.action === 'stop' ? '(停止)' : '') + ': ' + (ev.text || ''), 'sys');
+      addRow('✋ 打断' + (ev.action === 'stop' ? '(停止)' : '') + ': ' + (ev.text || ''),
+              'sys', null, ev.ts);
       break;
     case 'drift':
-      if (ev.axis === 'brain') addRow('⚠ ' + (ev.message || '大脑配置漂移'), 'error');
+      if (ev.axis === 'brain') addRow('⚠ ' + (ev.message || '大脑配置漂移'), 'error',
+                                     null, ev.ts);
       break;
     case 'job':
       if (ev.axis === 'brain') handleBrainJob(ev);
@@ -242,15 +253,19 @@ function paintState() {
   }
   const lbtn = $('aListenBtn');
   if (lbtn) {
+    const talking = online && vstate !== 'idle';
     lbtn.disabled = !online;
-    lbtn.textContent = (online && vstate !== 'idle') ? '结束对话' : '开始对话';
-    lbtn.classList.toggle('live', online && vstate !== 'idle');
+    lbtn.textContent = talking ? '结束对话' : '开始对话';
+    lbtn.classList.toggle('live', talking);
   }
   const ibtn = $('aIntBtn');
   if (ibtn) ibtn.disabled = !(online && (vstate === 'thinking' || vstate === 'speaking'));
   const st = $('aStage');
   if (st && online) {
-    if (vstate === 'idle') st.textContent = '待机(麦克风关闭)';
+    // The bench no longer excludes the conversation, so it is not a state here —
+    // it is a note on the side: the mic stays open for it even when idle.
+    if (vstate === 'idle') st.textContent = benchOn
+      ? '对话待机(转写台仍在听)' : '待机(麦克风关闭)';
     else if (deadline > 0) {
       const left = Math.max(0, Math.round(deadline - Date.now() / 1000));
       st.textContent = (STATE_TXT[vstate] || [''])[0].split(' ')[0]
@@ -382,6 +397,7 @@ async function pollHealth() {
   try {
     const h = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/health' }));
     vstate = h.state || 'idle';
+    benchOn = !!h.bench;
     deadline = +h.window_deadline || 0;
     if (!online) goOnline();
     paintState();
@@ -447,6 +463,7 @@ async function pollVad() {
   try {
     vadSt = JSON.parse(await invoke('voice_get', { ip: curIp(), path: '/state' }));
     vstate = vadSt.state || vstate;      // fresher than the 1 s health loop
+    if (vadSt.bench !== undefined) benchOn = !!vadSt.bench;
   } catch { /* transient; health loop owns online/offline */ }
   paintVad();
 }
@@ -514,6 +531,15 @@ async function pollFeed() {
 
 function goOnline() {
   online = true;
+  // The ring is the truth and this feed is its projection, so a full replay has
+  // to REPLACE what is rendered, not append to it. Resetting the cursor without
+  // clearing appended the whole ring again on every offline->online flip — a
+  // daemon restart, a network blip — and each copy was stamped with the time it
+  // was re-rendered, so one exchange showed up four times at four different
+  // clock times and read as the robot repeating itself.
+  const feed = $('vofeed');
+  if (feed) feed.innerHTML = '';
+  curAnswer = null;          // pointed into a row that no longer exists
   lastSeq = 0;               // full replay of the ring on (re)connect
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(pollHealth, HEALTH_MS);

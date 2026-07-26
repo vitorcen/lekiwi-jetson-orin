@@ -22,7 +22,7 @@
 - [IMU 闭环控车方案](imu-closed-loop-drive-plan.md) — 2026-07-22 P0+P1 已实施:base_host sync-write/latest-only/ack :5557,motion_controller yaw 闭环 + MCP turn_by;待 motion 开关打开做精度实测;动控车前必读 docs/imu-closed-loop-drive.html
 - [控车 MCP 已挂载](drive-mcp-skill.md) — drive/ 钳位 0.15m/s·2s,语音可驱动轮子;imu_read 只读 IMU 快照(航向/气压/温度);无人值守 gate 在 base_host v2;龙虾人格在 ~/.hermes SOUL.md
 - [板端单测](unit-tests-board.md) — tests/ 纯逻辑单测,Mac 上 uv run --with pytest --with numpy pytest tests/ -q;只测纯函数不测胶水,JS 不测
-- [Commit 纪律](commit-discipline.md) — 实施期不 commit 不 amend,留工作区等用户指示收尾
+- [Commit 纪律](commit-discipline.md) — 实施期不 commit 不 amend,留工作区等用户指示收尾;2026-07-26 整场违反被三次纠正,边界要等事情做完才看得清
 - [板子账号已改名 jetson](board-account-jetson.md) — 2026-07-20 usermod -l 就地改名;改路径时 grep 扫不到符号链接和 ELF RUNPATH,搬家前必读
 - [板子 sudo 密码在钥匙串](board-sudo-keychain.md) — 密码不入仓库;security find-generic-password 取,只经 stdin 喂 sudo -S
 - [板子内存已见底](board-memory-ceiling.md) — 空闲 195MB/swap 2.2GB;fork 变慢会伪装成设备故障;MemoryHigh 设在稳态之下=永久刹车且零日志,排查先 free -m + 看 cgroup memory.events

@@ -34,5 +34,25 @@ codex gpt-5.6-sol 25 条 + kimi 24 条评审，采纳/驳回见其 §10）。
 **评审工具用法坑**：kimi CLI 的 `-p` 与 `-y`/`--auto` 互斥，非交互评审只能裸 `kimi -p`
 （读操作免审批）；codex 用 `codex exec -m gpt-5.6-sol --dangerously-bypass-approvals-and-sandbox`。
 
+## 转写台不是一个状态（2026-07-26 重构）
+
+原设计里「转写台」是状态机的一个态（`DEBUG`），**与对话互斥**：开台先 `do_stop()`
+停对话。那个互斥没有技术必要 —— 采集一路、VAD 一路、ASR 一段解一次，谁要看谁读环 ——
+但它派生出一长串 bug，每一个都是在给这个模式打补丁：接管事件没人渲染、Agent 页把
+`debug` 当 `idle` 显示成「待机」、「结束对话」按钮在没有对话时照样出现、解码期间状态
+一变整段被静默丢弃、试听 TTS 一次就把台子关了。
+
+现在：**麦克风按引用计数**。`state` 只描述对话（idle/listening/thinking/speaking），
+`bench_on` 是正交的布尔，`/health` 和 `/state` 各带一个 `bench` 字段。
+`_mic_wanted()` = `bench_on or state in (LISTENING, THINKING, SPEAKING)`，
+`_sync_mic()` 是**唯一**知道麦克风该不该开的地方（以前三处 switch 的 finally
+里各抄了一遍 `if DEBUG/else`）。段的记录也塌成一条：`_record_seg` 无条件进环，
+不再有 `to_debug` 分支；`asr_seg` 事件删了 —— 它**从来没有被渲染过**，是条死机制。
+
+**How to apply:** 判断「要不要为 X 加一个状态」时先问：X 和现有状态是正交的吗？
+正交就该是一个独立的布尔 + 一个 `_sync_*` 汇聚点，塞进状态机会让每个使用者都要
+复制一遍互斥判断。真正需要独占的只有**改变机器人听到什么**的动作（临时换 ASR
+引擎、扫 VAD 参数、流式模式、段回放），那些仍然只在台子开着时可用、关台还原。
+
 相关：[[voice-frontend-s2]]、[[hermes-voice-agent-plan]]、[[lekiwi-gui-tauri]]、
 [[board-memory-ceiling]]、[[vlm-stack-orin]]。

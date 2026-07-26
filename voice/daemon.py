@@ -182,9 +182,10 @@ SELFTEST_TXT = os.path.expanduser(
     _env("VOICE_SELFTEST_TXT", os.path.join(HERE, "selftest.txt")))
 SELFTEST_DEFAULT_TEXT = _env("VOICE_SELFTEST_TEXT", "今天天气怎么样")
 
-# 状态常量。SWITCHING=切换执行器持锁期间(拒新轮次);DEBUG=转写台(禁大脑/TTS/barge-in)。
+# 状态常量。state 只描述**对话**在干什么;转写台是正交的 bench_on 布尔,不在这里。
+# SWITCHING=切换执行器持锁期间(拒新轮次)。
 from voice_switching import (IDLE, LISTENING, THINKING,        # noqa: E402
-                             SPEAKING, SWITCHING, DEBUG)
+                             SPEAKING, SWITCHING)
 
 START_TS = time.time()
 
@@ -352,10 +353,21 @@ class Daemon:
         self._cap_task: asyncio.Task | None = None
         self._cur_ffmpeg: asyncio.subprocess.Process | None = None
         self._cur_aplay: asyncio.subprocess.Process | None = None
-        # 转写台段回放(板上 aplay):独立于对话播放句柄。seg_playing 起时闸 DEBUG 采集,
+        # 转写台段回放(板上 aplay):独立于对话播放句柄。seg_playing 起时闸转写台采集,
         # 与对话播报半双工同语义 —— 播完 +HALF_DUPLEX_RESUME 才恢复喂 VAD。
         self._seg_aplay: asyncio.subprocess.Process | None = None
         self.seg_playing = False
+
+        # 转写台开关。**不是一个状态** —— state 只描述对话在干什么(idle/listening/
+        # thinking/speaking),台子开没开是正交的一维。
+        # 以前它是 DEBUG 这个状态,于是「开台子」= 停对话,两者互斥。那个互斥本身没有
+        # 技术必要:采集一路、VAD 一路、ASR 解一次,谁要看谁读环。它带来的只有麻烦
+        # —— 接管通知没人渲染、Agent 页把 debug 当成 idle 显示成「待机」、
+        # 「结束对话」按钮在没有对话时照样出现,全是给一个不该存在的模式打补丁。
+        # 现在:麦克风按引用计数开 —— 台子开着 or 对话要听,就采集;两个都关才停。
+        # 真正需要独占的是**改变机器人听到什么**的动作(临时换 ASR 引擎、扫 VAD 参数、
+        # 流式模式、段回放),那些仍然只在台子开着时可用,并在关台时还原。
+        self.bench_on = False
 
         # VAD 相位遥测(给 Agent 页仪表盘)。刻意做成「当前值」而不是 feed 事件:
         # 嘈杂环境下 VAD 每 320ms 就可能翻转一次,记成事件会把 feed 环冲垮,而仪表盘
@@ -398,11 +410,11 @@ class Daemon:
         self.matcha = vengines.MatchaTts()       # 本地 Matcha(实时,按需载/卸)
         self.vad = None                          # VadEngine(daemon 所有,可切换)
         # 音频前端(全局,不属 preset pair):当前 VAD 描述 + 数字增益。ephemeral 标记
-        # 表示调试态临时改动未落盘 —— 退出 DEBUG 时从 config 还原(与 tts/asr 同语义)。
+        # 表示调试态临时改动未落盘 —— 关转写台时从 config 还原(与 tts/asr 同语义)。
         self.vad_desc = vconfig.current_vad(self.config)
         self.audio_gain_db = vconfig.current_audio_gain(self.config)
         self._frontend_ephemeral = False
-        # DEBUG 流式模式(免VAD,对比验证):按需载的独立 OnlineRecognizer 宿主。
+        # 转写台流式模式(免VAD,对比验证):按需载的独立 OnlineRecognizer 宿主。
         self.stream_asr = vengines.StreamingAsr()
         self.stream_cfg = vconfig.current_stream(self.config)
         self._stream_last_partial = ""
@@ -502,25 +514,24 @@ class Daemon:
         return round(n / 16000.0, 2), vobs.dbfs(peak), vobs.dbfs(rms)
 
     def _record_seg(self, samples: np.ndarray, outcome: str,
-                    text: str | None = None, *, to_debug: bool,
-                    emit_feed: bool = True) -> int:
-        """一段观测:存 wav → 计数 → 发事件。DEBUG 态发 debug_tail(转写台显示);
-        对话态发 feed(type:asr_seg),只在非 accepted 时发(accepted 已有 user_text)。"""
+                    text: str | None = None) -> int:
+        """一段观测:存 wav → 计数 → 进转写环。**一段音频只有一条记录**,不分模式。
+
+        以前这里是 if/elif:段要么进转写台环(DEBUG 态),要么发 asr_seg 事件(对话态,
+        且只在非 accepted 时发)。于是「我听到了什么」有三套机制 —— 转写环、asr_seg、
+        user_text —— 各自残缺,拼起来才完整,而且 asr_seg **根本没人渲染**(agent.js
+        的 handleEvent 里从来没有这个 case),是条死机制。
+        现在环是唯一的事实:采集到的每一段都进,谁想看谁读。对话是否起轮是**路由**
+        的事,与记录无关。
+        """
         dur_s, peak, rms = self._seg_meta(samples)
         seg_id = self.seg_store.save(samples)
         self.asr_stats.record(outcome)
-        if to_debug:
-            ev = self.debug_tail.append(
-                "seg", text or "", seg_id=seg_id, outcome=outcome,
-                dur_s=dur_s, peak_dbfs=peak, rms_dbfs=rms)
-            self.emit("asr_debug", tail_seq=ev["seq"], text=text or "",
-                      outcome=outcome, seg_id=seg_id)
-        elif emit_feed and outcome != vobs.ACCEPTED:
-            fields = {"seg_id": seg_id, "outcome": outcome, "dur_s": dur_s,
-                      "peak_dbfs": peak, "rms_dbfs": rms}
-            if text:
-                fields["text"] = text
-            self.emit("asr_seg", **fields)
+        ev = self.debug_tail.append(
+            "seg", text or "", seg_id=seg_id, outcome=outcome,
+            dur_s=dur_s, peak_dbfs=peak, rms_dbfs=rms)
+        self.emit("asr_debug", tail_seq=ev["seq"], text=text or "",
+                  outcome=outcome, seg_id=seg_id)
         return seg_id
 
     # -- 子进程回收工具 -------------------------------------------------- #
@@ -801,11 +812,11 @@ class Daemon:
         self._note_level(samples)
         listening = (self.state == LISTENING and time.time() >= self.mic_resume_ts)
         barge = (BARGE_IN and self.state == SPEAKING)
-        # 转写台:截句 → 转写,不进大脑不触发 TTS。段回放期(seg_playing)及其 250ms 半
-        # 双工余量内闸掉采集,免把板上放的段自己截回来。
-        debug = (self.state == DEBUG and not self.seg_playing
+        # 转写台:截句 → 转写。段回放期(seg_playing)及其 250ms 半双工余量内闸掉采集,
+        # 免把板上放的段自己截回来。与对话**并行**,不是替代它。
+        bench = (self.bench_on and not self.seg_playing
                  and time.time() >= self.mic_resume_ts)
-        if not (listening or barge or debug):
+        if not (listening or barge or bench):
             # 丢弃期间保持 VAD 干净,避免把机器人自己的话截成段
             if self.vad is not None:
                 try:
@@ -813,9 +824,9 @@ class Daemon:
                 except Exception:
                     pass
             return
-        # DEBUG 流式模式(一级=流式):流式引擎自带端点、免VAD,实时出 partial/final。
+        # 转写台流式模式(一级=流式):流式引擎自带端点、免VAD,实时出 partial/final。
         # 模式互斥 —— 走流式就不再走 VAD(切模式对比,不并行,免双份推理)。
-        if debug and self.stream_cfg.get("enabled"):
+        if bench and self.stream_cfg.get("enabled"):
             self._feed_stream(samples)
             return
         if self.vad is None:
@@ -838,7 +849,13 @@ class Daemon:
             self._vad_was_active = now_active
             self.vad_since = time.time()
         for seg_arr in segs:
-            # 只在 LISTENING 起轮;拿到段立刻改 THINKING 停止再截句(单轮保证)
+            # 一段音频**解一次 ASR**,结果谁用谁取。这里只决定路由:
+            #   起轮   —— 只在 LISTENING,且上一轮已结束(单轮保证);拿到段立刻改
+            #             THINKING 停止再截句。这条路自己会把段记进环。
+            #   打断   —— SPEAKING 期间比对机器人刚说过的话,判是否被打断。
+            #   只转写 —— 其余情况下台子开着就照样转写记环(对话在想/在说、
+            #             或者压根没开对话)。以前这里写的是 state == DEBUG,
+            #             于是对话一开台子就哑,两页永远只能看到一半。
             if self.state == LISTENING and (self.turn_task is None or self.turn_task.done()):
                 self.set_state(THINKING)
                 gen = self.generation
@@ -847,8 +864,8 @@ class Daemon:
                     and (self._barge_task is None or self._barge_task.done())):
                 self._barge_task = asyncio.create_task(
                     self._barge_check(self.generation, seg_arr))
-            elif self.state == DEBUG:
-                asyncio.create_task(self._asr_debug_transcribe(seg_arr))
+            elif bench:
+                asyncio.create_task(self._asr_transcribe_only(seg_arr))
 
     # ------------------------------------------------------------------ #
     # ASR → 校验 → 起轮
@@ -873,10 +890,11 @@ class Daemon:
         self.asr_busy = False
         if gen != self.generation:
             return
-        # 段级观测:分类 outcome、计数、存段音频。非 accepted 上 feed(asr_seg),
-        # accepted 已有 user_text —— 别刷屏。
+        # 段级观测:分类 outcome、计数、存段音频、进转写环。**对话段也进环** ——
+        # 这就是「一个生产者两个消费者」:同一段音频解一次 ASR,转写台看得到、
+        # 对话也用得上。以前对话段只发 user_text/asr_seg,台子上一片空白。
         outcome = vobs.classify_segment(text)
-        self._record_seg(samples, outcome, text, to_debug=False)
+        self._record_seg(samples, outcome, text)
         if outcome != vobs.ACCEPTED:      # 空解码 / 语气词 / 过短 → 不上 LLM
             self.set_state(LISTENING)
             self.refresh_deadline()
@@ -892,30 +910,26 @@ class Daemon:
         # ASR text above is only the GUI transcript. hermes ignores the extra arg.
         await self.run_turn(gen, text, samples)
 
-    async def _asr_debug_transcribe(self, samples: np.ndarray) -> None:
-        """转写台:VAD 段 → ASR → 独立增量环(不进大脑、不触发 TTS、不 barge)。
-        每段都上转写台,连解码为空(empty_asr)的段也显示 —— 这正是「截到段却没出字」
-        的可见化,附 outcome/电平/段音频回放 id。"""
+    async def _asr_transcribe_only(self, samples: np.ndarray) -> None:
+        """转写不起轮:VAD 段 → ASR → 环。不进大脑、不触发 TTS、不 barge。
+        连解码为空(empty_asr)的段也记 —— 这正是「截到段却没出字」的可见化,
+        附 outcome/电平/段音频回放 id。
+
+        没有「完成时状态还对不对」的检查,是刻意的。曾经有过 `if self.state != DEBUG:
+        return`,它把一段已经解完的转写整个扔掉 —— 没有行、没有计数、没有事件 ——
+        只因为解码期间状态动了一下。段是采集时就已经产生的事实,一秒后的状态变化
+        不能追溯地把它作废。迟到一行无害,静默丢数据有害。"""
         loop = asyncio.get_running_loop()
         try:
             text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
         except Exception as exc:                                 # noqa: BLE001
-            self.emit("error", message=f"asr_debug failed: {exc}")
+            self.emit("error", message=f"asr transcribe failed: {exc}")
             return
-        # No `if self.state != DEBUG: return` here, deliberately. It used to be,
-        # and it threw away a finished transcription with no row, no counter and
-        # no event, purely because the state had moved WHILE the decoder ran. The
-        # segment was captured in DEBUG — that is what decides where it belongs;
-        # a state change a second later does not retroactively unmake it. Any axis
-        # switch dips through SWITCHING (one 127 ms DEBUG→SWITCHING→DEBUG dip was
-        # caught in the field), and a TTS preview leaves DEBUG for SPEAKING, so the
-        # window is real and lands exactly when the operator is fiddling with the
-        # bench. A late row after the bench closes is harmless; silent loss is not.
         outcome = vobs.classify_segment(text)
-        self._record_seg(samples, outcome, text, to_debug=True)
+        self._record_seg(samples, outcome, text)
 
     def _feed_stream(self, samples: np.ndarray) -> None:
-        """DEBUG 流式:采集循环侧只入队(微秒级),解码全在专用线程。队列满(积压 ~10s,
+        """转写台流式:采集循环侧只入队(微秒级),解码全在专用线程。队列满(积压 ~10s,
         解码远慢于实时的病态)丢新块并计数 —— 有界丢弃可观测,好过 ALSA overrun 静默丢。"""
         q = self._stream_q
         if q is None:
@@ -1026,7 +1040,7 @@ class Daemon:
         self._stream_last_partial = ""
 
     async def _load_stream_bg(self) -> None:
-        """进 DEBUG 的流式模型后台载入(/asr_debug 立即返回)。与 config 切换共用
+        """开转写台时的流式模型后台载入(/asr_debug 立即返回)。与 config 切换共用
         _stream_lock 串行;拿到锁后重查条件——排队期间用户可能已切走/已载好。"""
         async with self._stream_lock:
             if not self.stream_cfg.get("enabled") or self.stream_asr.loaded:
@@ -1037,7 +1051,7 @@ class Daemon:
                 self.emit("error", message=f"stream load failed: {exc}")
 
     async def apply_stream(self, value, ephemeral: bool) -> dict:
-        """DEBUG 流式开关 + 端点静音时长。ephemeral=调试态临时(退出 DEBUG 还原);否则
+        """转写台流式开关 + 端点静音时长。ephemeral=调试态临时(关台还原);否则
         落盘(存参)。返回实际生效态。"""
         want = vconfig.normalize_stream(value)
         # 先落状态(存参 or ephemeral 标记),快;模型载入在锁内做(可能 700M,慢)。
@@ -1081,11 +1095,11 @@ class Daemon:
         # 能量/长度门在 ASR 之前丢弃的段计 gate(存音频可回放,但 SPEAKING 期不上
         # feed 免刷屏)。
         if len(samples) < int(BARGE_MIN_S * 16000):
-            self._record_seg(samples, vobs.GATE, to_debug=False, emit_feed=False)
+            self._record_seg(samples, vobs.GATE)
             return
         rms = float(np.sqrt(np.mean(samples * samples)))
         if rms < BARGE_MIN_RMS:
-            self._record_seg(samples, vobs.GATE, to_debug=False, emit_feed=False)
+            self._record_seg(samples, vobs.GATE)
             return
         loop = asyncio.get_running_loop()
         try:
@@ -1537,7 +1551,7 @@ class Daemon:
     async def play_seg(self, seg_id: int) -> dict:
         """转写台段回放:板上(MCP01 音响)aplay 放段 wav(16k mono s16le)。段不存在
         → 404;音响不可用 → 409;aplay 非零 → 500(非零必报错,不装成功)。latest-wins:
-        新请求先 kill 在放的旧 aplay。播放期 seg_playing 起闸 DEBUG 采集,播完设半双工
+        新请求先 kill 在放的旧 aplay。播放期 seg_playing 起闸转写台采集,播完设半双工
         余量恢复。返回 dict 带可选 status 供 HTTP 层取用。"""
         path = self.seg_store.path(seg_id)
         if path is None:
@@ -1763,10 +1777,11 @@ class Daemon:
         await self.start_capture()
 
     async def do_stop(self) -> None:
-        """任何态强制回 IDLE(先打断)。"""
+        """结束对话:强制回 IDLE(先打断)。麦克风只在转写台也关着时才停 ——
+        「结束对话」是关掉一个使用者,不是拔掉话筒。"""
         await self._abort_playback()
         self.set_state(IDLE)
-        await self.stop_capture()
+        await self._sync_mic()
 
     async def do_say(self, text: str) -> None:
         """调试直接播报,走完整 TTS 通道,可被 interrupt 立停。
@@ -1798,25 +1813,15 @@ class Daemon:
             return
         finally:
             if gen == self.generation:
-                # 从转写台按「试听」进来的,播完必须回转写台。原来只会回
-                # LISTENING/IDLE —— 于是试听一次就把台子关了,而 GUI 那边要等下一次
-                # health 轮询才发现,中间说的话全部落进对话链路或者无人接收。
-                # 「试听」是转写台的一个动作,不是离开它的理由。
-                if prev == DEBUG:
-                    self.set_state(DEBUG)
-                    await self.start_capture()   # 幂等:活着就直接返回
-                else:
-                    # 回落目标看"麦克风窗口现在还开着吗",不是播报前的旧快照:播报
-                    # 期间按开麦时 do_listen 只刷新 deadline(故意不打断播报),旧
-                    # 快照会把这次请求丢掉 —— 播完回 IDLE、采集循环随即退出,麦克风
-                    # 再也不开。这也正是 SPEAKING → LISTENING 的半双工约定。
-                    live = prev == LISTENING or (self.deadline
-                                                 and time.time() < self.deadline)
-                    if live:
-                        self.set_state(LISTENING)
-                        await self.start_capture()   # 幂等:活着就直接返回
-                    else:
-                        self.set_state(IDLE)
+                # 回落目标看"麦克风窗口现在还开着吗",不是播报前的旧快照:播报
+                # 期间按开麦时 do_listen 只刷新 deadline(故意不打断播报),旧
+                # 快照会把这次请求丢掉 —— 播完回 IDLE、采集循环随即退出,麦克风
+                # 再也不开。这也正是 SPEAKING → LISTENING 的半双工约定。
+                # 试听不再需要特判:它不碰 bench_on,_sync_mic 会把麦克风留着。
+                live = prev == LISTENING or (self.deadline
+                                             and time.time() < self.deadline)
+                self.set_state(LISTENING if live else IDLE)
+                await self._sync_mic()
 
     # ------------------------------------------------------------------ #
     # 窗口到期
@@ -2006,7 +2011,7 @@ class Daemon:
         return True
 
     async def _apply_config_pair_runtime(self) -> None:
-        """把运行引擎拉回 config pair(退出 DEBUG / 清 ephemeral 覆盖时)。ASR 可能被临时
+        """把运行引擎拉回 config pair(关转写台 / 清 ephemeral 覆盖时)。ASR 可能被临时
         切成别的宿主 → 先 drain 再真正卸调试引擎、载回 config 引擎。"""
         pair = vconfig.current_pair(self.config)
         if pair["asr"] != self.asr_engine:
@@ -2071,13 +2076,10 @@ class Daemon:
                       status=result["status"], applied=result["applied"],
                       drift=self.drift())
         finally:
-            # 恢复状态机:调试态回 DEBUG(续采集),否则回 IDLE(切换已中断对话)
-            if self._switch_prev_state == DEBUG:
-                self.set_state(DEBUG)
-                await self.start_capture()
-            else:
-                self.set_state(IDLE)
-                await self.stop_capture()
+            # 切换打断的是**对话**(引擎换了,在途轮次不能续)。转写台不受影响 ——
+            # 它本来就是用来看这次切换效果的,没有理由被切换自己关掉。
+            self.set_state(IDLE)
+            await self._sync_mic()
             self.switcher.end()
 
     # ------------------------------------------------------------------ #
@@ -2119,17 +2121,15 @@ class Daemon:
             self.emit("job", job_id=job_id, phase="done", axis="vad",
                       status=status, applied=applied, drift=self.drift())
         finally:
-            if self._switch_prev_state == DEBUG:
-                self.set_state(DEBUG)
-                await self.start_capture()
-            else:
-                self.set_state(IDLE)
-                await self.stop_capture()
+            # 切换打断的是**对话**(引擎换了,在途轮次不能续)。转写台不受影响 ——
+            # 它本来就是用来看这次切换效果的,没有理由被切换自己关掉。
+            self.set_state(IDLE)
+            await self._sync_mic()
             self.switcher.end()
 
     def apply_audio_gain(self, gain_db, ephemeral: bool) -> float:
         """数字增益即时生效(无需重建 VAD/推理池,不走切换执行器)。ephemeral=调试态不落盘,
-        退出 DEBUG 还原;否则落盘。返回实际生效值。"""
+        关台还原;否则落盘。返回实际生效值。"""
         gain = vconfig.clamp_gain(gain_db)
         self.audio_gain_db = gain
         if ephemeral:
@@ -2161,7 +2161,7 @@ class Daemon:
         return out
 
     async def restore_frontend(self) -> None:
-        """退出 DEBUG:把音频前端(VAD + 增益)从 ephemeral 改动还原回 config。VAD 引擎/
+        """关转写台:把音频前端(VAD + 增益)从 ephemeral 改动还原回 config。VAD 引擎/
         参数变了才重建。与 tts/asr 的 _apply_config_pair_runtime 同语义。"""
         if not self._frontend_ephemeral:
             return
@@ -2457,12 +2457,10 @@ class Daemon:
                 self.emit("job", job_id=job_id, phase="reverted", axis="brain",
                           status="error", reason=f"unexpected: {exc}")
         finally:
-            if self._switch_prev_state == DEBUG:
-                self.set_state(DEBUG)
-                await self.start_capture()
-            else:
-                self.set_state(IDLE)
-                await self.stop_capture()
+            # 切换打断的是**对话**(引擎换了,在途轮次不能续)。转写台不受影响 ——
+            # 它本来就是用来看这次切换效果的,没有理由被切换自己关掉。
+            self.set_state(IDLE)
+            await self._sync_mic()
             self.switcher.end()
 
     # ------------------------------------------------------------------ #
@@ -2512,46 +2510,59 @@ class Daemon:
             self.switcher.end()
 
     # ------------------------------------------------------------------ #
-    # 转写台 DEBUG 态开关 §5.4
+    # 转写台开关 §5.4(与对话正交,不是一个状态)
     # ------------------------------------------------------------------ #
-    async def set_debug(self, on: bool) -> None:
+    async def set_bench(self, on: bool) -> None:
+        """转写台开关。**不碰对话** —— 开台不再停对话,关台也不再停麦克风(对话
+        还开着的话)。麦克风按引用计数:见 _mic_wanted。
+
+        这里**不清** debug_tail。清过,是错的:清掉就永远没了,而「开转写台」这个动作
+        会在用户没预期的时候发生(GUI 重连、手滑关了再开)。清空是**客户端**的事:
+        GUI 有落盘的 asrClearedSeq 水位线,一个机制就够。服务端只管往 200 条环里追加。
+        """
         if on:
-            if self.state in (LISTENING, THINKING, SPEAKING):
-                # 与对话互斥:先内部停对话并向 feed 广播,再进 DEBUG
-                await self.do_stop()
-                self.emit("debug", status="took_over", message="对话被转写台终止")
-            # 这里**不清** debug_tail。清过,是错的:环里的转写只在转写台显示,清掉就
-            # 永远没了,而「开转写台」这个动作会在用户没预期的时候发生(GUI 重连、
-            # 从对话态抢占、手滑关了再开)。2026-07-26 实锅:板子把 14 句全认对了,
-            # 用户看到的是一片空白,因为开关被拨了一次。
-            # 清空是**客户端**的事:GUI 有落盘的 asrClearedSeq 水位线,一个机制就够。
-            # 服务端只管往 200 条环里追加,seq 单调递增,谁想跳过自己抬水位线。
-            self.set_state(DEBUG)
-            # 流式模式已开则后台载流式引擎(免VAD 走它);仅 DEBUG 期常驻,退出即卸。
+            self.bench_on = True
+            # 流式模式已开则后台载流式引擎(免VAD 走它);仅台子开着时常驻,关台即卸。
             # 不能内联 await:xlarge 700M 载 ~20s,会把 /asr_debug 拖到 GUI HTTP 超时
             # ("转写开关失败: timed out")。进度提示由 _set_stream_runtime 发进转写流。
             if self.stream_cfg.get("enabled") and not self.stream_asr.loaded:
                 asyncio.create_task(self._load_stream_bg())
             await self.start_capture()
         else:
-            if self.state == DEBUG:
-                self.set_state(IDLE)
-                await self.stop_capture()
-            # 退出 DEBUG:ephemeral 引擎改动自动还原为 config pair;音频前端(VAD+增益)同理
+            self.bench_on = False
+            # 关台:ephemeral 引擎改动自动还原为 config pair;音频前端(VAD+增益)同理。
+            # 这几项才是真正需要独占的东西 —— 它们改变机器人听到什么 —— 所以只在
+            # 台子开着时可用,关台立刻归位,免得一个临时实验悄悄留在对话链路里。
             await self._apply_config_pair_runtime()
             self.override.clear()
             await self.restore_frontend()
-            # 流式引擎只在 DEBUG 期有意义 → 退出即卸,释放 ~190MB(下次进 DEBUG 再载)。
+            # 流式引擎只在台子开着时有意义 → 关台即卸,释放 ~190MB(下次开台再载)。
             if self.stream_asr.loaded:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._stream_worker_stop)
                 await loop.run_in_executor(None, self.stream_asr.unload)
+            await self._sync_mic()
+
+    def _mic_wanted(self) -> bool:
+        """麦克风该开着吗。两个独立的使用者,任一要听就开,都不要才停 —— 这就是
+        「一个生产者、两个消费者」在生命周期上的全部含义。"""
+        return self.bench_on or self.state in (LISTENING, THINKING, SPEAKING)
+
+    async def _sync_mic(self) -> None:
+        """让采集跟上两个开关:有人要听就开,没人要听就停。幂等,可以随便调。
+        以前每个「状态变了」的地方都自己决定 start/stop,于是每加一个使用者就要把
+        那套判断复制一遍(三处 switch 的 finally 里就是同一段 if DEBUG/else)。
+        现在只有这一个地方知道麦克风该不该开。"""
+        if self._mic_wanted():
+            await self.start_capture()
+        else:
+            await self.stop_capture()
 
     # ------------------------------------------------------------------ #
     # Vision 播报桥(板端后台任务)§5.6
     # ------------------------------------------------------------------ #
     def _vision_can_speak(self) -> bool:
-        if self.state in (DEBUG, SWITCHING, THINKING):
+        if self.bench_on or self.state in (SWITCHING, THINKING):
             return False
         if self.turn_task and not self.turn_task.done():   # 对话进行中,对话优先
             return False
@@ -2571,7 +2582,7 @@ class Daemon:
 
     async def _vision_bridge_loop(self) -> None:
         """轮询 vlm caption(先 POST watch 保活,1.5s 间隔),seq/frame_ts 去重 + >120 截断,
-        经 say 走 latest-wins;对话/DEBUG 时暂停;vlm 不可达静默重试不刷错误。"""
+        经 say 走 latest-wins;对话/转写台开着时暂停;vlm 不可达静默重试不刷错误。"""
         token = _load_vlm_token()
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         last_watch = 0.0
@@ -2671,6 +2682,9 @@ class Daemon:
     def health(self) -> dict:
         return {
             "state": self.state,
+            # 转写台开关。刻意与 state 分开:两者正交,一个描述对话、一个描述台子,
+            # 塞成同一个字段就又回到了「用状态表达两件事」的老问题。
+            "bench": self.bench_on,
             "audio": "ok" if self.audio_ok else "missing",
             "capture_card": self.cap_card,
             "playback_card": self.play_card,

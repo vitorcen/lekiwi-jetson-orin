@@ -13,7 +13,7 @@ from aiohttp import web
 import voice_brain as vbrain
 import voice_config as vconfig
 import voice_vad as vvad
-from voice_switching import IDLE, DEBUG
+from voice_switching import IDLE
 
 D = None            # Daemon instance, set by make_app()
 TOKEN = ""
@@ -44,7 +44,7 @@ async def h_state(request: web.Request) -> web.Response:
     that as events would flood the ring to show what is really just a current value."""
     h = D.health()
     return web.json_response({
-        "state": h["state"], "audio": h["audio"],
+        "state": h["state"], "bench": h["bench"], "audio": h["audio"],
         "edge_breaker": h["edge_breaker"], "generation": h["generation"],
         "window_deadline": h["window_deadline"], "mem_rss_mb": h["mem_rss_mb"],
         "vad_active": h["vad_active"], "mic_dbfs": h["mic_dbfs"],
@@ -230,7 +230,7 @@ async def h_config_post(request: web.Request) -> web.Response:
 
 async def h_brain(request: web.Request) -> web.Response:
     """POST /brain {preset}:大脑 preset 切换 → 202+job(流程见 §5.5,进度走 feed)。
-    前置(同步、拒则不建 job):preset 存在、state∈{IDLE,DEBUG}、preset 校验过、
+    前置(同步、拒则不建 job):preset 存在、state==IDLE(转写台开着不碍事)、preset 校验过、
     key_env 在 .env 存在非空。任一不过 → 400/409 明确原因,key 值永不出现。"""
     body = await _json_body(request)
     preset_name = body.get("preset")
@@ -238,7 +238,7 @@ async def h_brain(request: web.Request) -> web.Response:
     if preset_name not in presets:
         return web.json_response({"error": f"unknown preset: {preset_name}"},
                                  status=400)
-    if D.state not in (IDLE, DEBUG):
+    if D.state != IDLE:
         return web.json_response(
             {"error": "先停对话再切大脑", "state": D.state}, status=409)
     preset = presets[preset_name]
@@ -266,12 +266,14 @@ async def h_brain(request: web.Request) -> web.Response:
 
 
 async def h_asr_debug(request: web.Request) -> web.Response:
-    """POST /asr_debug {on:1|0}:进/出 DEBUG 转写台(与对话互斥)。"""
+    """POST /asr_debug {on:1|0}:开/关转写台。**与对话正交** —— 开台不停对话,
+    关台也不停麦克风(对话还开着的话)。两个开关都关了才真停采集。"""
     body = await _json_body(request)
     on = body.get("on")
     on = str(on).lower() not in ("0", "false", "no", "none", "") if on is not None else True
-    await D.set_debug(on)
-    return web.json_response({"state": D.state, "debug": D.state == DEBUG})
+    await D.set_bench(on)
+    return web.json_response({"state": D.state, "debug": D.bench_on,
+                              "bench": D.bench_on})
 
 
 async def h_asr_debug_tail(request: web.Request) -> web.Response:

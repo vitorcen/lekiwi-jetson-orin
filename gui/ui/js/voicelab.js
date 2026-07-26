@@ -733,7 +733,7 @@ async function setAsr(on) {
     paintAsrBtn();
     armHealth();               // DEBUG → 300ms telemetry so the level meter tracks peaks
     // 开台 = 「显示自上次清空以来的全部转写」。从水位线重放,所以先清 DOM,否则
-    // 关了再开会把屏幕上已有的行再追加一遍。板端不再清环(见 daemon.set_debug),
+    // 关了再开会把屏幕上已有的行再追加一遍。板端不再清环(见 daemon.set_bench),
     // 清空这件事只有这一个机制:asrClearedSeq。
     if (on) {
       $('vlAsrFeed').innerHTML = '';
@@ -764,9 +764,11 @@ async function pollHealth() {
     lastHealth = h;
     if (!online) goOnline();
     paintDevice(h);
-    // The daemon owns the DEBUG state (another window / a restart may flip it):
-    // mirror it instead of trusting our local toggle.
-    const debug = h.state === 'debug';
+    // The daemon owns the bench switch (another window / a restart may flip it):
+    // mirror it instead of trusting our local toggle. It is its own field now,
+    // not a value of `state` — the bench and the conversation run side by side,
+    // so "is the bench on" and "what is the conversation doing" are two answers.
+    const debug = !!h.bench;
     if (debug !== asrOn) {
       asrOn = debug;
       paintAsrBtn();
