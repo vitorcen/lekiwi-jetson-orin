@@ -414,7 +414,12 @@ function paintVad() {
   else if (vstate === 'speaking') { phase = '播报中';      cls = 'busy'; }
   else if (vstate === 'idle')     { phase = '待机(闭麦)';  cls = 'off'; }
   else if (vadSt.vad_active)      { phase = '采集中';      cls = 'cap'; }
-  else                            { phase = '空闲';        cls = 'off'; }
+  // Mic OPEN, nobody speaking right now — the normal resting phase between
+  // turns. This used to read 空闲, which is the same word the state pill uses
+  // for the opposite condition (mic CLOSED, no conversation), and it was read
+  // that way: "老是空闲，有 bug 吗" while the board was in fact hearing, and
+  // answering, everything said to it. 静默 describes the room, not the robot.
+  else                            { phase = '静默(在听)';  cls = 'off'; }
   bar.className = cls;
   $('vadPhase').textContent = phase;
 

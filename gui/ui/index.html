@@ -546,9 +546,11 @@
         </div>
         <!-- VAD 仪表盘:相位 + 已持续多久 + 上一段/上一句多长。数据来自 /state 高频轮询,
              不是 feed 事件 —— VAD 每 320ms 就可能翻转,那是当前值不是日志。 -->
-        <div id="vadbar" title="VAD 相位。空闲=没在收音；采集中=正在截一段话；识别中=段已闭合，ASR/大脑在跑">
+        <!-- 「静默(在听)」不是「待机(闭麦)」:前者麦克风开着、只是此刻没人说话,是
+             轮次之间的常态;后者才是没在对话。原来两个都叫「空闲」,被当成坏了。 -->
+        <div id="vadbar" title="VAD 相位。静默(在听)=麦克风开着但此刻没人说话；采集中=正在截一段话；识别中=段已闭合，ASR/大脑在跑；待机(闭麦)=没在对话">
           <span id="vadDot" class="vaddot"></span>
-          <span id="vadPhase">空闲</span>
+          <span id="vadPhase">静默(在听)</span>
           <span id="vadElapsed" class="vadnum">0.0s</span>
           <span class="vadsep">·</span>
           <span class="vadlab">电平</span><span id="vadLevel" class="vadnum">—</span>

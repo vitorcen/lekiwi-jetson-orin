@@ -902,8 +902,15 @@ class Daemon:
         except Exception as exc:                                 # noqa: BLE001
             self.emit("error", message=f"asr_debug failed: {exc}")
             return
-        if self.state != DEBUG:
-            return
+        # No `if self.state != DEBUG: return` here, deliberately. It used to be,
+        # and it threw away a finished transcription with no row, no counter and
+        # no event, purely because the state had moved WHILE the decoder ran. The
+        # segment was captured in DEBUG — that is what decides where it belongs;
+        # a state change a second later does not retroactively unmake it. Any axis
+        # switch dips through SWITCHING (one 127 ms DEBUG→SWITCHING→DEBUG dip was
+        # caught in the field), and a TTS preview leaves DEBUG for SPEAKING, so the
+        # window is real and lands exactly when the operator is fiddling with the
+        # bench. A late row after the bench closes is harmless; silent loss is not.
         outcome = vobs.classify_segment(text)
         self._record_seg(samples, outcome, text, to_debug=True)
 
@@ -1791,17 +1798,25 @@ class Daemon:
             return
         finally:
             if gen == self.generation:
-                # 回落目标看"麦克风窗口现在还开着吗",不是播报前的旧快照:播报
-                # 期间按开麦时 do_listen 只刷新 deadline(故意不打断播报),旧
-                # 快照会把这次请求丢掉 —— 播完回 IDLE、采集循环随即退出,麦克风
-                # 再也不开。这也正是 SPEAKING → LISTENING 的半双工约定。
-                live = prev == LISTENING or (self.deadline
-                                             and time.time() < self.deadline)
-                if live:
-                    self.set_state(LISTENING)
+                # 从转写台按「试听」进来的,播完必须回转写台。原来只会回
+                # LISTENING/IDLE —— 于是试听一次就把台子关了,而 GUI 那边要等下一次
+                # health 轮询才发现,中间说的话全部落进对话链路或者无人接收。
+                # 「试听」是转写台的一个动作,不是离开它的理由。
+                if prev == DEBUG:
+                    self.set_state(DEBUG)
                     await self.start_capture()   # 幂等:活着就直接返回
                 else:
-                    self.set_state(IDLE)
+                    # 回落目标看"麦克风窗口现在还开着吗",不是播报前的旧快照:播报
+                    # 期间按开麦时 do_listen 只刷新 deadline(故意不打断播报),旧
+                    # 快照会把这次请求丢掉 —— 播完回 IDLE、采集循环随即退出,麦克风
+                    # 再也不开。这也正是 SPEAKING → LISTENING 的半双工约定。
+                    live = prev == LISTENING or (self.deadline
+                                                 and time.time() < self.deadline)
+                    if live:
+                        self.set_state(LISTENING)
+                        await self.start_capture()   # 幂等:活着就直接返回
+                    else:
+                        self.set_state(IDLE)
 
     # ------------------------------------------------------------------ #
     # 窗口到期

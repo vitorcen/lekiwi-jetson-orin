@@ -717,7 +717,8 @@ async function pollTail() {
 }
 
 function startTail() {
-  if (!tailTimer) tailTimer = setInterval(pollTail, TAIL_MS);
+  if (tailTimer) return;      // idempotent: the health loop calls this every tick
+  tailTimer = setInterval(pollTail, TAIL_MS);
   pollTail();
 }
 function stopTail() {
@@ -770,8 +771,16 @@ async function pollHealth() {
       asrOn = debug;
       paintAsrBtn();
       armHealth();
-      if (asrOn) startTail(); else { stopTail(); partialRow = null; streamPartialRow = null; }
+      if (!asrOn) { partialRow = null; streamPartialRow = null; }
     }
+    // The tail timer is DERIVED state — reconcile it every poll, do not toggle it
+    // on the edge above. It used to start only when `asrOn` CHANGED, and leaving
+    // the Voice tab clears the timer (stopActive) while leaving `asrOn` true. So
+    // coming back found debug === asrOn, took no edge, and never restarted the
+    // timer: the bench polled nothing for the rest of the session while the board
+    // kept producing rows. Observed as tail seq climbing 1 -> 22 on the daemon
+    // with the GUI frozen at 1, and it survives any number of tab switches.
+    if (asrOn) startTail(); else stopTail();
   } catch {
     if (online) goOffline();
     else paintDevice(null);
