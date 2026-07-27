@@ -69,13 +69,22 @@ HALF_DUPLEX_RESUME = 0.25                                 # 播放结束后恢�
 LEVEL_PEAK_S = 3.0        # 麦克风峰值电平的保持窗口(秒)
 INTERRUPT_SETTLE = 0.20                                   # 打断后回 LISTENING 前的沉降
 
-# 语音打断(barge-in):SPEAKING 时不闭麦,VAD 段过三重门限才算真打断。
+# 语音打断(barge-in):SPEAKING 时不闭麦,VAD 段过回声门才算真打断。
 # MCP01 的硬件 AEC 只有部分抑制(实测 1kHz 探测音仍泄漏),所以单靠能量/VAD
-# 会被自己的播报误触发——最后一道门是 ASR 文本与近期播报句的相似度比对:
+# 会被自己的播报误触发——门是 ASR 文本与近期播报句的相似度比对:
 # 识别出的就是自己正在说的话 → 回声,丢弃;是别的内容 → 用户在插话。
+#
+# 这里曾经还有 BARGE_MIN_S(0.55s)和 BARGE_MIN_RMS(0.020 = -34 dBFS)两道
+# 前置门,2026-07-26 删掉:
+#   - 长度门是死的。pre_roll_s 默认 0.6s 会补进段里,任何段都比 0.55s 长。
+#   - 能量门把真人说话全挡了。板上取最近 6 段真实录音,RMS 落在 -35~-39 dBFS,
+#     **6/6 全在门下**;而底噪本身就是 -38 dBFS,采集增益已拉满(127/127)。
+#     语音和静音在这块硬件的能量维度上根本不可分 —— silero 能分是因为它是
+#     神经 VAD 不是电平表。在判过的 VAD 后面再放一个更差的 VAD,只会把打断
+#     悄悄丢成 gate:feed 上连 barge_in 事件都没有,故障不可证伪。
+# 代价是回声段现在也要跑一次 ASR(funasr 稳态 0.65s,单 worker 池)。认了 ——
+# 回声本来就该由文本比对挡,那一层有效且已经加固过(跨句覆盖率)。
 BARGE_IN = _env("VOICE_BARGE_IN", "1").lower() not in ("0", "false", "no")
-BARGE_MIN_S = 0.55            # 打断语音最短时长(太短多为回声碎片/杂音)
-BARGE_MIN_RMS = 0.020         # 能量门(归一化 RMS,残余回声底噪之上)
 BARGE_ECHO_SIM = 0.55         # 与近期播报句相似度 ≥ 此值 → 判回声
 BARGE_ECHO_COVER = 0.70       # 段文本被近期播报拼接串覆盖比例 ≥ 此值 → 跨句回声
 BARGE_ECHO_WINDOW_S = 20.0    # 只与最近这段时间的播报句比对
@@ -193,9 +202,6 @@ from voice_switching import (IDLE, LISTENING, THINKING,        # noqa: E402
                              SPEAKING, SWITCHING)
 
 START_TS = time.time()
-
-# 语气词单字(过短/纯语气 → 不上 LLM)
-_FILLER = {"嗯", "啊", "哦", "呃", "唉", "呀", "哎", "嗯嗯"}
 
 
 def _find_ffmpeg() -> str | None:
@@ -1122,15 +1128,11 @@ class Daemon:
                             sim=BARGE_ECHO_SIM, cover=BARGE_ECHO_COVER)
 
     async def _barge_check(self, gen: int, samples: np.ndarray) -> None:
-        # 能量/长度门在 ASR 之前丢弃的段计 gate(存音频可回放,但 SPEAKING 期不上
-        # feed 免刷屏)。
-        if len(samples) < int(BARGE_MIN_S * 16000):
-            self._record_seg(samples, vobs.GATE)
-            return
-        rms = float(np.sqrt(np.mean(samples * samples)))
-        if rms < BARGE_MIN_RMS:
-            self._record_seg(samples, vobs.GATE)
-            return
+        """播报期截到的一段:解一次 ASR,记一条环,再决定要不要打断。
+
+        每条路径都 _record_seg —— 和 _asr_then_turn 一样,环是唯一的事实,打断
+        与否是路由。以前只有被前置门挡掉的段进环,真打断的那句反而看不见,
+        转写台上一片空白。"""
         loop = asyncio.get_running_loop()
         try:
             text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
@@ -1138,14 +1140,17 @@ class Daemon:
             return
         if gen != self.generation or self.state != SPEAKING:
             return                        # 这轮播报已结束/已被别的路径打断
-        nt = self._norm_text(text)
-        if not nt or self._is_echo(text):
+        if self._is_echo(text):
+            self._record_seg(samples, vobs.ECHO, text)
             return
-        if nt in STOP_WORDS:
+        if self._norm_text(text) in STOP_WORDS:   # 单字「停」要算,先于过短过滤
+            self._record_seg(samples, vobs.ACCEPTED, text)
             self.emit("barge_in", text=text, action="stop")
             await self.do_interrupt()
             return
-        if len(nt) < 2 or nt in _FILLER:
+        outcome = vobs.classify_segment(text)
+        self._record_seg(samples, outcome, text)
+        if outcome != vobs.ACCEPTED:      # 空解码 / 语气词 / 过短 → 不打断
             return
         # 真插话:打断当前播报,把这段话直接作为新一轮输入(不用重说)
         self.emit("barge_in", text=text, action="turn")

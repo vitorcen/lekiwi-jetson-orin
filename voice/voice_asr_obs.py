@@ -14,7 +14,8 @@ import difflib
 import math
 import re
 
-# Single-char fillers that must not reach the LLM (mirrors daemon._FILLER).
+# Single-char fillers that must not reach the LLM. The daemon used to keep its own
+# copy for the barge path; classify_segment is now the only judge of a decoded seg.
 FILLERS = {"嗯", "啊", "哦", "呃", "唉", "呀", "哎", "嗯嗯"}
 
 # Outcome enum for one VAD-cut segment.
@@ -22,13 +23,13 @@ ACCEPTED = "accepted"      # text passed all filters -> brain / transcription st
 EMPTY_ASR = "empty_asr"    # VAD cut a segment but ASR decoded nothing
 FILLER = "filler"          # a bare filler word, dropped before the LLM
 TOO_SHORT = "too_short"    # shorter than min_chars, dropped before the LLM
-GATE = "gate"              # energy/length gate dropped it BEFORE ASR (barge path)
+ECHO = "echo"              # the robot heard itself (barge path, matched recent TTS)
 
 
 def classify_segment(text, *, min_chars=2, fillers=FILLERS):
-    """Outcome of a segment AFTER an ASR decode. 'gate' is decided pre-ASR by the
-    caller, so it is never returned here. Order matters: a 1-char filler ('嗯') must
-    read as FILLER, not TOO_SHORT."""
+    """Outcome of a segment AFTER an ASR decode. 'echo' is decided by the caller
+    (it needs the recent-TTS list), so it is never returned here. Order matters:
+    a 1-char filler ('嗯') must read as FILLER, not TOO_SHORT."""
     stripped = re.sub(r"\s+", "", text or "")
     if not stripped:
         return EMPTY_ASR
@@ -51,7 +52,7 @@ class AsrStats:
 
     def __init__(self):
         self.d = {"segments": 0, ACCEPTED: 0, EMPTY_ASR: 0,
-                  FILLER: 0, TOO_SHORT: 0, GATE: 0}
+                  FILLER: 0, TOO_SHORT: 0, ECHO: 0}
 
     def record(self, outcome):
         self.d["segments"] += 1

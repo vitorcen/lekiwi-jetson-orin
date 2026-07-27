@@ -31,10 +31,13 @@ const TAIL_MS   = 400;    // ASR transcript tail poll, only while transcribing
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // dBFS thresholds (from .memory/voice-frontend-s2.md, MCP01 field rules):
-//   >= -34  → energy gate open, real speech level (green)
+//   >= -34  → clearly above this board's noise floor (green)
 //   ~ -79   → device muted / not powered (long-press power 3s)
 const LVL_MIN  = -80;     // meter floor
-const LVL_GATE = -34;     // BARGE_MIN_RMS=0.02 — "level is enough"
+// 底噪实测 -38 dBFS(增益已拉满 127/127),留 4dB 余量当「确实有人在说话」。
+// 这里曾写作 BARGE_MIN_RMS=0.02 的镜像 —— 那道能量门 2026-07-26 删了(它把
+// 6/6 真实语音段都挡在外面),仪表不该再拿一个不存在的门当刻度。
+const LVL_HOT  = -34;
 const LVL_MUTE = -70;     // at/below this the mic is effectively silent
 
 let active = false, online = false;
@@ -140,7 +143,7 @@ function paintDevice(h) {
   if (fill) {
     const pct = Math.max(0, Math.min(100, (dbfs - LVL_MIN) / (0 - LVL_MIN) * 100));
     fill.style.width = pct + '%';
-    fill.classList.toggle('hot', Number.isFinite(dbfs) && dbfs >= LVL_GATE);
+    fill.classList.toggle('hot', Number.isFinite(dbfs) && dbfs >= LVL_HOT);
   }
   if (okPill) {
     const ok = h.audio === 'ok';
@@ -561,7 +564,7 @@ function addStreamRow(ev) {
 // a "▶ 听" button that replays the exact PCM the model heard.
 const OUTCOME_LABEL = {
   accepted: '✓ 出字', empty_asr: '解码空', filler: '语气词',
-  too_short: '过短', gate: '能量门',
+  too_short: '过短', echo: '回声',
 };
 
 function addSegRow(ev) {

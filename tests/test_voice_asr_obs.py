@@ -38,12 +38,12 @@ def test_dbfs_full_scale_and_floor():
 # ---- counters -------------------------------------------------------------
 def test_asr_stats_counts_every_segment():
     s = ao.AsrStats()
-    for o in (ao.ACCEPTED, ao.EMPTY_ASR, ao.EMPTY_ASR, ao.FILLER, ao.GATE):
+    for o in (ao.ACCEPTED, ao.EMPTY_ASR, ao.EMPTY_ASR, ao.FILLER, ao.ECHO):
         s.record(o)
     snap = s.snapshot()
     assert snap["segments"] == 5
     assert snap["empty_asr"] == 2
-    assert snap["accepted"] == 1 and snap["filler"] == 1 and snap["gate"] == 1
+    assert snap["accepted"] == 1 and snap["filler"] == 1 and snap["echo"] == 1
     assert snap["too_short"] == 0
 
 

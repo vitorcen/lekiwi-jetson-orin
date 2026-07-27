@@ -427,7 +427,8 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .seg-empty_asr .segbadge { color: #f38ba8; border-color: #50333a; }
 .seg-filler, .seg-too_short { border-left-color: #f9e2af; }
 .seg-filler .segbadge, .seg-too_short .segbadge { color: #f9e2af; border-color: #504a2c; }
-.seg-gate { border-left-color: #6b7394; }
+.seg-echo { border-left-color: #6b7394; }
+.seg-echo .segbadge { color: #6b7394; border-color: #3a3f52; }
 @media (max-width: 560px) { .caprow { flex-direction: column; } .capthumb { width: 100%; flex: none; } }
 
 /* ===================== 底部通用日志 ===================== */
