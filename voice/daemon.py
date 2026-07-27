@@ -85,6 +85,11 @@ STOP_WORDS = {"停", "停停", "停一下", "停下", "别说了", "闭嘴", "�
 # Hermes API server
 HERMES_BASE = _env("VOICE_HERMES_BASE", "http://127.0.0.1:8642").rstrip("/")
 HERMES_SESSION = _env("VOICE_HERMES_SESSION", "voice")
+# 「新对话」换会话 id,所以当前 id 必须活过 daemon 重启 —— 否则重启一次就退回
+# 那个被要求忘掉的旧会话。一行文本,不进 config.json(那是配置,这是运行态)。
+HERMES_SESSION_FILE = os.path.expanduser(
+    _env("VOICE_HERMES_SESSION_FILE", "~/.config/lekiwi/hermes_session")
+)
 HERMES_ENV = os.path.expanduser(
     _env("VOICE_HERMES_ENV", "~/.hermes/profiles/robot/.env")
 )
@@ -243,6 +248,27 @@ def _load_hermes_key() -> str | None:
 
 
 HERMES_KEY = _load_hermes_key()
+
+
+def _load_hermes_session() -> str:
+    """当前网关会话 id。文件缺失/为空 → 默认名(首次启动走的就是这条)。"""
+    try:
+        with open(HERMES_SESSION_FILE, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or HERMES_SESSION
+    except OSError:
+        return HERMES_SESSION
+
+
+def _save_hermes_session(sid: str) -> bool:
+    """落盘当前会话 id。失败要说出来 —— 静默失败 = 下次重启把旧会话捡回来。"""
+    try:
+        os.makedirs(os.path.dirname(HERMES_SESSION_FILE), exist_ok=True)
+        with open(HERMES_SESSION_FILE, "w", encoding="utf-8") as fh:
+            fh.write(sid + "\n")
+        return True
+    except OSError as exc:
+        print(f"[voice-daemon] hermes session save failed: {exc}", flush=True)
+        return False
 
 
 def _hermes_env_has(name: str) -> bool:
@@ -455,6 +481,10 @@ class Daemon:
 
         # 当前轮 id(feed 事件按 turn_id 聚合气泡)
         self.turn_id = 0
+
+        # 网关侧的会话 id。「新对话」换一个新名字,而不是删掉旧的 —— 旧 transcript
+        # 留在 state.db 里(hermes sessions list 还翻得到),新会话零历史。
+        self.hermes_session = _load_hermes_session()
 
         # edge-tts 熔断
         self.edge_fail_streak = 0
@@ -1269,12 +1299,11 @@ class Daemon:
     async def reset_brain(self) -> dict:
         """Start a fresh conversation. Single-user by design, so there is no other
         session to protect — 「新对话」 means the robot forgets too, not just the
-        操作台. hermes keeps its own session server-side and has no reset here;
-        say so plainly rather than pretending the button did something."""
+        操作台. hermes keeps its history server-side, keyed by session id, so a
+        fresh conversation there is a fresh id — see _reset_hermes_session."""
         kind = vconfig.current_brain_kind(self.config)
         if kind != "omni":
-            return {"reset": False, "kind": kind,
-                    "detail": "hermes 会话在网关侧,本按钮不清它"}
+            return await self._reset_hermes_session(kind)
         preset = vconfig.current_preset(self.config)
         url = preset.get("url")
         if not url:
@@ -1286,6 +1315,51 @@ class Daemon:
         self.turn_id = 0
         self.emit("brain_reset", **out)
         return {"reset": True, "kind": kind, **out}
+
+    async def _reset_hermes_session(self, kind: str) -> dict:
+        """网关侧开新会话 = 换一个会话 id。
+
+        不用 DELETE:那会把真实对话记录从 state.db 抹掉,为了表达「开始新的」而
+        销毁旧数据。换名字同样让大脑零历史(网关每轮按 session id 从库里读历史,
+        不缓存 per-session agent),旧 transcript 还能翻。
+
+        顺带治的是延迟:会话不换名就一直长,本地模型 prompt 长度就是延迟。"""
+        old = self.hermes_session
+        dropped = await self._hermes_turn_count(old)
+        new = f"{HERMES_SESSION}_{time.strftime('%Y%m%d_%H%M%S')}"
+        if not await self.ensure_hermes_session(new):
+            return {"reset": False, "kind": kind,
+                    "detail": f"网关建会话失败:{new}"}
+        self.hermes_session = new
+        self.turn_id = 0
+        saved = _save_hermes_session(new)
+        self.emit("brain_reset", session=new, previous=old,
+                  dropped_exchanges=dropped)
+        out = {"reset": True, "kind": kind, "session": new,
+               "dropped_exchanges": dropped}
+        if not saved:
+            out["detail"] = "已换会话,但没写进磁盘:daemon 重启会退回旧会话"
+        return out
+
+    async def _hermes_turn_count(self, session_id: str) -> int:
+        """会话里的用户轮数 —— 报给操作台「忘掉了几轮」。数 user 角色,不是
+        message_count(那把 assistant/tool 都算进去)。取不到就报 0,不是错误。"""
+        headers = {}
+        if HERMES_KEY:
+            headers["Authorization"] = f"Bearer {HERMES_KEY}"
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(
+                    f"{HERMES_BASE}/api/sessions/{session_id}/messages",
+                    headers=headers,
+                ) as r:
+                    if r.status >= 400:
+                        return 0
+                    data = await r.json()
+        except Exception:                                    # noqa: BLE001
+            return 0
+        return sum(1 for m in data.get("data", []) if m.get("role") == "user")
 
     def _omni_token(self) -> str:
         """Bearer token for the LAN brain. Kept in a file like every other token
@@ -1384,7 +1458,7 @@ class Daemon:
         headers = {"Accept": "text/event-stream"}
         if HERMES_KEY:
             headers["Authorization"] = f"Bearer {HERMES_KEY}"
-        url = f"{HERMES_BASE}/api/sessions/{HERMES_SESSION}/chat/stream"
+        url = f"{HERMES_BASE}/api/sessions/{self.hermes_session}/chat/stream"
         timeout = aiohttp.ClientTimeout(total=None, sock_read=HERMES_TURN_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(url, json={"message": text}, headers=headers) as resp:
@@ -1861,30 +1935,34 @@ class Daemon:
         self.vad = await loop.run_in_executor(None, _load)
         print(f"[voice-daemon] models loaded (ASR+VAD:{desc['engine']}+Melo)", flush=True)
 
-    async def ensure_hermes_session(self) -> None:
-        """启动时建 voice 会话;已存在(409/其它)视为成功,GET 确认。"""
+    async def ensure_hermes_session(self, session_id: str | None = None) -> bool:
+        """建会话;已存在(409/其它)视为成功,GET 确认。默认是当前会话(启动、网关
+        重启后都调它);「新对话」传一个新 id 进来。返回 GET 是否确认存在。"""
+        sid = session_id or self.hermes_session
         headers = {}
         if HERMES_KEY:
             headers["Authorization"] = f"Bearer {HERMES_KEY}"
         timeout = aiohttp.ClientTimeout(total=10)
+        ok = False
         try:
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 try:
                     async with sess.post(
                         f"{HERMES_BASE}/api/sessions",
-                        json={"id": HERMES_SESSION}, headers=headers,
+                        json={"id": sid}, headers=headers,
                     ) as r:
                         _ = await r.text()
                 except aiohttp.ClientError:
                     pass
                 # GET 确认存在
                 async with sess.get(
-                    f"{HERMES_BASE}/api/sessions/{HERMES_SESSION}", headers=headers
+                    f"{HERMES_BASE}/api/sessions/{sid}", headers=headers
                 ) as r:
                     ok = r.status < 400
-            print(f"[voice-daemon] hermes session '{HERMES_SESSION}' ok={ok}", flush=True)
+            print(f"[voice-daemon] hermes session '{sid}' ok={ok}", flush=True)
         except Exception as exc:
             print(f"[voice-daemon] hermes session setup failed: {exc}", flush=True)
+        return ok
 
     # ------------------------------------------------------------------ #
     # 切换执行器(全局串行,单轴,报真实 applied,不承诺原子回滚)§5.2
@@ -2685,6 +2763,8 @@ class Daemon:
             # 转写台开关。刻意与 state 分开:两者正交,一个描述对话、一个描述台子,
             # 塞成同一个字段就又回到了「用状态表达两件事」的老问题。
             "bench": self.bench_on,
+            # 当前网关会话 —— 「新对话」会换名,不报出来就没法回头翻这段 transcript
+            "hermes_session": self.hermes_session,
             "audio": "ok" if self.audio_ok else "missing",
             "capture_card": self.cap_card,
             "playback_card": self.play_card,

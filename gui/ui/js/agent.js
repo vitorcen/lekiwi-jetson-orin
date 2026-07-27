@@ -684,7 +684,9 @@ $('voClear').onclick = async () => {
   try {
     const r = JSON.parse(await invoke('voice_post',
       { ip: curIp(), path: '/reset', body: '{}' }));
+    // 成功时 detail 只在有话要说时出现（例如换了会话但没落盘）。
     addRow(r.reset ? `🆕 新对话（大脑已忘记之前 ${r.dropped_exchanges ?? 0} 轮）`
+                     + (r.detail ? ` ⚠ ${r.detail}` : '')
                    : `🆕 本机记录已清空，但大脑未重置：${r.detail || '未知原因'}`,
            'sys');
   } catch (e) {
