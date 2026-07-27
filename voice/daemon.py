@@ -648,15 +648,16 @@ class Daemon:
     async def audio_watch_loop(self) -> None:
         """音频卡丢失/卡名失一致时重试发现(拔掉声卡不让 daemon 崩)。
         故障期 5s 快速重试,正常期 30s 巡检。
-        自愈不变量:非 IDLE 必须有活的采集任务。start_capture 在 audio_ok=False
-        窗口会静默放弃(2026-07-22 实锅:状态挂 listening、设备恢复后 audio_ok
-        修好了,但采集永远没人再拉起 → ASR 无响应),这里兜底重启。"""
+        自愈不变量:**_mic_wanted() 为真就必须有活的采集任务**。start_capture 在
+        audio_ok=False 窗口会静默放弃(2026-07-22 实锅:状态挂 listening、设备恢复后
+        audio_ok 修好了,但采集永远没人再拉起 → ASR 无响应),这里兜底重启。
+        判据只能问 _mic_wanted:写成 state != IDLE 就漏掉「只开转写台」那一路。"""
         while True:
             broken = not self.audio_ok or not (self.cap_card and self.play_card)
             if broken:
                 await self.discover_audio()
                 broken = not self.audio_ok
-            cap_dead = self.state != IDLE and (
+            cap_dead = self._mic_wanted() and (
                 self._cap_task is None or self._cap_task.done())
             if not broken and cap_dead:
                 self.emit("audio", status="capture_restarted",
@@ -677,7 +678,7 @@ class Daemon:
         return f"plughw:CARD={self.play_card}"
 
     # ------------------------------------------------------------------ #
-    # 采集:arecord 常驻(state != IDLE 期间),320ms 块喂 VAD
+    # 采集:arecord 常驻(_mic_wanted() 期间),320ms 块喂 VAD
     # ------------------------------------------------------------------ #
     # -- MCP01 off-hook keepalive -------------------------------------------- #
     MCP01_VID = "17ef"
@@ -774,10 +775,15 @@ class Daemon:
 
     async def _capture_loop(self) -> None:
         """常驻读 arecord raw s16le@16k,320ms 一块。LISTENING 且过了半双工静默才
-        喂 VAD;其余状态丢弃并保持 VAD 干净。arecord 死了限速重启。"""
+        喂 VAD;其余状态丢弃并保持 VAD 干净。arecord 死了限速重启。
+
+        循环的存活判据是 _mic_wanted(),不是 state —— 转写台开着而对话没开时
+        state 就是 IDLE,写成 `state != IDLE` 会让这个循环刚创建就退出:任务
+        存在、瞬间 done、arecord 从没起来,表现是「转写台开了但麦克风没声音」。
+        (2026-07-27 实锅:转写台从状态机拆成开关之后,这里漏改了。)"""
         chunk_bytes = int(0.32 * 16000) * 2   # 320ms * 16k * int16
         backoff = 0.5
-        while self.state != IDLE and self._cap_task is asyncio.current_task():
+        while self._mic_wanted() and self._cap_task is asyncio.current_task():
             cmd = [
                 "arecord", "-D", self.cap_dev(),
                 "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-q",
@@ -795,7 +801,7 @@ class Daemon:
                 continue
             backoff = 0.5
             try:
-                while self.state != IDLE and self._cap_task is asyncio.current_task():
+                while self._mic_wanted() and self._cap_task is asyncio.current_task():
                     try:
                         data = await self._arecord.stdout.readexactly(chunk_bytes)
                     except asyncio.IncompleteReadError as e:
@@ -813,7 +819,7 @@ class Daemon:
                 self._kill(self._arecord)
                 await self._reap(self._arecord)
                 self._arecord = None
-            if self.state == IDLE:
+            if not self._mic_wanted():
                 break
             # arecord 死了(多为设备拔插)→ 完整重发现:同时刷新 cap/play 卡名
             # 和音量。绝不能只翻 audio_ok 不更新卡名——那会留下 audio_ok=True 但

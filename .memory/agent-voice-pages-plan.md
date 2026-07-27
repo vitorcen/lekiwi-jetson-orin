@@ -54,5 +54,23 @@ codex gpt-5.6-sol 25 条 + kimi 24 条评审，采纳/驳回见其 §10）。
 复制一遍互斥判断。真正需要独占的只有**改变机器人听到什么**的动作（临时换 ASR
 引擎、扫 VAD 参数、流式模式、段回放），那些仍然只在台子开着时可用、关台还原。
 
+### 漏网的那一处：生命周期自己的 guard（2026-07-27）
+
+重构改了 `set_bench`、改了段路由、加了 `_mic_wanted`/`_sync_mic`，**但 `_capture_loop`
+自己的存活条件还写着 `while self.state != IDLE`**。只开转写台不开对话时 `state` 就是
+`IDLE` → `start_capture()` 建的任务第一次求值即假、瞬间结束、**arecord 从没启动**。
+任务对象存在且已 `done`，看上去像「起过了」。更糟的是 `audio_watch_loop` 的自愈判据
+`cap_dead = self.state != IDLE and ...` 犯同一个错，于是**主路径和安全网被同一个过时
+假设一起打穿**。现象是「转写台开关翻了但麦克风没声音」，而且只在对话关着时复现——
+对话开着时 `state != IDLE` 恰好把麦克风撑起来了，掩盖了两天。
+
+**Why**：把一个东西从「状态」改成「开关」时，改切换入口是不够的。**凡是以旧驱动量
+（这里是 `state`）作为判据的地方都要改**，尤其是长生命周期循环自己的 while 条件和
+兜底自愈的判据——它们离切换点最远，最容易漏，而且失效时不报错、只是安静地不干活。
+
+**How to apply**：引入 `_x_wanted()` 这类聚合判据后，`grep` 一遍旧驱动量（`state !=`
+/ `state ==`），逐个问「这句问的是对话状态，还是问某个资源该不该活着？」后者一律换成
+聚合判据。验收也别只测「开着对话时」那条路——**单独打开每一个消费者各测一次**。
+
 相关：[[voice-frontend-s2]]、[[hermes-voice-agent-plan]]、[[lekiwi-gui-tauri]]、
-[[board-memory-ceiling]]、[[vlm-stack-orin]]。
+[[board-memory-ceiling]]、[[vlm-stack-orin]]、[[voice-mic-br21-noise-usb]]。
