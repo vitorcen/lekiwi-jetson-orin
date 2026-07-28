@@ -149,3 +149,56 @@ def test_make_vad_unavailable_engine_raises(tmp_path):
     # empty models dir -> silero/ten unavailable; no silent fallback, a hard raise.
     with pytest.raises(ValueError):
         vv.make_vad("silero", {}, str(tmp_path))
+
+
+# ---- CaptureTrace: 故障当时那一份字节 --------------------------------------
+
+import voice_audio as va
+
+
+def _chunk(n=5120, v=1000):
+    return (np.full(n, v, dtype=np.int16)).tobytes()
+
+
+def test_trace_ring_is_bounded_but_position_is_not():
+    """环会淘汰,采样序号不会 —— 序号是对齐波形用的绝对时间轴,回绕就没法对齐。"""
+    t = va.CaptureTrace(seconds=1.0)             # 32000 bytes;一块 320ms = 10240 bytes
+    starts = [t.push(_chunk()) for _ in range(30)]
+    assert starts[0] == 0 and starts[1] == 5120  # 5120 **采样**(= 10240 字节)
+    assert starts[-1] == 29 * 5120               # 单调递增,不受淘汰影响
+    assert t.nbytes <= t.cap_bytes
+
+
+def test_trace_keeps_the_most_recent_seconds():
+    t = va.CaptureTrace(seconds=1.0)
+    for i in range(20):
+        t.push(_chunk(v=i))
+    blob = b"".join(t.chunks)
+    last = np.frombuffer(blob, dtype=np.int16)
+    assert last[-1] == 19                        # 最后一块必须在
+    assert t.nbytes / va.CaptureTrace.BYTES_PER_S <= 1.0 + 0.32
+
+
+def test_trace_note_is_capped():
+    t = va.CaptureTrace(seconds=1.0)
+    for i in range(200):
+        t.note(i * 5120, "L", i % 2 == 0, 0)
+    assert len(t.trace) <= t.trace_cap
+
+
+def test_trace_dump_writes_wav_and_aligned_trace(tmp_path):
+    t = va.CaptureTrace(seconds=1.0)
+    for i in range(20):
+        pos = t.push(_chunk(v=i))
+        t.note(pos, "B", False, 0)
+    w, j = str(tmp_path / "a.wav"), str(tmp_path / "a.json")
+    out = t.dump(w, j)
+    import json as _json
+    import wave as _wave
+    with _wave.open(w) as f:
+        assert f.getframerate() == 16000 and f.getnchannels() == 1
+        assert f.getnframes() == out["seconds"] * 16000
+    meta = _json.load(open(j))
+    # 轨迹只保留环里还有的那些块,否则会指向已经被淘汰掉的采样
+    assert all(e[0] >= meta["first_sample"] for e in meta["trace"])
+    assert meta["first_sample"] == t.pos - f.getnframes()

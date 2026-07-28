@@ -46,7 +46,7 @@ import voice_vad as vvad
 import voice_brain as vbrain
 import voice_asr_obs as vobs
 import voice_http as vhttp
-from voice_audio import SentenceAccumulator, SegStore, read_wav_16k
+from voice_audio import CaptureTrace, SentenceAccumulator, SegStore, read_wav_16k
 import omni_client
 
 # --------------------------------------------------------------------------- #
@@ -187,6 +187,10 @@ FEED_RING = 200
 # 供转写台「▶ 听」回放。只存 /tmp,不入仓库。
 SEG_DIR = _env("VOICE_ASR_SEG_DIR", "/tmp/lekiwi_asr_segs")
 SEG_KEEP = int(_env("VOICE_ASR_SEG_KEEP", "10"))
+# 采集诊断环的长度。30s @16k mono s16 ≈ 960KB 常驻。
+# PCM:喂过 90s 真实历史的实例吃掉句首,静默 2s 刷一次就完整恢复;刷太勤反而更差
+TRACE_SECONDS = float(_env("VOICE_TRACE_SECONDS", "30"))
+TRACE_DIR = _env("VOICE_TRACE_DIR", "/tmp/lekiwi_trace")
 
 # 一键回环自检:已知中文人声测试 wav(edge-tts 合成)直接喂 VAD+ASR 全链,绕过麦克风。
 # 把「声学问题」与「模型问题」一键二分(见 .memory/voice-frontend-s2.md 麦克风排查铁律)。
@@ -483,6 +487,9 @@ class Daemon:
         # ASR 段级观测:since-boot 计数器 + 最近段音频回放存储
         self.asr_stats = vobs.AsrStats()
         self.seg_store = SegStore(SEG_DIR, SEG_KEEP)
+        # 采集诊断环(最近 30s 原始 PCM + 逐块判决)。约 1MB 常驻 —— 板子内存紧,
+        # 但没有「故障当时那一份字节」就只能在不同录音之间抽签,那个代价大得多。
+        self.trace = CaptureTrace(TRACE_SECONDS)
 
         # Vision 播报桥(板端后台任务) + caption 去重(限长从 config 读)
         self.vision_task: asyncio.Task | None = None
@@ -878,14 +885,16 @@ class Daemon:
             self.vad_since = time.time()
     def _handle_chunk(self, data: bytes) -> None:
         """一块 PCM。LISTENING 走正常截句;SPEAKING 开麦做打断检测;其余丢弃。"""
+        # 诊断环:**原始字节先进环**,在任何处理和任何闸门之前 —— 丢弃期的字节同样要
+        # 留,因为「句首被吃」很可能就发生在状态切换的那一刻。见 CaptureTrace 的说明。
+        pos = self.trace.push(data)
         # 归一化 + 数字增益(gain_db=0 时为恒等,零行为变化)。增益必须在电平表与 VAD
         # 之前统一施加,这样用户看到的电平就是 VAD/ASR 实际听到的幅度。
         samples = vvad.apply_gain(
             np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0,
             self.audio_gain_db)
         # 电平遥测:在闸门之前算,丢弃期也照报——"麦克风到底听没听见我"是排查
-        # ASR 不出字的第一个问题,而这台 MCP01 带硬件降噪门(静时输出近似静音,
-        # ALSA 增益调了没用),光看波形本底判断不了,必须有说话时的实测值。
+        # ASR 不出字的第一个问题,光看波形本底判断不了,必须有说话时的实测值。
         self._note_level(samples)
         listening = (self.state == LISTENING and time.time() >= self.mic_resume_ts)
         barge = (BARGE_IN and self.state == SPEAKING)
@@ -901,15 +910,18 @@ class Daemon:
                 except Exception:
                     pass
             self._note_vad_phase("muted")
+            self.trace.note(pos, "-", False, 0)
             return
         # 转写台流式模式(一级=流式):流式引擎自带端点、免VAD,实时出 partial/final。
         # 模式互斥 —— 走流式就不再走 VAD(切模式对比,不并行,免双份推理)。
         if bench and self.stream_cfg.get("enabled"):
             self._feed_stream(samples)
             self._note_vad_phase("muted")
+            self.trace.note(pos, "S", False, 0)
             return
         if self.vad is None:
             self._note_vad_phase("muted")
+            self.trace.note(pos, "0", False, 0)
             return
         try:
             segs = self.vad.feed(samples)
@@ -924,10 +936,9 @@ class Daemon:
                 self.emit("error", message=f"vad accept failed: {self.vad_last_error}")
             return
         # 相位翻转打点。放在 feed() 之后:此刻 active 已反映这一块的判定。
-        now_active = bool(self.vad.active)
-        if now_active != self._vad_was_active:
-            self._vad_was_active = now_active
         self._note_vad_phase("voice" if self.vad.active else "quiet")
+        self.trace.note(pos, "L" if listening else ("b" if barge else "B"),
+                        self.vad.active, len(segs))
         for seg_arr in segs:
             # 一段音频**解一次 ASR**,结果谁用谁取。这里只决定路由:
             #   起轮   —— 只在 LISTENING,且上一轮已结束(单轮保证);拿到段立刻改
@@ -2278,6 +2289,28 @@ class Daemon:
             except OSError as exc:
                 self.emit("error", message=f"config save failed: {exc}")
         return gain
+
+    def dump_trace(self, tag: str = "") -> dict:
+        """把诊断环落盘。**故障发生后立刻叫这个** —— 环只有 30 秒,过了就没了。
+
+        写在事件循环上(约 1MB,NVMe 上几毫秒),没有走线程池:dump 是人手触发的
+        低频动作,为它引入一次跨线程编排不值得,而且中间隔一次 await 就有可能被
+        新采集的块把要抓的那几秒挤出环外。"""
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        name = f"{stamp}{('_' + tag) if tag else ''}"
+        try:
+            os.makedirs(TRACE_DIR, exist_ok=True)
+            out = self.trace.dump(os.path.join(TRACE_DIR, name + ".wav"),
+                                  os.path.join(TRACE_DIR, name + ".json"))
+        except OSError as exc:
+            return {"error": f"trace dump failed: {exc}", "status": 500}
+        # 环里这几秒对应哪些段,一并回报 —— 对齐波形时要靠它认出哪一句是丢首那句
+        out["recent_segs"] = [
+            {"seg_id": e.get("seg_id"), "text": e.get("text"),
+             "dur_s": e.get("dur_s"), "outcome": e.get("outcome")}
+            for e in self.debug_tail.since(0).get("events", [])[-8:]]
+        self.emit("trace_dump", **{k: out[k] for k in ("wav", "seconds")})
+        return out
 
     async def apply_remote_asr(self) -> dict:
         """把 config.remote_asr 灌进 remote 宿主;它正在当值就顺手复探一次 —— 地址

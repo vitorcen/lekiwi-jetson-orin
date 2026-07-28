@@ -1,10 +1,11 @@
 """Audio-side pure helpers, extracted from daemon.py (pure movement, no behavior
 change): the LLM-delta -> TTS sentence accumulator, the VAD-segment replay ring,
-and wav reading. Nothing here touches daemon state."""
+wav reading, and the capture diagnostic ring. Nothing here touches daemon state."""
 
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import wave
@@ -178,3 +179,68 @@ def read_wav_16k(path: str) -> np.ndarray:
     if ch > 1:
         arr = arr.reshape(-1, ch).mean(axis=1)
     return arr
+
+
+# --------------------------------------------------------------------------- #
+# 采集诊断环:最近 N 秒的**原始** PCM + 每块的 VAD 判决轨迹
+# --------------------------------------------------------------------------- #
+class CaptureTrace:
+    """常驻保留最近 N 秒采集到的原始字节,外加逐块的判决轨迹,随时可以整段 dump。
+
+    **为什么必须是「故障当时那一份字节」**:2026-07-28 查「句首被吃/短句丢失」时,
+    每一次"复现"都是另录一份音频再离线跑 —— 房间噪声、扬声器状态、麦克风固件的
+    增益状态每次都不同,于是同一个配置一会儿 24/24 一会儿 9/18,结论翻了三次。
+    只有把 daemon 当时真正喂给 VAD 的那串采样留下来,才能做干净的反事实:
+    同一份字节喂新建 VAD vs 喂长跑 VAD,四种结果各自指向一个明确的原因。
+
+    存**原始 int16 字节**而不是处理后的 float:增益/滤波都是纯函数,离线可以重放,
+    而反过来推不回去。真要区分「预处理有没有问题」时,这是唯一还原得了的口径。
+
+    时间轴用**已采样数**而不是墙钟:事件循环会抖(ASR 推理跟 VAD 在同一个进程),
+    用 time.time() 记出来的间隔里混着调度延迟,对不齐波形。
+    """
+
+    BYTES_PER_S = 16000 * 2                       # 16k mono s16le
+
+    def __init__(self, seconds: float = 30.0) -> None:
+        self.cap_bytes = int(seconds * self.BYTES_PER_S)
+        self.chunks: list[bytes] = []
+        self.nbytes = 0
+        self.pos = 0                              # 自采集开始的总采样数(不随环淘汰)
+        self.trace: list[tuple] = []              # (pos, gate, active, n_segs)
+        self.trace_cap = int(seconds * 4)         # 每块 320ms → 约 3.1 条/秒,留余量
+
+    def push(self, data: bytes) -> int:
+        """一块原始 PCM 进环,返回这块**开头**在流中的采样序号。"""
+        start = self.pos
+        self.pos += len(data) // 2
+        self.chunks.append(data)
+        self.nbytes += len(data)
+        while self.nbytes > self.cap_bytes and len(self.chunks) > 1:
+            self.nbytes -= len(self.chunks.pop(0))
+        return start
+
+    def note(self, start: int, gate: str, active: bool, n_segs: int) -> None:
+        """记一块的判决:gate=这块走了哪条路,active=喂完之后 VAD 认为在说话吗。"""
+        self.trace.append((start, gate, 1 if active else 0, n_segs))
+        if len(self.trace) > self.trace_cap:
+            del self.trace[:len(self.trace) - self.trace_cap]
+
+    def dump(self, path_wav: str, path_json: str) -> dict:
+        """把环里的字节写成 wav,轨迹写成 json。返回给调用方回报的摘要。"""
+        blob = b"".join(self.chunks)
+        first = self.pos - len(blob) // 2         # 环里第一个采样的序号
+        with wave.open(path_wav, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(blob)
+        trace = [t for t in self.trace if t[0] >= first]
+        with open(path_json, "w", encoding="utf-8") as fh:
+            json.dump({"first_sample": first, "sample_rate": 16000,
+                       "seconds": len(blob) / self.BYTES_PER_S,
+                       "trace_fields": ["sample", "gate", "vad_active", "segments"],
+                       "trace": trace}, fh)
+        return {"wav": path_wav, "trace": path_json,
+                "seconds": round(len(blob) / self.BYTES_PER_S, 2),
+                "first_sample": first, "chunks": len(trace)}

@@ -331,6 +331,18 @@ async def h_asr_debug_seg_play(request: web.Request) -> web.Response:
     return web.json_response(result, status=status)
 
 
+async def h_trace_dump(request: web.Request) -> web.Response:
+    """POST /asr_debug/trace {tag?} → 把最近 N 秒**原始**采集字节 + 逐块 VAD 判决
+    落盘。查「句首被吃/整句丢失」时的唯一正确起点:拿到 daemon 当时真正听到的那串
+    采样,才能做「同一份字节喂新 VAD vs 喂长跑 VAD」的反事实。另录一份再离线跑
+    比较的是房间,不是配置(2026-07-28 在这上面连翻三次车)。"""
+    body = await _json_body(request)
+    tag = str(body.get("tag") or "")[:32]
+    result = D.dump_trace("".join(c for c in tag if c.isalnum() or c in "-_"))
+    status = result.pop("status", 200)
+    return web.json_response(result, status=status)
+
+
 async def h_selftest(request: web.Request) -> web.Response:
     """POST /selftest → 已知人声 wav 喂 VAD+ASR 全链(绕过麦克风),返回
     {vad_segments, asr_text, expected, ratio, pass}。MCP01 不在也能跑。"""
@@ -408,6 +420,7 @@ def make_app(daemon, token: str, models: str, hermes_env: str,
     app.router.add_get("/asr_debug/seg", h_asr_debug_seg)
     app.router.add_post("/asr_debug/seg_play", h_asr_debug_seg_play)
     app.router.add_post("/asr_debug/seg_asr", h_asr_debug_seg_asr)
+    app.router.add_post("/asr_debug/trace", h_trace_dump)
     app.router.add_post("/selftest", h_selftest)
     app.router.add_get("/feed", h_feed)
     app.router.add_get("/events", h_events)
