@@ -445,8 +445,10 @@ function paintVad() {
   $('vadElapsed').textContent = (cls === 'busy' || !since)
     ? '—' : held.toFixed(1) + 's';
 
+  // -99 is the daemon's "no measurement covering right now" (closed mic), not a
+  // reading — showing it as a number reads as "the mic is hearing something faint".
   const dbfs = vadSt.mic_dbfs;
-  $('vadLevel').textContent = (dbfs === undefined || dbfs === null)
+  $('vadLevel').textContent = (dbfs === undefined || dbfs === null || dbfs <= -99)
     ? '—' : dbfs.toFixed(0) + 'dB';
   // Segment and reply lengths are stamped on the transcript rows they belong to,
   // not shown here: a floating "most recent" number leaves you matching it back

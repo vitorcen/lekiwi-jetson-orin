@@ -404,7 +404,10 @@ class Daemon:
         # VAD 相位遥测(给 Agent 页仪表盘)。刻意做成「当前值」而不是 feed 事件:
         # 嘈杂环境下 VAD 每 320ms 就可能翻转一次,记成事件会把 feed 环冲垮,而仪表盘
         # 本来就只关心此刻的相位和它持续了多久。
-        self._vad_was_active = False
+        # 四相,不是一个 active 布尔 —— **没在喂 VAD 也是相位**:
+        #   closed 闭麦没采集 / muted 采着但不喂(半双工丢弃、流式模式)
+        #   quiet  在喂没人说 / voice 在喂有人在说
+        self._vad_phase = "closed"
         self.vad_since = time.time()       # 上次相位翻转时刻
         self.last_seg_s = 0.0              # 最近一段被采下来的语音长度
         self.last_say_s = 0.0              # 最近一次机器人自己说了多长
@@ -772,6 +775,12 @@ class Daemon:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+        # 收尾遥测**必须在采集任务真死之后**打:上面每个 await 都是采集循环的可乘之
+        # 机,先打就会被在途的那一块覆盖回去(实测停后仍报 -39.5 dBFS)。
+        self._note_vad_phase("closed")     # 闭麦是相位,不是「相位停住」
+        # 电平同理:不采集就没有电平。留着最后一块的读数,面板会在闭麦时报一个
+        # 几小时前的 dBFS,看上去像「麦克风还在听」。-99 = 没有覆盖此刻的测量。
+        self.mic_dbfs = self.mic_peak_dbfs = -99.0
 
     async def _capture_loop(self) -> None:
         """常驻读 arecord raw s16le@16k,320ms 一块。LISTENING 且过了半双工静默才
@@ -841,6 +850,14 @@ class Daemon:
             self.mic_peak_dbfs = self.mic_dbfs
             self.mic_peak_ts = now
 
+    def _note_vad_phase(self, phase: str) -> None:
+        """相位翻转打点 —— 仪表盘上「这个相位持续了多久」的唯一来源。
+        以前只在 feed() 之后按 active 布尔打点,漏掉闭麦和丢弃两段,于是 vad_since
+        跨过它们一路累加:实测面板报「静默(在听) 33768.9s」,那不是静默多久,
+        active 清成 False 而打点函数看不见,一段话说完就此错位,后面全不准。"""
+        if phase != self._vad_phase:
+            self._vad_phase = phase
+            self.vad_since = time.time()
     def _handle_chunk(self, data: bytes) -> None:
         """一块 PCM。LISTENING 走正常截句;SPEAKING 开麦做打断检测;其余丢弃。"""
         # 归一化 + 数字增益(gain_db=0 时为恒等,零行为变化)。增益必须在电平表与 VAD
@@ -865,13 +882,16 @@ class Daemon:
                     self.vad.reset()
                 except Exception:
                     pass
+            self._note_vad_phase("muted")
             return
         # 转写台流式模式(一级=流式):流式引擎自带端点、免VAD,实时出 partial/final。
         # 模式互斥 —— 走流式就不再走 VAD(切模式对比,不并行,免双份推理)。
         if bench and self.stream_cfg.get("enabled"):
             self._feed_stream(samples)
+            self._note_vad_phase("muted")
             return
         if self.vad is None:
+            self._note_vad_phase("muted")
             return
         try:
             segs = self.vad.feed(samples)
@@ -889,7 +909,7 @@ class Daemon:
         now_active = bool(self.vad.active)
         if now_active != self._vad_was_active:
             self._vad_was_active = now_active
-            self.vad_since = time.time()
+        self._note_vad_phase("voice" if self.vad.active else "quiet")
         for seg_arr in segs:
             # 一段音频**解一次 ASR**,结果谁用谁取。这里只决定路由:
             #   起轮   —— 只在 LISTENING,且上一轮已结束(单轮保证);拿到段立刻改

@@ -135,15 +135,18 @@ function paintDevice(h) {
     return;
   }
   const cap = h.capture_card, play = h.playback_card;
+  // -99 = daemon isn't capturing (mic closed), so there is no level to show.
+  const live = v => (Number.isFinite(v) && v > -99);
   const dbfs = +h.mic_dbfs, peak = +h.mic_peak_dbfs;
   $('vdMicCard').textContent = '麦克风 ' + (cap || '未发现');
   $('vdPlayCard').textContent = '音响 ' + (play || '未发现');
-  $('vdMicDbfs').textContent = Number.isFinite(dbfs) ? dbfs.toFixed(0) + ' dBFS' : '—';
-  $('vdMicPeak').textContent = '峰 ' + (Number.isFinite(peak) ? peak.toFixed(0) : '—');
+  $('vdMicDbfs').textContent = live(dbfs) ? dbfs.toFixed(0) + ' dBFS' : '—';
+  $('vdMicPeak').textContent = '峰 ' + (live(peak) ? peak.toFixed(0) : '—');
   if (fill) {
-    const pct = Math.max(0, Math.min(100, (dbfs - LVL_MIN) / (0 - LVL_MIN) * 100));
+    const pct = live(dbfs)
+      ? Math.max(0, Math.min(100, (dbfs - LVL_MIN) / (0 - LVL_MIN) * 100)) : 0;
     fill.style.width = pct + '%';
-    fill.classList.toggle('hot', Number.isFinite(dbfs) && dbfs >= LVL_HOT);
+    fill.classList.toggle('hot', live(dbfs) && dbfs >= LVL_HOT);
   }
   if (okPill) {
     const ok = h.audio === 'ok';
