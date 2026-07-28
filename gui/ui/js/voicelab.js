@@ -567,7 +567,7 @@ function addStreamRow(ev) {
 // a "▶ 听" button that replays the exact PCM the model heard.
 const OUTCOME_LABEL = {
   accepted: '✓ 出字', empty_asr: '解码空', filler: '语气词',
-  too_short: '过短', echo: '回声',
+  too_short: '过短', echo: '回声', asr_error: '⚠ 解码失败',
 };
 
 function addSegRow(ev) {

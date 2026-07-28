@@ -935,28 +935,41 @@ class Daemon:
     def _asr_sync(self, samples: np.ndarray) -> str:
         return self.asr.transcribe(samples)
 
-    async def _asr_then_turn(self, gen: int, samples: np.ndarray) -> None:
+    async def _asr_decode(self, samples: np.ndarray) -> str | None:
+        """解一段。**解码失败也是这一段的结局,同样要留一条行**;返回 None = 别再往下走。
+
+        以前三个解码点各写各的 except:对话路 emit 一条 error 就走人,转写路一样,
+        打断路连 error 都不发。段就此人间蒸发 —— 没有行、没有计数、没有回放,
+        操作员看到的只是「凭空少一句」,和 VAD 没截到长得一模一样。而 remote 引擎
+        走 HTTP 打到 Mac 上,网络一抖就必然走这条路,不是假想。"""
         loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
+        except Exception as exc:                                 # noqa: BLE001
+            self._record_seg(samples, vobs.ASR_ERROR, f"{type(exc).__name__}: {exc}")
+            self.emit("error", message=f"asr failed: {exc}")
+            return None
+
+    async def _asr_then_turn(self, gen: int, samples: np.ndarray) -> None:
         # THINKING covers both ASR decode and the brain, which hides where a slow
         # turn is actually stuck. This flag splits the two for the Agent gauge.
         self.asr_busy = True
-        try:
-            text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
-        except Exception as exc:
-            self.asr_busy = False
-            self.emit("error", message=f"asr failed: {exc}")
+        text = await self._asr_decode(samples)
+        self.asr_busy = False
+        if text is None:
             if gen == self.generation:
                 self.set_state(LISTENING)
                 self.refresh_deadline()
-            return
-        self.asr_busy = False
-        if gen != self.generation:
             return
         # 段级观测:分类 outcome、计数、存段音频、进转写环。**对话段也进环** ——
         # 这就是「一个生产者两个消费者」:同一段音频解一次 ASR,转写台看得到、
         # 对话也用得上。以前对话段只发 user_text/asr_seg,台子上一片空白。
         outcome = vobs.classify_segment(text)
         self._record_seg(samples, outcome, text)
+        # 记录在前、路由在后:这一轮是否已被作废(用户按了停/切了引擎)只决定要不要
+        # 起轮,不能追溯地把已经解出来的这一段抹掉。
+        if gen != self.generation:
+            return
         if outcome != vobs.ACCEPTED:      # 空解码 / 语气词 / 过短 → 不上 LLM
             self.set_state(LISTENING)
             self.refresh_deadline()
@@ -981,12 +994,9 @@ class Daemon:
         return`,它把一段已经解完的转写整个扔掉 —— 没有行、没有计数、没有事件 ——
         只因为解码期间状态动了一下。段是采集时就已经产生的事实,一秒后的状态变化
         不能追溯地把它作废。迟到一行无害,静默丢数据有害。"""
-        loop = asyncio.get_running_loop()
-        try:
-            text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
-        except Exception as exc:                                 # noqa: BLE001
-            self.emit("error", message=f"asr transcribe failed: {exc}")
-            return
+        text = await self._asr_decode(samples)
+        if text is None:
+            return                        # 失败行已由 _asr_decode 记下
         outcome = vobs.classify_segment(text)
         self._record_seg(samples, outcome, text)
 
@@ -1159,23 +1169,23 @@ class Daemon:
         每条路径都 _record_seg —— 和 _asr_then_turn 一样,环是唯一的事实,打断
         与否是路由。以前只有被前置门挡掉的段进环,真打断的那句反而看不见,
         转写台上一片空白。"""
-        loop = asyncio.get_running_loop()
-        try:
-            text = await loop.run_in_executor(self._asr_pool, self._asr_sync, samples)
-        except Exception:
-            return
-        if gen != self.generation or self.state != SPEAKING:
-            return                        # 这轮播报已结束/已被别的路径打断
+        text = await self._asr_decode(samples)
+        if text is None:
+            return                        # 失败行已由 _asr_decode 记下
         if self._is_echo(text):
             self._record_seg(samples, vobs.ECHO, text)
             return
-        if self._norm_text(text) in STOP_WORDS:   # 单字「停」要算,先于过短过滤
-            self._record_seg(samples, vobs.ACCEPTED, text)
+        # 先定性、先记录,再决定动作。判定不依赖状态,只有「要不要打断」依赖 ——
+        # 以前状态检查横在最前面,这轮播报刚结束的那一刻截到的话就一行都不留。
+        stop_word = self._norm_text(text) in STOP_WORDS   # 单字「停」要算,先于过短过滤
+        outcome = vobs.ACCEPTED if stop_word else vobs.classify_segment(text)
+        self._record_seg(samples, outcome, text)
+        if gen != self.generation or self.state != SPEAKING:
+            return                        # 这轮播报已结束/已被别的路径打断:只记不动
+        if stop_word:
             self.emit("barge_in", text=text, action="stop")
             await self.do_interrupt()
             return
-        outcome = vobs.classify_segment(text)
-        self._record_seg(samples, outcome, text)
         if outcome != vobs.ACCEPTED:      # 空解码 / 语气词 / 过短 → 不打断
             return
         # 真插话:打断当前播报,把这段话直接作为新一轮输入(不用重说)

@@ -24,6 +24,7 @@ EMPTY_ASR = "empty_asr"    # VAD cut a segment but ASR decoded nothing
 FILLER = "filler"          # a bare filler word, dropped before the LLM
 TOO_SHORT = "too_short"    # shorter than min_chars, dropped before the LLM
 ECHO = "echo"              # the robot heard itself (barge path, matched recent TTS)
+ASR_ERROR = "asr_error"    # the decode itself raised — the segment is real, the text isn't
 
 
 def classify_segment(text, *, min_chars=2, fillers=FILLERS):
@@ -52,7 +53,7 @@ class AsrStats:
 
     def __init__(self):
         self.d = {"segments": 0, ACCEPTED: 0, EMPTY_ASR: 0,
-                  FILLER: 0, TOO_SHORT: 0, ECHO: 0}
+                  FILLER: 0, TOO_SHORT: 0, ECHO: 0, ASR_ERROR: 0}
 
     def record(self, outcome):
         self.d["segments"] += 1

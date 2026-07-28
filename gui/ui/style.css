@@ -429,6 +429,9 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 .seg-filler .segbadge, .seg-too_short .segbadge { color: #f9e2af; border-color: #504a2c; }
 .seg-echo { border-left-color: #6b7394; }
 .seg-echo .segbadge { color: #6b7394; border-color: #3a3f52; }
+/* 解码失败:段是真的,文本不是。红得比 empty_asr 更亮 —— 这行是故障不是结果。 */
+.seg-asr_error { border-left-color: #eb6f92; background: #2a1a20; }
+.seg-asr_error .segbadge { color: #eb6f92; border-color: #5c2b38; }
 @media (max-width: 560px) { .caprow { flex-direction: column; } .capthumb { width: 100%; flex: none; } }
 
 /* ===================== 底部通用日志 ===================== */
