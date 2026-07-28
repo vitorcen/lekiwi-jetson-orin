@@ -648,6 +648,23 @@ class Daemon:
                 except OSError:
                     pass
 
+    def _cards_present(self) -> bool:
+        """当前握着的两张卡还在不在。**读 /proc/asound/cards,不 fork** —— 巡检每 30s
+        一次,走 `arecord -l` 那条路是每次 5 个子进程,而这块板内存见底、fork 一慢就会
+        伪装成设备故障(见 .memory/board-memory-ceiling)。
+
+        没有这一问的话,`audio_ok` 只会被「用了才发现坏」的路径翻掉:闭着麦的时候
+        把声卡拔了没人碰设备,于是 /health 一直报着一张已经不存在的卡 + audio=ok。
+        2026-07-28 实锅:BR21 换成 MCP01 之后,daemon 照报 capture=BR21 audio=ok。"""
+        try:
+            with open("/proc/asound/cards", "r", encoding="utf-8", errors="replace") as fh:
+                blob = fh.read()
+        except OSError:
+            return True                     # 读不到 ≠ 卡没了,别据此拆好通路
+        # 行形如: ` 2 [MCP01          ]: USB-Audio - MCP01`
+        names = {m.strip() for m in re.findall(r"^\s*\d+\s+\[([^\]]+)\]", blob, re.M)}
+        return all(c in names for c in (self.cap_card, self.play_card) if c)
+
     async def audio_watch_loop(self) -> None:
         """音频卡丢失/卡名失一致时重试发现(拔掉声卡不让 daemon 崩)。
         故障期 5s 快速重试,正常期 30s 巡检。
@@ -656,7 +673,8 @@ class Daemon:
         audio_ok 修好了,但采集永远没人再拉起 → ASR 无响应),这里兜底重启。
         判据只能问 _mic_wanted:写成 state != IDLE 就漏掉「只开转写台」那一路。"""
         while True:
-            broken = not self.audio_ok or not (self.cap_card and self.play_card)
+            broken = (not self.audio_ok or not (self.cap_card and self.play_card)
+                      or not self._cards_present())
             if broken:
                 await self.discover_audio()
                 broken = not self.audio_ok
