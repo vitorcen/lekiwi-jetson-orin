@@ -8,7 +8,9 @@ import voice_config as vc
 def test_merge_defaults_fills_missing_and_keeps_overrides():
     cfg = vc.merge_defaults({"vision_speak": True})
     assert cfg["vision_speak"] is True
-    assert cfg["brain"]["kind"] == "hermes"          # filled from default
+    # brain 是 {preset: <名字>};kind 挂在 preset 上、缺省即 hermes(见 brain_kind)
+    assert cfg["brain"]["preset"] == "deepseek"      # filled from default
+    assert vc.current_brain_kind(cfg) == "hermes"
     assert "deepseek" in cfg["presets"]
 
 
@@ -28,8 +30,10 @@ def test_apply_axis_tts_replaces_pair_tts_only():
     cfg = vc.merge_defaults({})
     new = vc.apply_axis(cfg, "tts", {"engine": "melo"})
     assert new["presets"]["deepseek"]["pair"]["tts"] == {"engine": "melo"}
-    # asr untouched, other top-level untouched, input immutable
-    assert new["presets"]["deepseek"]["pair"]["asr"] == "sensevoice"
+    # asr untouched, other top-level untouched, input immutable。比的是「和输入一样」
+    # 而不是某个写死的引擎名 —— 这条断言的命题是「换 tts 不碰 asr」,不是默认引擎是谁。
+    assert (new["presets"]["deepseek"]["pair"]["asr"]
+            == cfg["presets"]["deepseek"]["pair"]["asr"])
     assert cfg["presets"]["deepseek"]["pair"]["tts"]["engine"] == "matcha"
 
 
@@ -80,7 +84,7 @@ def test_enums_expose_paraformer_with_size():
     e = vc.enums()
     asr = {a["id"]: a for a in e["asr"]}
     assert "paraformer" in asr
-    assert asr["paraformer"]["label"] == "Paraformer-large zh"
+    assert asr["paraformer"]["label"].startswith("Paraformer-large zh")
     assert asr["paraformer"]["params_b"] and asr["paraformer"]["disk_mb"]
 
 
@@ -160,8 +164,11 @@ def test_compute_drift_detects_ephemeral_override():
 
 
 def test_compute_drift_empty_when_aligned():
-    desired = vc.current_pair(vc.merge_defaults({}))       # matcha default
-    applied = {"asr": "sensevoice", "tts_engine": "matcha", "edge_voice": None}
+    desired = vc.current_pair(vc.merge_defaults({}))
+    # applied 由 desired 推出来,「对齐」才真的是对齐 —— 写死引擎名的话,改一次默认
+    # 搭配这条测试就变成在断言「漂移」,而它的命题是「对齐时 drift 为空」。
+    applied = {"asr": desired["asr"], "tts_engine": desired["tts"]["engine"],
+               "edge_voice": None}
     assert vc.compute_drift(desired, applied) == {}
 
 
@@ -169,9 +176,12 @@ def test_enums_are_metadata_objects():
     e = vc.enums()
     # asr/tts entries are {id,label,params_b,disk_mb} objects, edge_voices stays strings
     asr = {a["id"]: a for a in e["asr"]}
-    assert asr["sensevoice"]["label"] == "SenseVoice-Small"
+    # label 后面挂着实测数字(「近场12/14,0.11s/段」),会随复测变 —— 断言前缀,
+    # 这条测试问的是「enums 是带元数据的对象」,不是文案。
+    assert asr["sensevoice"]["label"].startswith("SenseVoice-Small")
     assert asr["sensevoice"]["params_b"] == 0.234 and asr["sensevoice"]["disk_mb"] == 229
-    assert e["asr"][0]["id"] == "funasr"       # funasr listed first (headline engine)
+    # 排头的是当前主力引擎:2026-07-26 起是 qwen3(sherpa 原生抗噪),不再是 funasr
+    assert e["asr"][0]["id"] == "qwen3"
     tts = {t["id"]: t for t in e["tts"]}
     assert tts["edge"]["params_b"] is None and tts["edge"]["disk_mb"] is None  # online
     assert tts["melo"]["disk_mb"] == 183                                       # offline
@@ -185,9 +195,11 @@ def test_enums_are_metadata_objects():
 # ---- vad axis (switchable segmenter, global audio front-end) ---------------
 def test_default_has_vad_and_audio_axes():
     cfg = vc.merge_defaults({})
-    assert cfg["vad"] == {"engine": "fsmn", "threshold": 0.5,
-                          "min_speech_s": 0.1, "min_silence_s": 0.5,
-                          "pre_roll_s": 0.9}
+    # 2026-07-25 扫参结论(silero 完胜 fsmn)。这条是「默认值被改了要有人知道」的
+    # 绊线,所以照抄字面值是对的 —— 改默认时必须同步改这里,并说明为什么。
+    assert cfg["vad"] == {"engine": "silero", "threshold": 0.3,
+                          "min_speech_s": 0.1, "min_silence_s": 0.4,
+                          "pre_roll_s": 0.6}
     assert cfg["audio"] == {"gain_db": 0}
 
 
