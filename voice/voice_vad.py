@@ -157,6 +157,11 @@ class VadEngine:
     def reset(self):
         pass
 
+    def refresh(self):
+        """静默期定时刷新:默认就是 reset()。只有带回看环的引擎(silero/ten)才需要
+        把两者分开 —— 见 SileroVad.refresh。"""
+        self.reset()
+
     def flush(self):
         return []
 
@@ -186,6 +191,11 @@ class SileroVad(VadEngine):
         # back-fill [start-pre_roll, start). pre_roll==0 => no ring, exact stock output.
         self._pre = max(0, int(round(float(pre_roll_s) * SAMPLE_RATE)))
         self._cap = self._pre + int(self.RING_MARGIN_S * SAMPLE_RATE)
+        # _fed 是**绝对**采样数(从构造起,永不回零),_epoch 是 sherpa 当前纪元的
+        # 第 0 号采样在这条绝对轴上的位置。分开是为了 refresh():sherpa 一 Reset()
+        # 它的 seg.start 就从 0 重新数,而我们的环要继续活下去,两把尺子必须能换算。
+        self._fed = 0
+        self._epoch = 0
         self._reset_ring()
 
     def _configure(self, cfg, model_path, threshold, min_speech_s, min_silence_s):
@@ -197,14 +207,17 @@ class SileroVad(VadEngine):
 
     def _reset_ring(self):
         import numpy as np
-        self._fed = 0                                # samples fed since last reset
+        self._epoch = self._fed                      # 新纪元从此刻开始
         self._ring = np.zeros(0, dtype=np.float32)   # last <=_cap fed samples
 
     def _prepend(self, start, samples):
         """Back-fill up to pre_roll samples of context sitting before `start` in the ring.
+        `start` 是 sherpa 纪元内的序号,先换算到绝对轴再查环 —— refresh() 之后两者
+        差一个 _epoch,不换算就会去环里取错位置(或取不到)。
         All indices clamped — a rolled-past / over-reported start just yields less pre-roll,
         never a crash (§coordinator: 取不到就有多少拼多少,不报错)."""
         import numpy as np
+        start = self._epoch + start
         ring_start = self._fed - len(self._ring)
         lo = max(start - self._pre, ring_start, 0)
         hi = min(start, self._fed)
@@ -239,6 +252,21 @@ class SileroVad(VadEngine):
         self._vad.reset()
         if self._pre:
             self._reset_ring()
+
+    def refresh(self):
+        """重置模型和分段状态,**但保留回看环**。
+
+        为什么要有它:长跑的 silero 实例会退化 —— 实测同一份字节,新建实例切得出
+        完整句首,喂过 90 秒真实语音历史的实例就把句首吃掉(2026-07-28,故障 PCM
+        原样复现)。`reset()` 能治,但它连环一起清,于是「刚 reset 完就有人说话」
+        反而丢句首(静默 0.5s 就 reset 的策略实测比 2s 更差)。分开这两件事之后,
+        刷新频率就不再和句首风险挂钩。
+
+        只调 sherpa 自己的 Reset()(它会一并清 triggered/temp_start/hidden state),
+        不碰它的内部实现;环留在 Python 这侧。顺带:定期 Reset 会把 sherpa 内部那个
+        int32 采样计数清零,反而躲开了它 16k 下约 37 小时的溢出。"""
+        self._vad.reset()
+        self._epoch = self._fed
 
     def flush(self):
         try:

@@ -188,7 +188,10 @@ FEED_RING = 200
 SEG_DIR = _env("VOICE_ASR_SEG_DIR", "/tmp/lekiwi_asr_segs")
 SEG_KEEP = int(_env("VOICE_ASR_SEG_KEEP", "10"))
 # 采集诊断环的长度。30s @16k mono s16 ≈ 960KB 常驻。
+# 静默多久刷一次 VAD。长跑的 silero 实例会退化(丢句首/漏短句),实测同一份故障
 # PCM:喂过 90s 真实历史的实例吃掉句首,静默 2s 刷一次就完整恢复;刷太勤反而更差
+# (0.5s 实测仍丢字)——所以这个数不能随手调小。0 = 关掉刷新。
+VAD_REFRESH_IDLE_S = float(_env("VOICE_VAD_REFRESH_IDLE_S", "2.0"))
 TRACE_SECONDS = float(_env("VOICE_TRACE_SECONDS", "30"))
 TRACE_DIR = _env("VOICE_TRACE_DIR", "/tmp/lekiwi_trace")
 
@@ -413,6 +416,9 @@ class Daemon:
         #   quiet  在喂没人说 / voice 在喂有人在说
         self._vad_phase = "closed"
         self.vad_since = time.time()       # 上次相位翻转时刻
+        # 连续静默了多少**音频**秒(不是墙钟秒)。ASR 推理和 VAD 在同一个进程里,
+        # 墙钟间隔里混着调度延迟,对不齐波形;用喂进去的采样数才是这条流自己的时间。
+        self._vad_idle_s = 0.0
         self.last_seg_s = 0.0              # 最近一段被采下来的语音长度
         self.last_say_s = 0.0              # 最近一次机器人自己说了多长
         self.last_say_backend = None
@@ -877,12 +883,40 @@ class Daemon:
 
     def _note_vad_phase(self, phase: str) -> None:
         """相位翻转打点 —— 仪表盘上「这个相位持续了多久」的唯一来源。
+
+        每个「VAD 此刻在干什么」变了的地方都必须打,**包括没在喂 VAD 的那些**。
         以前只在 feed() 之后按 active 布尔打点,漏掉闭麦和丢弃两段,于是 vad_since
         跨过它们一路累加:实测面板报「静默(在听) 33768.9s」,那不是静默多久,
+        是 daemon 开机多久 —— 麦克风前 9 小时压根没开。丢弃期 vad.reset() 还会把
         active 清成 False 而打点函数看不见,一段话说完就此错位,后面全不准。"""
         if phase != self._vad_phase:
             self._vad_phase = phase
             self.vad_since = time.time()
+
+    def _refresh_vad_if_idle(self, n_samples: int, busy: bool) -> None:
+        """静默够久就刷新 VAD 状态。**这是丢句首/漏短句的根治点,不是调参。**
+
+        实测(2026-07-28,拿 daemon 当时真正听到的那份 PCM 做的反事实):同一份字节,
+        新建实例切出完整的「帮我看一下桌子上面放着什么」,而喂过 90 秒真实语音历史的
+        实例只切出「桌子上面放着什么」—— 音频、增益、ASR 全都没问题,是长跑的 silero
+        实例自己退化。静默 2 秒刷一次即可完全恢复。
+
+        计时用音频时间而非墙钟;只在**没有在途段**时刷,免得把说到一半的句子腰斩。
+        refresh() 保留回看环,所以刷新不会顺手把句首扔掉(那是 reset() 的老毛病)。"""
+        if not VAD_REFRESH_IDLE_S or self.vad is None:
+            return
+        if busy:
+            self._vad_idle_s = 0.0
+            return
+        self._vad_idle_s += n_samples / 16000.0
+        if self._vad_idle_s < VAD_REFRESH_IDLE_S:
+            return
+        self._vad_idle_s = 0.0
+        try:
+            self.vad.refresh()
+        except Exception as exc:                              # noqa: BLE001
+            self.emit("error", message=f"vad refresh failed: {exc}")
+
     def _handle_chunk(self, data: bytes) -> None:
         """一块 PCM。LISTENING 走正常截句;SPEAKING 开麦做打断检测;其余丢弃。"""
         # 诊断环:**原始字节先进环**,在任何处理和任何闸门之前 —— 丢弃期的字节同样要
@@ -937,6 +971,7 @@ class Daemon:
             return
         # 相位翻转打点。放在 feed() 之后:此刻 active 已反映这一块的判定。
         self._note_vad_phase("voice" if self.vad.active else "quiet")
+        self._refresh_vad_if_idle(len(samples), bool(segs) or self.vad.active)
         self.trace.note(pos, "L" if listening else ("b" if barge else "B"),
                         self.vad.active, len(segs))
         for seg_arr in segs:
