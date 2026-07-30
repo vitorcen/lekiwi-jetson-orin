@@ -98,7 +98,7 @@
     <button id="connBtn" class="primary">连接</button>
     <span id="zmqState" class="pill bad">未连接</span>
     <button id="motionBtn" data-state=""
-            title="安全总开关:切断后 base_host 不再输出电机指令(轮子停并松弛力矩可手推、臂冻结保持力矩不掉),收包/仲裁/日志照常,用于安全调试业务链路。状态由板端回报。">🛑 切断电机输出</button>
+            title="安全总开关：切断轮子和机械臂全部 9 个舵机扭矩；机械臂会受重力下落。收包、仲裁和日志照常，状态由板端回报。">🛑 切断电机输出</button>
     <span class="hint">板端 <code>base_host</code> 已随 systemd 开机自启（车通电即可连）；
       没装过先跑一次 <code>scripts/setup_board.sh &lt;board-ip&gt;</code></span>
   </div>
@@ -151,6 +151,18 @@
         <button id="lfollow" aria-disabled="true">开始跟随</button>
         <button id="lrelax" title="从臂折回休息位并断扭矩（同手柄 START）">收臂松弛</button>
         <span id="lstate" class="pill bad">未连接</span>
+      </div>
+      <div class="lrow">
+        <button id="lcal" aria-disabled="true">主臂校准</button>
+        <button id="fcal">从臂校准</button>
+      </div>
+      <div id="calbox" hidden>
+        <div class="caltitle"><b id="caltarget">机械臂校准</b><span id="calstep">1 / 2</span></div>
+        <p id="caltext"></p>
+        <div class="lrow">
+          <button id="calnext" class="primary">记录中位，开始采集范围</button>
+          <button id="calcancel">取消并恢复旧校准</button>
+        </div>
       </div>
       <table id="ljoints">
         <tr><td>1 肩转</td><td class="ljv" id="lj0">—</td><td>2 肩抬</td><td class="ljv" id="lj1">—</td></tr>

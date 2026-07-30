@@ -63,8 +63,11 @@ fn base_json(x: f64, y: f64, theta: f64) -> String {
 async fn push_or_drop(sock: &mut Option<PushSocket>, payload: String) {
     if let Some(s) = sock.as_mut() {
         let ok = matches!(
-            tokio::time::timeout(Duration::from_millis(200), s.send(ZmqMessage::from(payload)))
-                .await,
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                s.send(ZmqMessage::from(payload))
+            )
+            .await,
             Ok(Ok(())),
         );
         if !ok {
@@ -202,6 +205,8 @@ enum LReq {
     /// Capture the current pose as the zero reference (leader posed like the
     /// follower's rest pose).
     Align(oneshot::Sender<Result<(), String>>),
+    /// Three-stage LeRobot-compatible calibration: start -> middle -> finish.
+    Calibrate(String, oneshot::Sender<Result<String, String>>),
     Follow(bool),
     Disconnect,
 }
@@ -218,9 +223,34 @@ struct LeaderFrame {
     joints: Vec<u16>,
 }
 
-/// One position read: FF FF id 04 02 38 02 cks -> FF FF id len err lo hi cks.
-fn sts_read_pos(port: &mut Box<dyn serialport::SerialPort>, id: u8) -> Option<u16> {
-    let body = [id, 4u8, 2, 56, 2];
+#[derive(Clone, Copy)]
+struct ServoCalibration {
+    offset: i32,
+    min: u16,
+    max: u16,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CalibrationStage {
+    Middle,
+    Range,
+}
+
+struct LeaderCalibration {
+    stage: CalibrationStage,
+    original: [ServoCalibration; 6],
+    offsets: [i32; 6],
+    mins: [u16; 6],
+    maxes: [u16; 6],
+}
+
+fn sts_read(
+    port: &mut Box<dyn serialport::SerialPort>,
+    id: u8,
+    addr: u8,
+    len: u8,
+) -> Option<Vec<u8>> {
+    let body = [id, 4u8, 2, addr, len];
     let cks = !(body.iter().map(|&b| b as u32).sum::<u32>() as u8);
     let mut pkt = vec![0xFFu8, 0xFF];
     pkt.extend_from_slice(&body);
@@ -235,12 +265,14 @@ fn sts_read_pos(port: &mut Box<dyn serialport::SerialPort>, id: u8) -> Option<u1
         match port.read(&mut buf[got..]) {
             Ok(n) => {
                 got += n;
-                // Scan for FF FF id, need 8 bytes total from there.
-                for i in 0..got.saturating_sub(6) {
-                    if buf[i] == 0xFF && buf[i + 1] == 0xFF && buf[i + 2] == id && i + 7 <= got {
-                        let lo = buf[i + 5] as u16;
-                        let hi = buf[i + 6] as u16;
-                        return Some((lo | (hi << 8)) & 0x0FFF);
+                let need = len as usize;
+                for i in 0..got.saturating_sub(5) {
+                    if buf[i] == 0xFF
+                        && buf[i + 1] == 0xFF
+                        && buf[i + 2] == id
+                        && i + 5 + need <= got
+                    {
+                        return Some(buf[i + 5..i + 5 + need].to_vec());
                     }
                 }
             }
@@ -248,6 +280,85 @@ fn sts_read_pos(port: &mut Box<dyn serialport::SerialPort>, id: u8) -> Option<u1
         }
     }
     None
+}
+
+fn sts_read_u16(port: &mut Box<dyn serialport::SerialPort>, id: u8, addr: u8) -> Option<u16> {
+    let b = sts_read(port, id, addr, 2)?;
+    Some(b[0] as u16 | ((b[1] as u16) << 8))
+}
+
+/// One position read: FF FF id 04 02 38 02 cks -> FF FF id len err lo hi cks.
+fn sts_read_pos(port: &mut Box<dyn serialport::SerialPort>, id: u8) -> Option<u16> {
+    Some(sts_read_u16(port, id, 56)? & 0x0FFF)
+}
+
+fn sts_write(
+    port: &mut Box<dyn serialport::SerialPort>,
+    id: u8,
+    addr: u8,
+    data: &[u8],
+) -> Result<(), String> {
+    let mut body = vec![id, data.len() as u8 + 3, 3, addr];
+    body.extend_from_slice(data);
+    let cks = !(body.iter().map(|&b| b as u32).sum::<u32>() as u8);
+    let mut pkt = vec![0xFF, 0xFF];
+    pkt.extend_from_slice(&body);
+    pkt.push(cks);
+    let _ = port.clear(serialport::ClearBuffer::Input);
+    port.write_all(&pkt).map_err(|e| e.to_string())?;
+    port.flush().map_err(|e| e.to_string())?;
+    std::thread::sleep(Duration::from_millis(2));
+    Ok(())
+}
+
+fn sts_write_u16(
+    port: &mut Box<dyn serialport::SerialPort>,
+    id: u8,
+    addr: u8,
+    value: u16,
+) -> Result<(), String> {
+    sts_write(port, id, addr, &[value as u8, (value >> 8) as u8])
+}
+
+fn encode_sign_magnitude(value: i32, sign_bit: u32) -> Result<u16, String> {
+    let max = (1i32 << sign_bit) - 1;
+    if value.abs() > max {
+        return Err(format!("offset {value} exceeds ±{max}"));
+    }
+    Ok(value.unsigned_abs() as u16 | if value < 0 { 1u16 << sign_bit } else { 0 })
+}
+
+fn decode_sign_magnitude(value: u16, sign_bit: u32) -> i32 {
+    let magnitude = value & ((1u16 << sign_bit) - 1);
+    if value & (1u16 << sign_bit) != 0 {
+        -(magnitude as i32)
+    } else {
+        magnitude as i32
+    }
+}
+
+fn read_servo_calibration(
+    port: &mut Box<dyn serialport::SerialPort>,
+    id: u8,
+) -> Result<ServoCalibration, String> {
+    let offset = sts_read_u16(port, id, 31)
+        .map(|v| decode_sign_magnitude(v, 11))
+        .ok_or_else(|| format!("舵机 {id} 读取中位偏移失败"))?;
+    let min = sts_read_u16(port, id, 9).ok_or_else(|| format!("舵机 {id} 读取最小限位失败"))?;
+    let max = sts_read_u16(port, id, 11).ok_or_else(|| format!("舵机 {id} 读取最大限位失败"))?;
+    Ok(ServoCalibration { offset, min, max })
+}
+
+fn write_servo_calibration(
+    port: &mut Box<dyn serialport::SerialPort>,
+    id: u8,
+    cal: ServoCalibration,
+) -> Result<(), String> {
+    sts_write(port, id, 55, &[0])?;
+    sts_write_u16(port, id, 31, encode_sign_magnitude(cal.offset, 11)?)?;
+    sts_write_u16(port, id, 9, cal.min)?;
+    sts_write_u16(port, id, 11, cal.max)?;
+    sts_write(port, id, 55, &[1])
 }
 
 /// The aligned zero pose persists across launches; re-aligning overwrites it.
@@ -277,8 +388,13 @@ fn token_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let cfg: serde_json::Value =
         serde_json::from_str(&load_config()).unwrap_or(serde_json::Value::Null);
-    if let Some(d) = cfg.get("tokenDir").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        let d = d.strip_prefix("~/")
+    if let Some(d) = cfg
+        .get("tokenDir")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let d = d
+            .strip_prefix("~/")
             .map(|rest| format!("{home}/{rest}"))
             .unwrap_or_else(|| d.to_string());
         return std::path::PathBuf::from(d);
@@ -327,12 +443,51 @@ fn save_zero(z: &[i32; 6]) {
     let _ = std::fs::write(p, serde_json::to_string(&z.to_vec()).unwrap_or_default());
 }
 
+fn leader_calibration_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config/lekiwi-console/leader_calibration.json")
+}
+
+fn save_leader_calibration(cal: &LeaderCalibration) -> Result<(), String> {
+    let names = [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper",
+    ];
+    let mut root = serde_json::Map::new();
+    for (i, name) in names.iter().enumerate() {
+        root.insert(
+            (*name).into(),
+            serde_json::json!({
+                "id": i + 1,
+                "drive_mode": 0,
+                "homing_offset": cal.offsets[i],
+                "range_min": cal.mins[i],
+                "range_max": cal.maxes[i],
+            }),
+        );
+    }
+    let path = leader_calibration_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, text + "\n").map_err(|e| e.to_string())?;
+    std::fs::rename(tmp, path).map_err(|e| e.to_string())
+}
+
 fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Leader {
     let (tx, rx) = std::sync::mpsc::channel::<LReq>();
     std::thread::spawn(move || {
         let mut port: Option<Box<dyn serialport::SerialPort>> = None;
         let mut zero: Option<[i32; 6]> = None;
         let mut following = false;
+        let mut calibration: Option<LeaderCalibration> = None;
         loop {
             // The command channel doubles as the ~30 Hz tick clock.
             match rx.recv_timeout(Duration::from_millis(33)) {
@@ -380,8 +535,14 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
                                 // All six must answer or it's not a leader arm.
                                 let ok = (1..=6u8).all(|id| sts_read_pos(&mut p, id).is_some());
                                 if ok {
+                                    if let Some(old) = calibration.take() {
+                                        for (i, cal) in old.original.iter().enumerate() {
+                                            let _ =
+                                                write_servo_calibration(&mut p, i as u8 + 1, *cal);
+                                        }
+                                    }
                                     port = Some(p);
-                                    zero = load_zero();   // reuse last alignment
+                                    zero = load_zero(); // reuse last alignment
                                     following = false;
                                     result = Ok(cand);
                                     break;
@@ -418,17 +579,160 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
                     };
                     let _ = reply.send(result);
                 }
+                Ok(LReq::Calibrate(action, reply)) => {
+                    following = false;
+                    let result = (|| -> Result<String, String> {
+                        match action.as_str() {
+                            "start" => match port.as_mut() {
+                                None => Err("主臂未连接".into()),
+                                Some(_) if calibration.is_some() => Err("主臂校准已经开始".into()),
+                                Some(p) => {
+                                    let mut original = [ServoCalibration {
+                                        offset: 0,
+                                        min: 0,
+                                        max: 4095,
+                                    }; 6];
+                                    let mut error = None;
+                                    for id in 1..=6u8 {
+                                        match read_servo_calibration(p, id) {
+                                            Ok(cal) => original[id as usize - 1] = cal,
+                                            Err(e) => {
+                                                error = Some(e);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if let Some(e) = error {
+                                        Err(e)
+                                    } else {
+                                        for id in 1..=6u8 {
+                                            sts_write(p, id, 40, &[0])?;
+                                        }
+                                        calibration = Some(LeaderCalibration {
+                                            stage: CalibrationStage::Middle,
+                                            original,
+                                            offsets: [0; 6],
+                                            mins: [2047; 6],
+                                            maxes: [2047; 6],
+                                        });
+                                        Ok("middle".into())
+                                    }
+                                }
+                            },
+                            "middle" => match (port.as_mut(), calibration.as_mut()) {
+                                (None, _) => Err("主臂未连接".into()),
+                                (_, None) => Err("主臂校准尚未开始".into()),
+                                (Some(_), Some(c)) if c.stage != CalibrationStage::Middle => {
+                                    Err("已经记录过中位".into())
+                                }
+                                (Some(p), Some(c)) => {
+                                    let reset = ServoCalibration {
+                                        offset: 0,
+                                        min: 0,
+                                        max: 4095,
+                                    };
+                                    for id in 1..=6u8 {
+                                        write_servo_calibration(p, id, reset)?;
+                                    }
+                                    for id in 1..=6u8 {
+                                        let i = id as usize - 1;
+                                        let actual = sts_read_pos(p, id)
+                                            .ok_or_else(|| format!("舵机 {id} 读取中位失败"))?;
+                                        c.offsets[i] = actual as i32 - 2047;
+                                        write_servo_calibration(
+                                            p,
+                                            id,
+                                            ServoCalibration {
+                                                offset: c.offsets[i],
+                                                min: 0,
+                                                max: 4095,
+                                            },
+                                        )?;
+                                    }
+                                    for id in 1..=6u8 {
+                                        let i = id as usize - 1;
+                                        let pos = sts_read_pos(p, id)
+                                            .ok_or_else(|| format!("舵机 {id} 中位复读失败"))?;
+                                        c.mins[i] = pos;
+                                        c.maxes[i] = pos;
+                                    }
+                                    c.stage = CalibrationStage::Range;
+                                    Ok("range".into())
+                                }
+                            },
+                            "finish" => match (port.as_mut(), calibration.as_mut()) {
+                                (None, _) => Err("主臂未连接".into()),
+                                (_, None) => Err("主臂校准尚未开始".into()),
+                                (Some(_), Some(c)) if c.stage != CalibrationStage::Range => {
+                                    Err("还没有记录中位".into())
+                                }
+                                (Some(p), Some(c)) => {
+                                    let narrow: Vec<String> = (0..6)
+                                        .filter(|&i| c.maxes[i] - c.mins[i] < 100)
+                                        .map(|i| format!("{}", i + 1))
+                                        .collect();
+                                    if !narrow.is_empty() {
+                                        Err(format!(
+                                            "这些关节活动范围不足：{}；继续摆到两端后再完成",
+                                            narrow.join(", ")
+                                        ))
+                                    } else {
+                                        for id in 1..=6u8 {
+                                            let i = id as usize - 1;
+                                            write_servo_calibration(
+                                                p,
+                                                id,
+                                                ServoCalibration {
+                                                    offset: c.offsets[i],
+                                                    min: c.mins[i],
+                                                    max: c.maxes[i],
+                                                },
+                                            )?;
+                                        }
+                                        save_leader_calibration(c)?;
+                                        let middle = [2047i32; 6];
+                                        zero = Some(middle);
+                                        save_zero(&middle);
+                                        calibration = None;
+                                        Ok("saved".into())
+                                    }
+                                }
+                            },
+                            "cancel" => match port.as_mut() {
+                                None => Err("主臂未连接".into()),
+                                Some(p) => {
+                                    if let Some(c) = calibration.take() {
+                                        for (i, old) in c.original.iter().enumerate() {
+                                            write_servo_calibration(p, i as u8 + 1, *old)?;
+                                        }
+                                    }
+                                    Ok("cancelled".into())
+                                }
+                            },
+                            _ => Err(format!("未知校准动作：{action}")),
+                        }
+                    })();
+                    let _ = reply.send(result);
+                }
                 Ok(LReq::Follow(on)) => following = on && zero.is_some(),
                 Ok(LReq::Disconnect) => {
+                    if let (Some(p), Some(c)) = (port.as_mut(), calibration.take()) {
+                        for (i, old) in c.original.iter().enumerate() {
+                            let _ = write_servo_calibration(p, i as u8 + 1, *old);
+                        }
+                    }
                     port = None;
                     zero = None;
                     following = false;
-                    let _ = app.emit("leader", LeaderFrame {
-                        connected: false,
-                        following: false,
-                        aligned: false,
-                        joints: vec![],
-                    });
+                    let _ = app.emit(
+                        "leader",
+                        LeaderFrame {
+                            connected: false,
+                            following: false,
+                            aligned: false,
+                            joints: vec![],
+                        },
+                    );
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -442,6 +746,14 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
                     }
                 }
                 if joints.len() == 6 {
+                    if let Some(c) = calibration.as_mut() {
+                        if c.stage == CalibrationStage::Range {
+                            for (i, &pos) in joints.iter().enumerate() {
+                                c.mins[i] = c.mins[i].min(pos);
+                                c.maxes[i] = c.maxes[i].max(pos);
+                            }
+                        }
+                    }
                     if following {
                         if let Some(z) = zero {
                             let dq: Vec<i32> = joints
@@ -456,23 +768,29 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
                             let _ = zmq_tx.send(Req::SendJson(json));
                         }
                     }
-                    let _ = app.emit("leader", LeaderFrame {
-                        connected: true,
-                        following,
-                        aligned: zero.is_some(),
-                        joints,
-                    });
+                    let _ = app.emit(
+                        "leader",
+                        LeaderFrame {
+                            connected: true,
+                            following,
+                            aligned: zero.is_some(),
+                            joints,
+                        },
+                    );
                 } else {
                     // Port died (unplugged): drop it, stop following.
                     port = None;
                     zero = None;
                     following = false;
-                    let _ = app.emit("leader", LeaderFrame {
-                        connected: false,
-                        following: false,
-                        aligned: false,
-                        joints: vec![],
-                    });
+                    let _ = app.emit(
+                        "leader",
+                        LeaderFrame {
+                            connected: false,
+                            following: false,
+                            aligned: false,
+                            joints: vec![],
+                        },
+                    );
                 }
             }
         }
@@ -487,7 +805,9 @@ async fn leader_connect(path: String, state: State<'_, Leader>) -> Result<String
         .tx
         .send(LReq::Connect(path, reply_tx))
         .map_err(|_| "leader worker is gone".to_string())?;
-    reply_rx.await.map_err(|_| "leader worker dropped reply".to_string())?
+    reply_rx
+        .await
+        .map_err(|_| "leader worker dropped reply".to_string())?
 }
 
 #[tauri::command]
@@ -497,7 +817,24 @@ async fn leader_align(state: State<'_, Leader>) -> Result<(), String> {
         .tx
         .send(LReq::Align(reply_tx))
         .map_err(|_| "leader worker is gone".to_string())?;
-    reply_rx.await.map_err(|_| "leader worker dropped reply".to_string())?
+    reply_rx
+        .await
+        .map_err(|_| "leader worker dropped reply".to_string())?
+}
+
+#[tauri::command]
+async fn leader_calibrate(action: String, state: State<'_, Leader>) -> Result<String, String> {
+    if !matches!(action.as_str(), "start" | "middle" | "finish" | "cancel") {
+        return Err(format!("bad calibration action: {action}"));
+    }
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .tx
+        .send(LReq::Calibrate(action, reply_tx))
+        .map_err(|_| "leader worker is gone".to_string())?;
+    reply_rx
+        .await
+        .map_err(|_| "leader worker dropped reply".to_string())?
 }
 
 #[tauri::command]
@@ -536,9 +873,23 @@ fn zmq_arm_relax(state: State<'_, Zmq>) -> Result<(), String> {
         .map_err(|_| "zmq worker is gone".to_string())
 }
 
-/// Latch base_host's safety master switch. on=false freezes actuation (wheels
-/// zeroed, arm goals dropped, holding torque kept) while the whole command
-/// chain — recv, priority mux, telemetry — keeps running for debugging.
+#[tauri::command]
+fn zmq_arm_calibrate(action: String, seq: u64, state: State<'_, Zmq>) -> Result<(), String> {
+    if !matches!(action.as_str(), "start" | "middle" | "finish" | "cancel") {
+        return Err(format!("bad calibration action: {action}"));
+    }
+    state
+        .tx
+        .send(Req::SendJson(format!(
+            "{{\"arm.calibrate\": {}, \"cal.seq\": {seq}}}",
+            serde_json::to_string(&action).map_err(|e| e.to_string())?
+        )))
+        .map_err(|_| "zmq worker is gone".to_string())
+}
+
+/// Latch base_host's safety master switch. on=false cuts torque on all nine
+/// motors while the command chain — recv, priority mux, telemetry — keeps
+/// running for debugging.
 /// Actual state is echoed back via sysinfo's `motion` line, not assumed here.
 #[tauri::command]
 fn zmq_set_motion(on: bool, state: State<'_, Zmq>) -> Result<(), String> {
@@ -570,7 +921,9 @@ async fn zmq_connect(ip: String, port: u16, state: State<'_, Zmq>) -> Result<Str
         .tx
         .send(Req::Connect(ep, reply_tx))
         .map_err(|_| "zmq worker is gone".to_string())?;
-    let result = reply_rx.await.map_err(|_| "zmq worker dropped reply".to_string())?;
+    let result = reply_rx
+        .await
+        .map_err(|_| "zmq worker dropped reply".to_string())?;
     if let Ok(ep) = &result {
         *state.endpoint.lock().await = Some(ep.clone());
     }
@@ -641,14 +994,20 @@ async fn sysinfo(ip: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let out = std::process::Command::new("ssh")
             .args([
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=6",
-                "-o", "StrictHostKeyChecking=accept-new",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=6",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
                 // reuse one TCP+auth session across the 4 s polls instead of a
                 // full handshake per poll
-                "-o", "ControlMaster=auto",
-                "-o", "ControlPath=/tmp/lekiwi-ssh-%r@%h",
-                "-o", "ControlPersist=60s",
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/lekiwi-ssh-%r@%h",
+                "-o",
+                "ControlPersist=60s",
                 &format!("jetson@{ip}"),
                 SYSINFO_SH,
             ])
@@ -662,6 +1021,32 @@ async fn sysinfo(ip: String) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("sysinfo task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn arm_cal_status(ip: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = std::process::Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=6",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                &format!("jetson@{ip}"),
+                "cat /tmp/lekiwi_arm_calibration 2>/dev/null || echo idle",
+            ])
+            .output()
+            .map_err(|e| format!("ssh spawn failed: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("arm calibration status task failed: {e}"))?
 }
 
 /// Manual control of the vision services (vlm-daemon + llama-server), local or
@@ -679,16 +1064,23 @@ async fn vlm_service(ip: String, action: String) -> Result<String, String> {
         // is-enabled exits non-zero for "disabled", so don't let it fail the sh.
         let sc = format!(
             "systemctl --user {action} vlm-daemon.service llama-server.service{}",
-            if action == "is-enabled" { " || true" } else { "" }
+            if action == "is-enabled" {
+                " || true"
+            } else {
+                ""
+            }
         );
         let out = if ip == "127.0.0.1" || ip == "localhost" {
             std::process::Command::new("sh").args(["-c", &sc]).output()
         } else {
             std::process::Command::new("ssh")
                 .args([
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=6",
-                    "-o", "StrictHostKeyChecking=accept-new",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=6",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
                     &format!("jetson@{ip}"),
                     &sc,
                 ])
@@ -816,8 +1208,14 @@ async fn vlm_frame(ip: String, camera: Option<String>) -> Result<String, String>
             .set("Authorization", &auth)
             .call()
             .map_err(|e| e.to_string())?;
-        let fps: f64 = resp.header("X-Fps").and_then(|h| h.parse().ok()).unwrap_or(0.0);
-        let frame_ts: f64 = resp.header("X-Frame-Ts").and_then(|h| h.parse().ok()).unwrap_or(0.0);
+        let fps: f64 = resp
+            .header("X-Fps")
+            .and_then(|h| h.parse().ok())
+            .unwrap_or(0.0);
+        let frame_ts: f64 = resp
+            .header("X-Frame-Ts")
+            .and_then(|h| h.parse().ok())
+            .unwrap_or(0.0);
         let mut bytes = Vec::new();
         resp.into_reader()
             .read_to_end(&mut bytes)
@@ -832,8 +1230,11 @@ async fn vlm_frame(ip: String, camera: Option<String>) -> Result<String, String>
 /// One-shot describe. VLM inference can take several seconds, so the timeout is
 /// generous; the call still runs off the async runtime.
 #[tauri::command]
-async fn vlm_describe(ip: String, prompt: String,
-                      camera: Option<String>) -> Result<String, String> {
+async fn vlm_describe(
+    ip: String,
+    prompt: String,
+    camera: Option<String>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let auth = vlm_auth()?;
         let mut body = serde_json::Map::new();
@@ -930,8 +1331,11 @@ fn voice_err(e: ureq::Error) -> String {
 /// Generic GET proxy: path is fixed by the frontend (health/feed/state only).
 #[tauri::command]
 async fn voice_get(ip: String, path: String) -> Result<String, String> {
-    if !(path == "/health" || path == "/state" || path.starts_with("/feed")
-        || path == "/config" || path.starts_with("/asr_debug/tail")
+    if !(path == "/health"
+        || path == "/state"
+        || path.starts_with("/feed")
+        || path == "/config"
+        || path.starts_with("/asr_debug/tail")
         || path.starts_with("/asr_debug/seg"))
     {
         return Err(format!("bad path: {path}"));
@@ -955,11 +1359,21 @@ async fn voice_get(ip: String, path: String) -> Result<String, String> {
 /// for none); the daemon validates it, we just forward.
 #[tauri::command]
 async fn voice_post(ip: String, path: String, body: String) -> Result<String, String> {
-    if !matches!(path.as_str(),
-        "/listen" | "/stop" | "/interrupt" | "/say" | "/simulate"
-        | "/config" | "/brain" | "/reset" | "/asr_debug" | "/asr_debug/seg_play"
-        | "/asr_debug/seg_asr" | "/selftest")
-    {
+    if !matches!(
+        path.as_str(),
+        "/listen"
+            | "/stop"
+            | "/interrupt"
+            | "/say"
+            | "/simulate"
+            | "/config"
+            | "/brain"
+            | "/reset"
+            | "/asr_debug"
+            | "/asr_debug/seg_play"
+            | "/asr_debug/seg_asr"
+            | "/selftest"
+    ) {
         return Err(format!("bad path: {path}"));
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -991,16 +1405,23 @@ async fn voice_service(ip: String, action: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let sc = format!(
             "systemctl --user {action} voice-daemon.service{}",
-            if action == "is-enabled" { " || true" } else { "" }
+            if action == "is-enabled" {
+                " || true"
+            } else {
+                ""
+            }
         );
         let out = if ip == "127.0.0.1" || ip == "localhost" {
             std::process::Command::new("sh").args(["-c", &sc]).output()
         } else {
             std::process::Command::new("ssh")
                 .args([
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=6",
-                    "-o", "StrictHostKeyChecking=accept-new",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=6",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
                     &format!("jetson@{ip}"),
                     &sc,
                 ])
@@ -1053,13 +1474,19 @@ async fn mac_voices() -> Result<Vec<String>, String> {
             // can contain spaces and parens ("Eddy (中文（中国大陆）)"), so split
             // at the LAST whitespace run before the locale, not the first.
             let head = line.split('#').next().unwrap_or("").trim_end();
-            let Some(cut) = head.rfind(char::is_whitespace) else { continue };
+            let Some(cut) = head.rfind(char::is_whitespace) else {
+                continue;
+            };
             let (name, locale) = (head[..cut].trim(), head[cut..].trim());
             if name.is_empty() || locale.is_empty() {
                 continue;
             }
             let row = format!("{name}\t{locale}");
-            if locale.starts_with("zh") { zh.push(row) } else { other.push(row) }
+            if locale.starts_with("zh") {
+                zh.push(row)
+            } else {
+                other.push(row)
+            }
         }
         zh.append(&mut other);
         Ok(zh)
@@ -1173,15 +1600,24 @@ async fn mac_tts_render(
     let slot = state.pid.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut child = std::process::Command::new("sh")
-            .args(["-lc", &sh_env(&format!(
-                "exec uv run --quiet {deps} '{}'", script.display()))])
+            .args([
+                "-lc",
+                &sh_env(&format!(
+                    "exec uv run --quiet {deps} '{}'",
+                    script.display()
+                )),
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("spawn failed: {e}"))?;
         *slot.lock().unwrap() = Some(child.id());
-        child.stdin.take().unwrap().write_all(job.as_bytes())
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(job.as_bytes())
             .map_err(|e| format!("write job: {e}"))?;
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         *slot.lock().unwrap() = None;
@@ -1225,7 +1661,7 @@ async fn mac_play(path: String, volume: u8, state: State<'_, MacSay>) -> Result<
         let st = child.wait();
         *slot.lock().unwrap() = None;
         match st {
-            Ok(s) if s.success() || s.code().is_none() => Ok(()),   // signal = 停止
+            Ok(s) if s.success() || s.code().is_none() => Ok(()), // signal = 停止
             Ok(s) => Err(format!("afplay exited {s}")),
             Err(e) => Err(e.to_string()),
         }
@@ -1309,7 +1745,9 @@ fn hf_cached_bytes(repo: &str) -> u64 {
         .unwrap_or_else(|_| format!("{home}/.cache/huggingface/hub"));
     let dir = format!("{hub}/models--{}", repo.replace('/', "--"));
     fn walk(p: &std::path::Path) -> u64 {
-        let Ok(rd) = std::fs::read_dir(p) else { return 0 };
+        let Ok(rd) = std::fs::read_dir(p) else {
+            return 0;
+        };
         rd.flatten()
             .map(|e| match e.file_type() {
                 // symlinks are the hub's norm (snapshots -> blobs); follow them
@@ -1329,8 +1767,11 @@ async fn mac_asr_status(model: String, state: State<'_, MacAsr>) -> Result<Strin
     let mine = {
         let mut slot = state.child.lock().unwrap();
         match slot.as_mut().map(|c| c.try_wait()) {
-            Some(Ok(None)) => true,          // still running
-            Some(_) => { *slot = None; false }
+            Some(Ok(None)) => true, // still running
+            Some(_) => {
+                *slot = None;
+                false
+            }
             None => false,
         }
     };
@@ -1458,11 +1899,14 @@ fn main() {
             sysinfo,
             leader_connect,
             leader_align,
+            leader_calibrate,
             leader_follow,
             leader_disconnect,
             zmq_arm_mid,
             zmq_arm_relax,
+            zmq_arm_calibrate,
             zmq_set_motion,
+            arm_cal_status,
             log_connect,
             vlm_health,
             vlm_service,
@@ -1497,4 +1941,18 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_sign_magnitude, encode_sign_magnitude};
+
+    #[test]
+    fn sts_sign_magnitude_round_trip() {
+        for value in [-2047, -1376, -1, 0, 1, 1376, 2047] {
+            let encoded = encode_sign_magnitude(value, 11).unwrap();
+            assert_eq!(decode_sign_magnitude(encoded, 11), value);
+        }
+        assert!(encode_sign_magnitude(2048, 11).is_err());
+    }
 }

@@ -3,9 +3,26 @@
 These guard "which way does the robot go" — a sign flip here is only ever
 found by driving into a wall.
 """
+import json
 import math
 
+import pytest
+
 import base_host as bh
+
+
+def test_load_arm_limits_includes_wrist_roll(tmp_path, monkeypatch):
+    path = tmp_path / "calibration.json"
+    ranges = {
+        name: {"range_min": 1000 + sid, "range_max": 3000 + sid}
+        for sid, name in bh.ARM_NAMES.items()
+    }
+    path.write_text(json.dumps(ranges))
+    monkeypatch.setattr(bh, "ARM_CAL_FILE", str(path))
+
+    limits = bh.load_arm_limits()
+
+    assert limits[bh.ID_ROLL] == (1000 + bh.ID_ROLL, 3000 + bh.ID_ROLL)
 
 
 # ---- raw_speed: STS wire format, bit 15 = reverse ------------------------
@@ -15,6 +32,14 @@ def test_raw_speed_wire_format():
     assert bh.raw_speed(-100) == (100 | 0x8000)
     assert bh.raw_speed(0) == 0
     assert bh.raw_speed(99.7) == 99          # trunc, not round
+
+
+def test_sign_magnitude_roundtrip():
+    for value in (-2047, -1376, -1, 0, 1, 1376, 2047):
+        encoded = bh.sign_magnitude(value, 11)
+        assert bh.decode_sign_magnitude(encoded, 11) == value
+    with pytest.raises(ValueError):
+        bh.sign_magnitude(2048, 11)
 
 
 # ---- cksum: STS3215 datasheet ping packet FF FF 01 02 01 FB --------------

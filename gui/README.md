@@ -73,8 +73,9 @@ GUI 读取位置由 `config.json` 的 `tokenDir` 指定(缺省 `~/work/lekiwi-je
 
 **安全总开关**：连接行的「🛑 切断电机输出」把 base_host 闩锁进冻结态（`safety.motion`
 线协议键，状态存板端 `/tmp/lekiwi_motion`，服务重启不丢、整机重启复位为开）——轮子
-清零、机械臂不写新目标（保持力矩不泄，抬着的臂不会砸下），但收包、优先级仲裁、
-日志、电池遥测全部照常，用于**不动电机地调试整条业务链路**。按钮显示的是板端经
+清零并切断轮子和机械臂全部 9 个舵机扭矩（抬起的机械臂会受重力下落），但收包、
+优先级仲裁、日志、电池遥测全部照常，用于**不动电机地调试整条业务链路**。恢复时
+机械臂先以当前位置作为目标再使能，不会跳回切断前的旧目标。按钮显示的是板端经
 sysinfo 回报的真实状态（≤4s 刷新），不是本地假设。
 
 **先把底盘架空再试。**
@@ -131,12 +132,16 @@ board/etc/systemd/system/*.service  → /etc/systemd/system/
 3. GUI：**连接主臂 → 对齐零位 → 开始跟随**；
 4. 停止跟随即回手柄/摇杆控制，衔接无跳变。
 
-对齐零位代替主臂标定——两臂同型号，差值映射即可；主臂拉超程时从臂被标定限位夹住。
-Rust 端串口 worker 与 ZMQ worker 同一铁律：独立线程，不进 Tauri runtime。
+面板内置**主臂校准**和**从臂校准**，两者都是同一个两步向导：先在扭矩切断状态下
+摆到标准中位并记录，再逐关节手动覆盖最大允许范围后保存。主臂由本机 Rust 串口 worker
+校准，结果写 `~/.config/lekiwi-console/leader_calibration.json`；从臂由串口唯一所有者
+base_host 校准，写 LeRobot 兼容的 `orin_kiwi.json`。取消会恢复启动向导前的 EEPROM
+参数；任一关节活动不足时拒绝保存。腕旋转同样记录实际安全端点，不强制按全圈处理。
 
 ## 机械臂标定
 
-见项目根 `README.md` 的「机械臂标定 Arm calibration」一节（先按 START 收臂松弛，再停服务跑 `lerobot-calibrate`）。
+优先使用 GUI「主臂遥操作」面板内的两个校准向导。项目根 README 保留
+`lerobot-calibrate` CLI 作为无 GUI 时的维护入口。
 
 ## 架构要点（为什么这么写）
 
@@ -169,7 +174,7 @@ gui/
         ├── state.js          # $ / S / invoke + config 灌值/写回(唯一真相源)
         ├── main.js           # tab 切换(含日志栏仅 ZMQ tab 可见)
         ├── zmq.js            # 连接 + 键盘遥控 + 方向可视化(dead-man)
-        ├── leader.js         # 主臂遥操作(连接/对齐零位/跟随)
+        ├── leader.js         # 主臂遥操作(连接/校准/对齐零位/跟随)
         ├── vision.js         # 视觉 tab(帧泵 + 解读)
         ├── voice.js          # 语音 tab(对话流)
         ├── ros.js            # ROS tab(rosbridge 订阅:雷达极坐标 + 三路相机)

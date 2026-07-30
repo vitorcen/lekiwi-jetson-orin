@@ -13,6 +13,9 @@ import { logLine } from './log.js';
 let connected = false;
 let aligned = false;
 let following = false;
+let calTarget = null;          // 'leader' | 'follower'
+let calStage = null;           // 'middle' | 'range'
+let followerPollToken = 0;
 
 function setState(text, cls) {
   const el = $('lstate');
@@ -29,6 +32,7 @@ function refresh() {
   $('lconn').textContent = connected ? '断开主臂' : '连接主臂';
   $('lalign').setAttribute('aria-disabled', String(!connected));
   $('lfollow').setAttribute('aria-disabled', String(!connected || !aligned));
+  $('lcal').setAttribute('aria-disabled', String(!connected));
   $('lfollow').textContent = following ? '停止跟随' : '开始跟随';
   $('lfollow').classList.toggle('live', following);
   if (!connected) setState('未连接', 'bad');
@@ -55,6 +59,7 @@ $('lconn').onclick = async () => {
   if (connected) {
     await invoke('leader_disconnect').catch(() => {});
     connected = aligned = following = false;
+    if (calTarget === 'leader') closeCalibration();
     refresh();
     return;
   }
@@ -63,6 +68,7 @@ $('lconn').onclick = async () => {
 
 // Glide the follower to its calibrated middle pose (needs ZMQ connected).
 $('lmid').onclick = () => {
+  if (calTarget) { logLine('校准', '校准进行中，不能自动移动从臂'); return; }
   if (invoke) invoke('zmq_arm_mid').catch(() => {});
   logLine('主臂', '从臂摆中位');
 };
@@ -83,6 +89,7 @@ $('lalign').onclick = async () => {
 
 $('lfollow').onclick = async () => {
   if (!invoke) return;
+  if (calTarget) { logLine('主臂', '校准进行中，不能开始跟随'); return; }
   if (!connected) { logLine('主臂', '无法跟随：主臂未连接'); return; }
   if (!aligned) { logLine('主臂', '无法跟随：未对齐零位（先摆中位再点「对齐零位」）'); return; }
   const on = !following;
@@ -112,14 +119,144 @@ $('lrelax').onclick = () => {
   logLine('主臂', '收臂松弛');
 };
 
+function closeCalibration() {
+  calTarget = calStage = null;
+  followerPollToken++;
+  $('calbox').hidden = true;
+}
+
+function paintCalibration() {
+  $('calbox').hidden = false;
+  $('caltarget').textContent = calTarget === 'leader' ? '主臂校准' : '从臂校准';
+  if (calStage === 'middle') {
+    $('calstep').textContent = '1 / 2';
+    $('caltext').textContent =
+      '扭矩已切断。手动把机械臂摆到关节行程的中位：大臂竖直、小臂水平、腕部伸直，夹爪半开。确认后记录中位。';
+    $('calnext').textContent = '记录中位，开始采集范围';
+  } else {
+    $('calstep').textContent = '2 / 2';
+    $('caltext').textContent =
+      '依次把关节 1–6 缓慢摆到两个最大允许位置。第 5 关节也只摆到安全端点，不要强行绕过线缆或机械限制。每个关节都必须覆盖两端，然后完成保存。';
+    $('calnext').textContent = '完成并保存校准';
+  }
+}
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function followerAction(action, expected) {
+  const seq = Date.now();
+  await invoke('zmq_arm_calibrate', { action, seq });
+  const ip = $('ip').value.trim();
+  if (!ip) throw new Error('Orin IP 为空');
+  for (let i = 0; i < 16; i++) {
+    await wait(250);
+    const status = await invoke('arm_cal_status', { ip });
+    if (status.startsWith(`${seq} error `)) {
+      const message = status.slice(`${seq} error `.length).split(' joints=')[0];
+      throw new Error(message);
+    }
+    if (status.startsWith(`${seq} ${expected}`)) return status;
+  }
+  throw new Error('板端校准状态未更新，请确认 ZeroMQ 已连接');
+}
+
+function paintFollowerJoints(status) {
+  const match = status.match(/\bjoints=([0-9,]+)/);
+  if (!match) return;
+  const joints = match[1].split(',');
+  for (let i = 0; i < 6; i++) $('lj' + i).textContent = joints[i] || '—';
+}
+
+async function pollFollowerJoints() {
+  const token = ++followerPollToken;
+  const ip = $('ip').value.trim();
+  while (calTarget === 'follower' && token === followerPollToken) {
+    try {
+      paintFollowerJoints(await invoke('arm_cal_status', { ip }));
+    } catch { /* action polling reports connection failures */ }
+    await wait(250);
+  }
+}
+
+async function startCalibration(target) {
+  if (!invoke || calTarget) return;
+  if (target === 'leader' && !connected) {
+    logLine('校准', '主臂未连接');
+    return;
+  }
+  try {
+    if (following) {
+      await invoke('leader_follow', { on: false });
+      following = false;
+    }
+    if (target === 'leader') await invoke('leader_calibrate', { action: 'start' });
+    else await followerAction('start', 'middle');
+    calTarget = target;
+    calStage = 'middle';
+    paintCalibration();
+    if (target === 'follower') pollFollowerJoints();
+    logLine('校准', `${target === 'leader' ? '主臂' : '从臂'}：请摆到中位`);
+    refresh();
+  } catch (e) {
+    logLine('校准', '启动失败: ' + e);
+  }
+}
+
+$('lcal').onclick = () => startCalibration('leader');
+$('fcal').onclick = () => startCalibration('follower');
+
+$('calnext').onclick = async () => {
+  if (!calTarget) return;
+  try {
+    if (calStage === 'middle') {
+      if (calTarget === 'leader') {
+        await invoke('leader_calibrate', { action: 'middle' });
+      } else {
+        await followerAction('middle', 'range');
+      }
+      calStage = 'range';
+      paintCalibration();
+      logLine('校准', '正在采集各关节最大允许范围');
+    } else {
+      if (calTarget === 'leader') {
+        await invoke('leader_calibrate', { action: 'finish' });
+        aligned = true;              // calibration makes the middle exactly 2047
+      } else {
+        await followerAction('finish', 'saved');
+      }
+      logLine('校准', `${calTarget === 'leader' ? '主臂' : '从臂'}校准已保存`);
+      closeCalibration();
+      refresh();
+    }
+  } catch (e) {
+    logLine('校准', '未完成: ' + e);
+  }
+};
+
+$('calcancel').onclick = async () => {
+  if (!calTarget) return;
+  const target = calTarget;
+  try {
+    if (target === 'leader') await invoke('leader_calibrate', { action: 'cancel' });
+    else await followerAction('cancel', 'cancelled');
+    logLine('校准', '已取消并恢复旧校准');
+  } catch (e) {
+    logLine('校准', '取消失败: ' + e);
+  }
+  closeCalibration();
+  refresh();
+};
+
 const ev = window.__TAURI__ && window.__TAURI__.event;
 if (ev) {
   ev.listen('leader', ({ payload: p }) => {
     connected = p.connected;
     following = p.following;
     aligned = p.aligned;
-    for (let i = 0; i < 6; i++) {
-      $('lj' + i).textContent = p.joints[i] !== undefined ? p.joints[i] : '—';
+    if (calTarget !== 'follower') {
+      for (let i = 0; i < 6; i++) {
+        $('lj' + i).textContent = p.joints[i] !== undefined ? p.joints[i] : '—';
+      }
     }
     refresh();
   });

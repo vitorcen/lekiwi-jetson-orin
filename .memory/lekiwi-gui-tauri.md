@@ -78,16 +78,24 @@ PUSH 卡死前端。速度三档严格对齐 lerobot：`0.1/0.25/0.4 m/s`、`30/
 `lerobot-calibrate --robot.type=lekiwi --robot.port=/dev/ttyACM0 --robot.id=orin_kiwi`
 （手摆姿势），之后 host 才起得来。
 
-**解法 — 免标定底盘 host `board/home/jetson/base_host.py`**（2026-07-18）：轮子本就不用
-标定（官方明说），所以写了个只驱动 7/8/9 的 ZMQ host，**同样的线协议**（PULL 5555 收
+**解法 — 自有 host `board/home/jetson/base_host.py`**（2026-07-18）：轮子本就不用
+标定（官方明说），所以先写了驱动 7/8/9 的 ZMQ host，**同样的线协议**（PULL 5555 收
 `{"x.vel","y.vel","theta.vel"}`），GUI 一行不用改。运动学复用 `base_move.py`（与 lerobot
 零误差）。现由 systemd 管（`scripts/deploy_board.sh` 部署重启，手工 start/stop 脚本已废弃）。
 用 conda lerobot env 的 python（有 pyzmq 27.1）。带 watchdog（0.5s 断流停车）。
-已实测：bind 5555、收零速命令解析正常、进程稳定。**唯一未端到端实测**：Rust 纯 zeromq
-crate ↔ pyzmq 互通（ZMTP 标准应通），要 GUI 连上架空开车才最终确认。
+后来也成为从臂串口的唯一所有者，负责手柄关节控制、主从臂跟随、校准和安全断扭矩；
+Rust zeromq ↔ pyzmq 链路已经过 GUI、手柄和真机动作验证。
 
 **注意**：base_host 与原版 lekiwi_host 都 bind 5555，**二选一起**，别同时跑。
-base_host 只管底盘，不涉及臂/录数据；要完整 lerobot 流程仍走原版+标定。
+要完整 lerobot 录数据流程仍走原版；日常底盘和机械臂遥操作走 base_host。
+
+**机械臂安全与校准（2026-07-30 真机验证）**：GUI「切断电机输出」是整机安全门，
+同时切断 7/8/9 轮子和 1–6 从臂舵机扭矩；恢复时先把当前反馈位置写成目标，再上扭矩，
+避免突然跳动。主臂和从臂都有同一套两步校准：手摆中位写 homing offset，再手动覆盖
+六个关节的最大允许范围；向导在现有六关节数值格实时显示反馈。**第 5 腕旋转不是
+`0..4095` 全圈特殊关节**，必须和其余关节一样记录实际线缆/机械安全端点，保存后手柄
+遥控和主从臂跟随都加载该范围限幅。不要重新引入跳过 ID 5、启动位 ± 常量或强制全圈
+这三种特殊逻辑。
 
 **顶部状态栏（2026-07-19）**：`index.html` header 下加 `#statusbar`，`ui/js/health.js`
 每 4s 调 Rust `sysinfo(ip)` 命令 → 后端 `ssh -o BatchMode=yes jetson@<ip>` 跑一条

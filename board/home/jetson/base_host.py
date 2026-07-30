@@ -25,11 +25,13 @@ without any of that:
                   pose, ids 1..6]; target = ARM_REST_FULL + dq, clamped to
                   calibrated limits. Base keys may be omitted in such
                   messages (base is only driven when "x.vel" is present).
-        "safety.motion" 1/0 master switch (latched in MOTION_FILE): 0 freezes
-                  actuation — wheels stopped AND torque-released (limp, push
-                  the base by hand), arm goals dropped but arm holding torque
-                  kept (a raised arm must not drop) — while recv/mux/telemetry
-                  run normally, so the command chain can be debugged motors-off.
+        "arm.calibrate"  "start"|"middle"|"finish"|"cancel" — GUI calibration
+                  stages. The host owns the bus, backs up EEPROM calibration,
+                  records ranges torque-off, and saves LeRobot-compatible JSON.
+        "safety.motion" 1/0 master switch (latched in MOTION_FILE): 0 cuts
+                  torque on all nine motors (wheels and arm) while recv/mux/
+                  telemetry keep running. Re-enabling holds the arm at its
+                  current position instead of replaying an old goal.
 
 Arm control (servos 1-6, optional — skipped if the arm doesn't answer):
 direct per-joint velocity teleop, no calibration and no cartesian IK. Left
@@ -99,16 +101,21 @@ STATE_PERIOD_S = 0.5
 # measurable on-board; the GUI shows board power (VDD_IN) for the host instead.
 BATT_FILE = "/tmp/lekiwi_batt"
 ARM_FILE = "/tmp/lekiwi_arm"   # "limp" | "holding" | "none" for the GUI statusbar
+ARM_CAL_STATUS_FILE = "/tmp/lekiwi_arm_calibration"
+ARM_CAL_FILE = (
+    "/home/jetson/.cache/huggingface/lerobot/calibration/"
+    "robots/lekiwi/orin_kiwi.json"
+)
 # Safety master switch, latched across service restarts (/tmp -> a full reboot
-# re-arms). "0" = FREEZE actuation: wheels zeroed, no new arm goals (holding
-# torque stays so a raised arm doesn't drop). Everything upstream — recv,
+# re-arms). "0" = cut torque on all nine motors. Everything upstream — recv,
 # priority mux, owner logs, battery telemetry — keeps running, so the whole
-# command chain can be exercised with the motors safely dead.
+# command chain can be exercised with the motors physically unpowered.
 MOTION_FILE = "/tmp/lekiwi_motion"
 BATT_PERIOD_S = 5.0
 
 ADDR_MODE, ADDR_TORQUE, ADDR_ACCEL, ADDR_SPEED, ADDR_LOCK = 33, 40, 41, 46, 55
 ADDR_GOAL, ADDR_POS, ADDR_VOLT = 42, 56, 62
+ADDR_MIN_POS, ADDR_MAX_POS, ADDR_HOMING = 9, 11, 31
 WHEELS = {7: 240.0 - 90, 8: 0.0 - 90, 9: 120.0 - 90}   # id -> mounting angle (deg)
 BASE_R, WHEEL_R, MAX_RAW = 0.125, 0.05, 2500
 
@@ -123,7 +130,7 @@ ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP = 1, 2, 3, 4, 5, 6
 # REST is a FIXED measured pose (arm parked/folded), not captured at boot —
 # boot may find the arm anywhere mid-motion after a service restart.
 # Calibrated ranges: lift [847,3244] elbow [897,3114] wrist [904,3193]
-# pan [1097,3097] grip [1452,2959] roll full-turn.
+# pan [1097,3097] grip [1452,2959]. Wrist roll also uses calibration.
 REST_RAW = {ID_LIFT: 1001, ID_ELBOW: 3003, ID_WRIST: 1902}  # parked/folded
 REST_NEAR = 150  # raw counts (~13°): within this of REST at startup -> stay limp
 ARM_IDLE_RELAX_S = 60  # no arm command for this long -> fold to REST + torque off
@@ -135,23 +142,29 @@ POSE_K = 1.2                   # 1/s exp approach (relax/mid glide only)
 LIFT_RATE, ELBOW_RATE, WRIST_RATE = 700, 800, 700
 PAN_LIM = (1120, 3075)         # absolute, from calibration (margin 25)
 PAN_RATE = 500                 # raw counts/s at full input
-ROLL_RANGE = 600               # roll is full-turn: keep boot-relative range
 ROLL_RATE = 500
 GRIP_LIM = (1470, 2940)        # absolute, from calibration (closed .. open)
 GRIP_RATE = 600
 # Leader-follow: full rest pose (all 6 joints, measured parked) and absolute
-# clamps per joint (from calibration, margin ~25; roll is full-turn so a
-# generous fixed window around rest).
+# clamps per joint (from calibration, margin ~25).
 ARM_REST_FULL = {ID_PAN: 2110, ID_LIFT: 1001, ID_ELBOW: 3003,
                  ID_WRIST: 1902, ID_ROLL: 2116, ID_GRIP: 1453}
 ARM_LIMS = {ID_PAN: PAN_LIM, ID_LIFT: (870, 3220), ID_ELBOW: (920, 3090),
             ID_WRIST: (930, 3170), ID_ROLL: (1400, 2830), ID_GRIP: GRIP_LIM}
-# Calibrated MIDDLE pose (every joint at its range center: upper arm vertical,
+ARM_NAMES = {
+    ID_PAN: "arm_shoulder_pan",
+    ID_LIFT: "arm_shoulder_lift",
+    ID_ELBOW: "arm_elbow_flex",
+    ID_WRIST: "arm_wrist_flex",
+    ID_ROLL: "arm_wrist_roll",
+    ID_GRIP: "arm_gripper",
+}
+# Calibrated MIDDLE pose (LeRobot makes the chosen physical middle raw 2047:
+# upper arm vertical,
 # forearm level, wrist straight). Leader-follow aligns here, not at REST —
 # right angles are far easier to reproduce by eye on the leader, which is
 # what alignment accuracy depends on (wrist especially).
-ARM_MID = {ID_PAN: 2048, ID_LIFT: 2048, ID_ELBOW: 2048,
-           ID_WRIST: 2048, ID_ROLL: 2048, ID_GRIP: 2205}
+ARM_MID = {sid: 2047 for sid in ARM_NAMES}
 EE_STEP_MAX = 60               # max raw counts one joint may move per command
 
 
@@ -198,6 +211,20 @@ def read(ser, sid, addr, ln):
 
 def le(v):
     return [v & 0xFF, (v >> 8) & 0xFF]
+
+
+def sign_magnitude(v, sign_bit):
+    """Encode a signed STS register value."""
+    v = int(v)
+    limit = (1 << sign_bit) - 1
+    if abs(v) > limit:
+        raise ValueError(f"{v} exceeds signed {sign_bit + 1}-bit magnitude")
+    return abs(v) | ((1 << sign_bit) if v < 0 else 0)
+
+
+def decode_sign_magnitude(v, sign_bit):
+    sign = -1 if v & (1 << sign_bit) else 1
+    return sign * (v & ((1 << sign_bit) - 1))
 
 
 def raw_speed(v):
@@ -306,6 +333,58 @@ def write_arm_state(s):
         pass
 
 
+def write_arm_cal_status(s):
+    try:
+        tmp = ARM_CAL_STATUS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(s.replace("\n", " ") + "\n")
+        os.replace(tmp, ARM_CAL_STATUS_FILE)
+    except OSError:
+        pass
+
+
+def save_arm_calibration(offsets, mins, maxes):
+    """Write the same JSON schema as `lerobot-calibrate` for LeKiwi."""
+    data = {}
+    for sid, name in ARM_NAMES.items():
+        data[name] = {
+            "id": sid,
+            "drive_mode": 0,
+            "homing_offset": offsets[sid],
+            "range_min": mins[sid],
+            "range_max": maxes[sid],
+        }
+    wheel_names = ("base_left_wheel", "base_back_wheel", "base_right_wheel")
+    for sid, name in zip(WHEELS, wheel_names, strict=True):
+        data[name] = {
+            "id": sid,
+            "drive_mode": 0,
+            "homing_offset": 0,
+            "range_min": 0,
+            "range_max": 4095,
+        }
+    os.makedirs(os.path.dirname(ARM_CAL_FILE), exist_ok=True)
+    tmp = ARM_CAL_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=4)
+        f.write("\n")
+    os.replace(tmp, ARM_CAL_FILE)
+
+
+def load_arm_limits():
+    """Load joint ranges saved by LeRobot; keep safe defaults on error."""
+    limits = ARM_LIMS.copy()
+    try:
+        with open(ARM_CAL_FILE) as f:
+            data = json.load(f)
+        for sid, name in ARM_NAMES.items():
+            item = data[name]
+            limits[sid] = (int(item["range_min"]), int(item["range_max"]))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return limits
+
+
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -313,7 +392,7 @@ def clamp(v, lo, hi):
 class Arm:
     """Direct per-joint velocity teleop: left stick = lift+elbow, Y/A = wrist."""
 
-    def __init__(self, ser):
+    def __init__(self, ser, torque_allowed=True):
         self.ser = ser
         self.raw = {}
         for sid in (ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP):
@@ -333,21 +412,32 @@ class Arm:
         )
         for sid, p in self.raw.items():
             write(ser, sid, ADDR_ACCEL, [20])
-            if not parked:
+            if not parked and torque_allowed:
                 # Hold current pose: goal = present BEFORE torque on, no jump.
                 write(ser, sid, ADDR_GOAL, le(p))
                 write(ser, sid, ADDR_TORQUE, [1])
         self.rest = {sid: float(v) for sid, v in REST_RAW.items()}
+        self.limits = load_arm_limits()
         self.pose = {sid: float(self.raw[sid]) for sid in REST_RAW}
         self.pan = float(self.raw[ID_PAN])
-        self.pan_lim = PAN_LIM
+        self.pan_lim = self.limits[ID_PAN]
         self.roll = float(self.raw[ID_ROLL])
-        self.roll_lim = (self.roll - ROLL_RANGE, self.roll + ROLL_RANGE)
+        self.roll_lim = self.limits[ID_ROLL]
         self.grip = float(self.raw[ID_GRIP])
-        self.grip_lim = GRIP_LIM
-        self.relaxed = parked
-        write_arm_state("limp" if parked else "holding")
-        print(f"[base_host] arm {'limp (parked)' if parked else 'holding'} at "
+        self.grip_lim = self.limits[ID_GRIP]
+        self.relaxed = parked or not torque_allowed
+        self.resume_after_safety = not parked
+        self.cal_stage = None
+        self.cal_original = None
+        self.cal_offsets = None
+        self.cal_mins = None
+        self.cal_maxes = None
+        self.cal_seq = "0"
+        self.cal_status = "idle"
+        write_arm_state("limp" if self.relaxed else "holding")
+        state = "holding" if not self.relaxed else (
+            "limp (safety off)" if not torque_allowed else "limp (parked)")
+        print(f"[base_host] arm {state} at "
               f"{ {s: int(v) for s, v in self.pose.items()} } "
               f"pan={self.pan:.0f} roll={self.roll:.0f} grip={self.grip:.0f}",
               flush=True)
@@ -367,6 +457,146 @@ class Arm:
         self.relaxed = False
         write_arm_state("holding")
         print("[base_host] arm awake", flush=True)
+
+    def safety_off(self):
+        """Cut all arm torque and remember whether resume should re-energize."""
+        self.resume_after_safety = not self.relaxed
+        for sid in self.raw:
+            write(self.ser, sid, ADDR_TORQUE, [0])
+        self.relaxed = True
+        write_arm_state("limp")
+        print("[base_host] arm torque cut by safety switch", flush=True)
+
+    def safety_on(self):
+        """Restore a previously holding arm at its current physical pose."""
+        if self.resume_after_safety and not self.cal_stage:
+            self.wake()
+
+    def _read_calibration(self):
+        out = {}
+        for sid in self.raw:
+            hom = read(self.ser, sid, ADDR_HOMING, 2)
+            lo = read(self.ser, sid, ADDR_MIN_POS, 2)
+            hi = read(self.ser, sid, ADDR_MAX_POS, 2)
+            if hom is None or lo is None or hi is None:
+                raise OSError(f"arm servo {sid} calibration read failed")
+            out[sid] = (
+                decode_sign_magnitude(hom[0] | (hom[1] << 8), 11),
+                lo[0] | (lo[1] << 8),
+                hi[0] | (hi[1] << 8),
+            )
+        return out
+
+    def _write_calibration(self, values):
+        for sid, (offset, lo, hi) in values.items():
+            write(self.ser, sid, ADDR_LOCK, [0])
+            write(self.ser, sid, ADDR_HOMING, le(sign_magnitude(offset, 11)))
+            write(self.ser, sid, ADDR_MIN_POS, le(lo))
+            write(self.ser, sid, ADDR_MAX_POS, le(hi))
+            write(self.ser, sid, ADDR_LOCK, [1])
+
+    def calibrate_start(self):
+        if self.cal_stage:
+            raise ValueError("follower calibration already running")
+        self.cal_original = self._read_calibration()
+        for sid in self.raw:
+            write(self.ser, sid, ADDR_TORQUE, [0])
+        self.relaxed = True
+        self.resume_after_safety = False
+        self.cal_stage = "middle"
+        write_arm_state("limp")
+        print("[base_host] follower calibration: move arm to middle", flush=True)
+
+    def calibrate_middle(self):
+        if self.cal_stage != "middle":
+            raise ValueError("follower calibration is not waiting for middle")
+        # Reset first so Present_Position is the physical encoder value, then
+        # make the chosen middle exactly 2047, matching LeRobot.
+        self._write_calibration({sid: (0, 0, 4095) for sid in self.raw})
+        actual = {}
+        for sid in self.raw:
+            p = read_pos(self.ser, sid)
+            if p is None:
+                raise OSError(f"arm servo {sid} position read failed")
+            actual[sid] = p
+        offsets = {sid: actual[sid] - 2047 for sid in self.raw}
+        self._write_calibration({
+            sid: (offsets[sid], 0, 4095) for sid in self.raw
+        })
+        positions = {}
+        for sid in self.raw:
+            p = read_pos(self.ser, sid)
+            if p is None:
+                raise OSError(f"arm servo {sid} centered read failed")
+            positions[sid] = p
+            self.raw[sid] = p
+        self.cal_offsets = offsets
+        self.cal_mins = positions.copy()
+        self.cal_maxes = positions.copy()
+        self.cal_stage = "range"
+        print("[base_host] follower calibration: recording joint ranges", flush=True)
+
+    def calibrate_tick(self):
+        if not self.cal_stage:
+            return None
+        positions = {}
+        for sid in self.raw:
+            p = read_pos(self.ser, sid)
+            if p is None:
+                raise OSError(f"arm servo {sid} range read failed")
+            positions[sid] = p
+            self.raw[sid] = p
+            if self.cal_stage == "range":
+                self.cal_mins[sid] = min(self.cal_mins[sid], p)
+                self.cal_maxes[sid] = max(self.cal_maxes[sid], p)
+        return positions
+
+    def calibrate_finish(self):
+        if self.cal_stage != "range":
+            raise ValueError("follower calibration is not recording ranges")
+        narrow = [
+            ARM_NAMES[sid]
+            for sid in self.raw
+            if self.cal_maxes[sid] - self.cal_mins[sid] < 100
+        ]
+        if narrow:
+            raise ValueError("range too small: " + ", ".join(narrow))
+        values = {
+            sid: (self.cal_offsets[sid], self.cal_mins[sid], self.cal_maxes[sid])
+            for sid in self.raw
+        }
+        self._write_calibration(values)
+        save_arm_calibration(self.cal_offsets, self.cal_mins, self.cal_maxes)
+        self.limits.update(
+            {
+                sid: (self.cal_mins[sid], self.cal_maxes[sid])
+                for sid in self.raw
+            }
+        )
+        self.pan_lim = self.limits[ID_PAN]
+        self.roll_lim = self.limits[ID_ROLL]
+        self.grip_lim = self.limits[ID_GRIP]
+        self.cal_stage = None
+        self.cal_original = None
+        self.pose = {sid: float(self.raw[sid]) for sid in REST_RAW}
+        self.pan = float(self.raw[ID_PAN])
+        self.roll = float(self.raw[ID_ROLL])
+        self.grip = float(self.raw[ID_GRIP])
+        print(f"[base_host] follower calibration saved to {ARM_CAL_FILE}", flush=True)
+
+    def calibrate_cancel(self):
+        if not self.cal_stage:
+            return
+        if self.cal_original:
+            self._write_calibration(self.cal_original)
+        self.cal_stage = None
+        self.cal_original = None
+        for sid in self.raw:
+            p = read_pos(self.ser, sid)
+            if p is not None:
+                self.raw[sid] = p
+        print("[base_host] follower calibration cancelled; previous values restored",
+              flush=True)
 
     def relax_tick(self, dt):
         """One folding step toward REST; cut torque once it has arrived."""
@@ -425,7 +655,7 @@ class Arm:
                   f"raw={ {s: self.raw[s] for s in sorted(self.raw)} }", flush=True)
         order = (ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP)
         for i, sid in enumerate(order):
-            t = clamp(ARM_MID[sid] + dq[i], *ARM_LIMS[sid])
+            t = clamp(ARM_MID[sid] + dq[i], *self.limits[sid])
             g = int(clamp(round(t), self.raw[sid] - EE_STEP_MAX,
                           self.raw[sid] + EE_STEP_MAX))
             if g != self.raw[sid]:
@@ -444,11 +674,11 @@ class Arm:
         if self.relaxed:
             self.wake()
         self.pose[ID_LIFT] = clamp(self.pose[ID_LIFT] + vf * LIFT_RATE * dt,
-                                   *ARM_LIMS[ID_LIFT])
+                                   *self.limits[ID_LIFT])
         self.pose[ID_ELBOW] = clamp(self.pose[ID_ELBOW] - vf * ELBOW_RATE * dt,
-                                    *ARM_LIMS[ID_ELBOW])
+                                    *self.limits[ID_ELBOW])
         self.pose[ID_WRIST] = clamp(self.pose[ID_WRIST] - vz * WRIST_RATE * dt,
-                                    *ARM_LIMS[ID_WRIST])
+                                    *self.limits[ID_WRIST])
         self.pan = clamp(self.pan + vpan * PAN_RATE * dt, *self.pan_lim)
         self.roll = clamp(self.roll + vroll * ROLL_RATE * dt, *self.roll_lim)
         self.grip = clamp(self.grip + gv * GRIP_RATE * dt, *self.grip_lim)
@@ -495,8 +725,10 @@ def main():
     ser = serial.Serial(PORT, BAUD, timeout=0.02)
     ensure_wheel_mode(ser)
     print(f"[base_host] wheels {sorted(WHEELS)} in velocity mode on {PORT}", flush=True)
+    motion_on = read_motion()
     try:
-        arm = Arm(ser)
+        arm = Arm(ser, torque_allowed=motion_on)
+        write_arm_cal_status("idle")
     except OSError as e:
         arm = None
         write_arm_state("none")
@@ -538,7 +770,6 @@ def main():
     moving = False
     relaxing = False
     mid_seek = False
-    motion_on = read_motion()
     if not motion_on:
         stop(ser)
         wheels_torque(ser, False)   # boot latched off -> wheels limp
@@ -575,6 +806,8 @@ def main():
                         mid_seek = True
                         relaxing = False
                         print("[base_host] arm middle-pose requested", flush=True)
+                    cal_action = data.get("arm.calibrate")
+                    cal_seq = str(data.get("cal.seq", "0"))
                     motion_req = data.get("safety.motion")
                 except Exception as e:
                     print(f"[base_host] bad command: {e}", flush=True)
@@ -590,15 +823,44 @@ def main():
                     if not motion_on:
                         stop(ser)
                         wheels_torque(ser, False)   # go limp, hand-pushable
+                        if arm:
+                            arm.safety_off()
                         moving = False
                     else:
                         wheels_torque(ser, True)    # re-energize before drive
+                        if arm:
+                            arm.safety_on()
                     print(f"[base_host] SAFETY: motion output "
                           f"{'ENABLED' if motion_on else 'DISABLED'}", flush=True)
                 if not motion_on:
                     # Freeze latched glides too, or re-enabling would replay a
                     # relax/mid request queued while the switch was off.
                     relaxing = mid_seek = False
+                if arm and cal_action is not None:
+                    try:
+                        relaxing = mid_seek = False
+                        if cal_action == "start":
+                            arm.calibrate_start()
+                            cal_result = "middle"
+                        elif cal_action == "middle":
+                            arm.calibrate_middle()
+                            cal_result = "range"
+                        elif cal_action == "finish":
+                            arm.calibrate_finish()
+                            cal_result = "saved"
+                        elif cal_action == "cancel":
+                            arm.calibrate_cancel()
+                            cal_result = "cancelled"
+                        else:
+                            raise ValueError(f"unknown calibration action: {cal_action}")
+                        arm.cal_seq = cal_seq
+                        arm.cal_status = cal_result
+                        write_arm_cal_status(f"{cal_seq} {cal_result}")
+                    except (OSError, ValueError) as e:
+                        arm.cal_seq = cal_seq
+                        arm.cal_status = f"error {e}"
+                        write_arm_cal_status(f"{cal_seq} error {e}")
+                        print(f"[base_host] follower calibration error: {e}", flush=True)
                 if base and frame_ttl_ok(data, now):
                     p = BASE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
                     if not base_blocked(prio_last, p, now):
@@ -609,12 +871,13 @@ def main():
                                   f"{BASE_PRIO_NAME.get(p, '?')}", flush=True)
                         if pending is None or p <= pending[0]:
                             pending = (p, vx, vy, om, data.get("seq"))
-                if arm and motion_on and dq is not None and len(dq) == 6:
+                if (arm and motion_on and not arm.cal_stage
+                        and dq is not None and len(dq) == 6):
                     relaxing = False
                     mid_seek = False
                     arm.follow(dq)
                     last_arm_cmd = now
-                if arm and motion_on and any(ee):
+                if arm and motion_on and not arm.cal_stage and any(ee):
                     relaxing = False          # any arm input cancels/wakes
                     mid_seek = False
                     arm.step(*ee, dt=min(0.1, now - last_cmd))
@@ -651,12 +914,18 @@ def main():
                     and time.time() - last_arm_cmd > ARM_IDLE_RELAX_S):
                 relaxing = True
                 print("[base_host] arm idle -> auto relax", flush=True)
-            if arm and motion_on and relaxing:
+            if arm and motion_on and not arm.cal_stage and relaxing:
                 arm.relax_tick(0.05)
                 if arm.relaxed:
                     relaxing = False
-            if arm and motion_on and mid_seek and arm.mid_tick(0.05):
+            if arm and motion_on and not arm.cal_stage and mid_seek and arm.mid_tick(0.05):
                 mid_seek = False
+            if arm and arm.cal_stage:
+                positions = arm.calibrate_tick()
+                joints = ",".join(str(positions[sid]) for sid in sorted(positions))
+                write_arm_cal_status(
+                    f"{arm.cal_seq} {arm.cal_status} joints={joints}"
+                )
             # Battery telemetry: one wheel-servo voltage read every few seconds.
             # Cheap (~4 ms) and rare, so it never disturbs the 20 Hz drive loop;
             # a serial death here escapes as OSError like any other, triggering
@@ -679,6 +948,9 @@ def main():
             stop(ser)
             for sid in WHEELS:
                 write(ser, sid, ADDR_TORQUE, [0])
+            if arm:
+                for sid in arm.raw:
+                    write(ser, sid, ADDR_TORQUE, [0])
             ser.close()
             write_arm_state("limp")
             print("[base_host] stopped, torque released", flush=True)
