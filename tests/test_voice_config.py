@@ -180,8 +180,8 @@ def test_enums_are_metadata_objects():
     # 这条测试问的是「enums 是带元数据的对象」,不是文案。
     assert asr["sensevoice"]["label"].startswith("SenseVoice-Small")
     assert asr["sensevoice"]["params_b"] == 0.234 and asr["sensevoice"]["disk_mb"] == 229
-    # 排头的是当前主力引擎:2026-07-26 起是 qwen3(sherpa 原生抗噪),不再是 funasr
-    assert e["asr"][0]["id"] == "qwen3"
+    # GUI order is an operator-facing contract, not an incidental dict order.
+    assert [a["id"] for a in e["asr"][:3]] == ["funasr", "qwen3", "paraformer"]
     tts = {t["id"]: t for t in e["tts"]}
     assert tts["edge"]["params_b"] is None and tts["edge"]["disk_mb"] is None  # online
     assert tts["melo"]["disk_mb"] == 183                                       # offline

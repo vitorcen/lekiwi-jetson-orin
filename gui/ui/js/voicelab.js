@@ -30,9 +30,10 @@ const TAIL_MS   = 400;    // ASR transcript tail poll, only while transcribing
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// dBFS thresholds (from .memory/voice-frontend-s2.md, MCP01 field rules):
-//   >= -34  → clearly above this board's noise floor (green)
-//   ~ -79   → device muted / not powered (long-press power 3s)
+// dBFS display thresholds. They diagnose signal presence only; ASR acceptance
+// remains the daemon's job and must not depend on a USB product name.
+//   >= -34  → clearly above the measured noise floor (green)
+//   <= -70  → effectively silent
 const LVL_MIN  = -80;     // meter floor
 // 底噪实测 -38 dBFS(增益已拉满 127/127),留 4dB 余量当「确实有人在说话」。
 // 这里曾写作 BARGE_MIN_RMS=0.02 的镜像 —— 那道能量门 2026-07-26 删了(它把
@@ -154,12 +155,12 @@ function paintDevice(h) {
     okPill.className = 'pill ' + (ok ? 'ok' : 'bad');
   }
   paintTtsWarn(h);
-  // Built-in diagnosis (the MCP01 field rules, made visible instead of guessed):
+  // Diagnose the signal, not a particular USB product.
   if (hint) {
     if (!cap || !play) {
       hint.textContent = '⚠ 声卡未发现:检查 USB 拔插,或在 Agent 页重启语音服务重发现';
     } else if (Number.isFinite(peak) && peak <= LVL_MUTE) {
-      hint.textContent = '⚠ 电平≈静音:MCP01 未开机(长按电源键 3 秒)或静音键红灯亮';
+      hint.textContent = '⚠ 麦克风无有效信号:检查 USB、硬件静音和输入通道';
     } else {
       hint.textContent = '';
     }
@@ -1062,7 +1063,7 @@ $('vlTtsBtn') && ($('vlTtsBtn').onclick = audition);
 $('vlTtsText') && $('vlTtsText').addEventListener('keydown', e => { if (e.key === 'Enter') audition(); });
 
 // 回环自检: feed a known human-voice clip straight through VAD+ASR (no mic).
-// Bisects "acoustic problem" vs "model problem" — passes even with MCP01 absent.
+// Bisects "acoustic problem" vs "model problem" — passes without a USB sound card.
 async function runSelftest() {
   if (!invoke || !online) return;
   const btn = $('vdSelftest');
@@ -1233,6 +1234,17 @@ async function macRun() {
   macStopped = false;
   paintMacBtns();
   try {
+    // This field is the macOS output volume, not a second per-player gain.
+    // Apply it once at start and keep say/afplay at unity; multiplying two
+    // percentages made "50%" mean something other than 50%.
+    try {
+      const actual = await invoke('mac_sysvol_set', { volume });
+      addRow('vlMacFeed', `系统音量已设为 ${actual}%`, 'ask');
+      await paintSysVol();
+    } catch (e) {
+      addRow('vlMacFeed', '设置系统音量失败: ' + e, 'error');
+      return;
+    }
     const voice = ($('vlMacVoice') && $('vlMacVoice').value) || '';
     let rendered = null;
     if (engine !== 'say') {
@@ -1245,9 +1257,9 @@ async function macRun() {
         addRow('vlMacFeed', '▶ ' + text, 'answer');
         try {
           if (rendered) {
-            await invoke('mac_play', { path: rendered.get(text), volume });
+            await invoke('mac_play', { path: rendered.get(text), volume: 100 });
           } else {
-            await invoke('mac_say', { text, voice, volume, rate });
+            await invoke('mac_say', { text, voice, volume: 100, rate });
           }
         } catch (e) {
           addRow('vlMacFeed', '播报失败: ' + e, 'error');
@@ -1367,9 +1379,8 @@ $('vlMacVoice') && ($('vlMacVoice').onchange = () =>
   setCfg(macEngine() === 'say' ? 'macVoiceSay' : 'macVoice', $('vlMacVoice').value));
 $('vlMacEngine') && ($('vlMacEngine').addEventListener('change', fillMacVoices));
 
-// The two volumes multiply and only one of them lives in this window, so show
-// the product: a bench at 100% behind a system volume of 69 is 3dB down, and
-// 8dB is the whole difference between 3/10 and 9/10 lines recognised.
+// Show whether the machine already matches the value that will be applied when
+// playback starts. There is one volume, not a hidden product of two knobs.
 async function paintSysVol() {
   const el = $('vlMacSysVol');
   if (!el) return;
@@ -1377,14 +1388,11 @@ async function paintSysVol() {
   try { sys = await invoke('mac_sysvol_get'); }
   catch (e) { el.textContent = '(系统音量读不到)'; return; }
   const raw = $('vlMacVol') ? numVal('vlMacVol') : 100;
-  const bench = Math.max(0, Math.min(100, isFinite(raw) ? raw : 100));
-  const eff = Math.round(sys * bench / 100);
-  el.textContent = `×系统 ${sys}% = ${eff}%`;
-  el.classList.toggle('vlwarn', eff < 95);
+  const desired = Math.round(Math.max(0, Math.min(100, isFinite(raw) ? raw : 100)));
+  el.textContent = `当前系统 ${sys}%`;
+  el.classList.toggle('vlwarn', sys !== desired);
 }
-// "拉满" means the thing the operator is looking at — the product. Maxing only
-// the system volume looked broken the one time it was already 100 and the bench
-// sat at 70: the readout said 70% and the button did nothing visible.
+// "拉满" updates both the desired field and the machine immediately.
 $('vlMacSysMax') && ($('vlMacSysMax').onclick = async () => {
   const v = $('vlMacVol');
   if (v) { v.value = '100'; setCfg('macVolume', '100'); }   // programmatic set fires no 'change'

@@ -10,6 +10,8 @@ __pycache__/
 temp/
 .DS_Store
 
+firmware/
+
 # voice frontend: venv + downloaded ASR/TTS/VAD models (re-fetch via voice/setup.sh)
 voice/.venv/
 voice/models/

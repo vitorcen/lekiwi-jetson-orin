@@ -345,7 +345,7 @@
         <label class="ivlabel" title="二级:随模式变——VAD 时选离线引擎(qwen3等),流式时选流式模型(zh-2025等)">模型
           <select id="vlModelSel"></select>
         </label>
-        <label class="ivlabel" title="数字增益 dB —— 实测保持 0。MCP01 自带 AGC,语音峰值已顶到约 -9 dBFS,再乘只会削顶:+15dB 削掉 14.8% 的语音采样,近场召回 14/14→12/14。silero/ten 是神经网络 VAD 不看电平,只有 energy(能量门)才依赖它">增益
+        <label class="ivlabel" title="数字增益 dB。默认保持 0；仅在实际语音峰值过低时增加，避免削顶失真。silero/ten 是神经网络 VAD，不直接使用这个电平门；energy 模式才按 dBFS 判断。">增益
           <input type="number" id="vlAudioGain" min="0" max="30" step="1" style="width:4.5em">
         </label>
         <span class="tip">转写<b>不进大脑、不触发播报</b>;开启会终止对话。改动<b>临时</b>,「保存」才落盘。</span>
@@ -461,15 +461,15 @@
         <span class="rowbreak"></span>
         <!-- 下面两个 type=text + inputmode:同 VAD 参数,type=number 会吞掉中文输入法
              打出的全角「。」,把 0.5 变成空值。解析在 JS 里做,顺手把全角点换回来。 -->
-        <!-- 音量、系统音量、合计、拉满是**一个** label:两个乘数分成两个 flex item 时,
-             窄栏里会从中间断开,断成「音量 %」独自一行。.ivlabel 是 nowrap,合成一组
-             就只会在组与组之间换行。
-             默认 100:wav 已经峰值归一化到 -1dBFS,这里再压就是白扔电平 —— 实测板子麦
+        <!-- 音量、当前系统值、拉满是**一个** label，窄栏只在控件组之间换行。
+             输入框是 macOS 系统音量的唯一真值；开始播报时设置电脑，播放器保持 unity，
+             不再把两个百分比相乘。
+             默认 100:wav 已经峰值归一化到 -1dBFS，系统音量再压就是白扔电平 —— 实测板子麦
              收到 -24.7dBFS 时 10 句只对 3 句,-16.8dBFS 时对 9 句。 -->
-        <label class="ivlabel" title="播出电平。台音量(say 的 [[volm]] / afplay -v)乘以 macOS 系统音量,合计才是真正播出去的。&#10;系统音量是这条链上唯一在 GUI 外面的乘数 —— 板子听不清先看合计是不是 100%">音量
+        <label class="ivlabel" title="macOS 系统输出音量。点击「开始播报」时，电脑会先设置成这个百分比；播报结束后保持该值。">音量
           <input type="text" inputmode="decimal" id="vlMacVol" value="100">%
           <span id="vlMacSysVol">…</span>
-          <button id="vlMacSysMax" class="minibtn" title="台音量和 macOS 系统音量都设成 100%,把播出电平拉到满档">拉满</button>
+          <button id="vlMacSysMax" class="minibtn" title="把输入框和 macOS 系统音量立即设为 100%">拉满</button>
         </label>
         <!-- 语速只有 say 认;edge/f5 的节奏由音色/参考录音决定,留着会是个骗人的旋钮 -->
         <label class="ivlabel" id="vlMacRateWrap" style="display:none" title="字/分钟。留 0 = 该音色的默认语速。仅 say 引擎有效">语速

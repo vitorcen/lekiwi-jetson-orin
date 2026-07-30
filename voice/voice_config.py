@@ -72,16 +72,13 @@ DEFAULT_CONFIG = {
 # Axis enumerations surfaced by GET /config so the GUI dropdowns need no hardcoding.
 # The bare id lists stay the membership source of truth (switch executors check
 # `x in ASR_ENGINES`); enums() decorates them with label/size metadata.
-# funasr listed first (field-tested best: GPU ~0.65s/seg, punctuation, LLM decoder);
+# funasr listed first/default (GPU ~0.65s/seg, punctuation, LLM decoder);
 # funasr/whisper/qwen3 are heavy — run them with the vision service stopped.
 # Order here = GUI dropdown order.
-# Ranked by the 2026-07-25 comparison (five engines, one fixed recording, oracle
-# cuts so the VAD is not a variable: docs/vad-asr-tuning.html). Near-field they
-# tie at 14/14; the ranking is decided at distance, where qwen3 takes 13/14 at
-# CER 0.036 and is the only one that hears 「停」. paraformer matches its exact
-# count 13x faster but loses that same 「停」. funasr, previously listed first, is
-# slower than paraformer AND less accurate than qwen3. whisper is not a choice.
-ASR_ENGINES = ["qwen3", "paraformer", "funasr", "sensevoice", "whisper", "remote"]
+# The first three are the operator-facing priority order; measured accuracy and
+# latency remain visible in their labels instead of silently overriding that
+# choice.
+ASR_ENGINES = ["funasr", "qwen3", "paraformer", "sensevoice", "whisper", "remote"]
 # "remote" is the odd one out: not a model on this board but an address on the LAN.
 # It sits in the same axis because from the turn's point of view it IS the ASR —
 # same transcribe(samples)->text contract, same switch path, same drift accounting.

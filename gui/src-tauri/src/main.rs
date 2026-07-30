@@ -1448,9 +1448,10 @@ async fn voice_service(ip: String, action: String) -> Result<String, String> {
 // the whole point is to have a sound source the board did not produce (VAD/ASR
 // field tuning, echo tests, wake-word drills).
 //
-// Volume rides in `say`'s inline [[volm x]] command, not the system output
-// volume: a global mute/restore pair is one crash away from leaving the user's
-// Mac at 20%, and there is no correct place to restore it from.
+// The Voice page applies its volume field to macOS once when playback starts
+// and deliberately leaves it there. Per-player volume remains available at the
+// command boundary, but the page passes unity so there is only one user-facing
+// percentage.
 
 /// PID of the `say` child currently speaking, so 停止 can cut a long line.
 #[derive(Default)]
@@ -1686,8 +1687,8 @@ async fn mac_sysvol_get() -> Result<u8, String> {
         .map_err(|_| "读不到系统音量".to_string())
 }
 
-/// Set the macOS output volume. Only ever called from the explicit 拉满 button —
-/// changing a machine-wide setting behind the operator's back is not ours to do.
+/// Set the macOS output volume. Called when a bench starts and by the explicit
+/// 拉满 button; the UI tells the operator that the value is retained.
 #[tauri::command]
 async fn mac_sysvol_set(volume: u8) -> Result<u8, String> {
     let v = volume.min(100);
