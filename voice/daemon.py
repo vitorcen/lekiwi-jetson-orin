@@ -46,7 +46,13 @@ import voice_vad as vvad
 import voice_brain as vbrain
 import voice_asr_obs as vobs
 import voice_http as vhttp
-from voice_audio import CaptureTrace, SentenceAccumulator, SegStore, read_wav_16k
+from voice_audio import (
+    CaptureTrace,
+    SentenceAccumulator,
+    SegStore,
+    read_wav_16k,
+    resample_pcm16,
+)
 import omni_client
 
 # --------------------------------------------------------------------------- #
@@ -1873,15 +1879,24 @@ class Daemon:
             # does not, so the dashboard shows a length only for what it can measure.
             self.last_say_s = round(len(pcm16) / float(host.sample_rate), 2)
             self.last_say_backend = host.name
+            play_rate = host.sample_rate
+            play_pcm = pcm16
+            if self.play_card == "Audio" and play_rate != EDGE_SR:
+                # LeKiwi ESP32 Audio exposes one native 24 kHz rate. Letting
+                # plughw resample Matcha's 16 kHz stream in realtime produces
+                # audible doubled/echoed speech on Jetson.
+                play_pcm = resample_pcm16(
+                    pcm16, play_rate, EDGE_SR)
+                play_rate = EDGE_SR
             ap = await asyncio.create_subprocess_exec(
                 "aplay", "-D", self.play_dev(),
-                "-f", "S16_LE", "-r", str(host.sample_rate), "-c", "1",
+                "-f", "S16_LE", "-r", str(play_rate), "-c", "1",
                 "-t", "raw", "-q",
                 stdin=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             self._cur_aplay = ap
-            ap.stdin.write(pcm16.tobytes())
+            ap.stdin.write(play_pcm.tobytes())
             try:
                 ap.stdin.close()
             except Exception:

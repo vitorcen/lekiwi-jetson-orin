@@ -39,5 +39,5 @@
 - [网关会话生命周期](hermes-session-lifecycle.md) — 历史按 session id 存;新对话=换 id 不删旧,id 必须落盘;不换名会一直长,本地大脑每轮重嚼
 - [车上麦克风 BR21](voice-mic-br21-noise-usb.md) — 底噪 78% 在 100Hz 以下,宽带 RMS 测的是隆隆声不是语音(能量门/VAD 阈值纠结的根因);与舵机串口共享 Single-TT hub;调 VAD 或查丢音前必读
 - [识别的电平断崖](voice-mic-level-cliff.md) — 成败只看段峰值 dBFS,≤−25 就是 0 段的断崖;MCP01 比 BR21 强 16~18dB;别按音响型号配参数
-- [ESP32-S3 UAC 声卡](voice-esp32-s3-audio-uac.md) — 共享 I²S 必须 2×32-bit standard、ADC 37.5dB；半米 Jetson TTS→Qwen3 ASR 逐字通过
+- [ESP32-S3 UAC 声卡](voice-esp32-s3-audio-uac.md) — USB 边界固定 24k；ESP-SR AEC 内部 16k；Matcha 播放须预重采样
 - [Mac 侧语音工具链](mac-side-speech.md) — 板子没外网所以 edge 只能在 Mac 跑;HF 大文件在这台机上不可用改走 ModelScope;播出电平 8dB 决定识别 3/10 还是 9/10,渲染要归一化

@@ -12,6 +12,34 @@ import wave
 
 import numpy as np
 
+
+def resample_pcm16(pcm: np.ndarray, source_rate: int,
+                   target_rate: int) -> np.ndarray:
+    """Resample mono int16 PCM before playback.
+
+    Local TTS clips are short speech buffers, so linear interpolation is both
+    sufficient and cheaper than starting a second realtime audio process.
+    """
+    samples = np.asarray(pcm, dtype=np.int16).reshape(-1)
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("sample rates must be positive")
+    if samples.size == 0 or source_rate == target_rate:
+        return samples.copy()
+
+    output_size = max(
+        1, round(samples.size * target_rate / source_rate))
+    source_positions = (
+        np.arange(output_size, dtype=np.float64) *
+        source_rate / target_rate
+    )
+    output = np.interp(
+        source_positions,
+        np.arange(samples.size, dtype=np.float64),
+        samples.astype(np.float64),
+    )
+    return np.clip(np.rint(output), -32768, 32767).astype(np.int16)
+
+
 # --------------------------------------------------------------------------- #
 # 句子累积器:LLM token 流 → 适合 TTS 的短句
 # --------------------------------------------------------------------------- #
