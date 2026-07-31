@@ -152,6 +152,14 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 #leaderPanel button[aria-disabled="true"] { opacity: .4; }
 #leaderPanel button.primary { background: #2a4a7f; color: #cbe0ff; border-color: #3a63a8; }
 #leaderPanel button.live { background: #1e3a2f; color: #7ee2a8; border-color: #2f6b4f; }
+.leader-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  margin: 12px 0 14px; padding-bottom: 7px; border-bottom: 1px solid #242a3e; }
+#leaderPanel button.leader-tab { display: flex; justify-content: center; align-items: baseline;
+  gap: 7px; padding: 8px 10px; border-color: transparent; background: transparent; }
+#leaderPanel button.leader-tab span { color: #626b8e; font-size: 11px; font-weight: 400; }
+#leaderPanel button.leader-tab.on { color: #cbe0ff; background: #1a2740; border-color: #3a63a8; }
+#leaderPanel button.leader-tab.on span { color: #7ea6e0; }
+.leader-view[hidden] { display: none; }
 #calbox { margin: 10px 0; padding: 12px; border: 1px solid #3a63a8;
   border-radius: 8px; background: #0e1830; }
 #calbox[hidden] { display: none; }
@@ -167,7 +175,6 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 .jointtable td { padding: 6px 8px; border-top: 1px solid #1c2030; font-size: 12.5px; color: #a3abcc; }
 .jointtable td.jv { text-align: right; font: 600 14px ui-monospace, monospace; color: #7ee2a8; }
 /* ---- motion actions (inside the leader panel) ---- */
-#mabox { margin-top: 14px; padding-top: 12px; border-top: 1px solid #1c2030; }
 #mabox .tip { margin: 6px 0 8px; }
 #mabox input[type=text] { flex: 1 1 150px; min-width: 0; font-size: 11.5px; }
 #mabox select { font-size: 12px; }

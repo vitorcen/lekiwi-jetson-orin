@@ -7,15 +7,19 @@ LeKiwi 移动操作机器人(3 轮全向底盘 + SO-101 从臂,Feetech STS3215 �
 ——原设计主控是树莓派,本仓库是其 **Jetson Orin Nano 移植**(维特智能散件版),
 并在 lerobot 原生 ZMQ 遥控之上叠加了语音智能体与 ROS 2 感知层。
 
+![LeKiwi Jetson Orin Nano 实机](docs/images/my-lekiwi.jpg)
+
+*本仓库使用的 LeKiwi 实机:3 轮全向底盘、SO-101 从臂、Jetson Orin Nano 与腕部相机。*
+
 | 目录 | 内容 |
 |---|---|
-| `gui/` | Tauri 桌面控制台(键盘/主臂遥操作 + 视觉 + 语音 + ROS 2 感知预览 Tab) |
+| `gui/` | Tauri 桌面控制台(键盘/主臂遥操作、机械臂校准、动作录制 + 视觉 + 语音 + ROS 2 感知预览 Tab) |
 | `board/` | 板端程序(1:1 镜像板子文件系统):base_host、动作录制/播放 `motion_actions/`、手柄 daemon、总线诊断、systemd 单元 |
 | `vlm/` | 视觉 daemon(:8090,前视+腕部双相机 + 本地 Qwen-VL 解读)+ 只读视觉 MCP |
-| `voice/` | 语音前端 daemon(:8092,5 档 VAD + 5 引擎 ASR(默认 Fun-ASR GPU)+ 3 引擎 TTS(默认 Matcha 离线)+ 打断) |
+| `voice/` | 语音前端 daemon(:8092,5 种 VAD + 6 种 ASR(默认 Fun-ASR GPU)+ 3 种 TTS(默认 Matcha 离线)+ 打断) |
 | `drive/` | 受限控车 MCP(schema 硬钳位,语音/LLM 开车的唯一入口) |
 | `scripts/` | `deploy_board.sh`(rsync `board/` 到板 + 重启服务) |
-| `docs/` | 玩法总览、遥操作方案、手柄键位、Agent/Voice 页设计、语音引擎全景(HTML,可离线浏览) |
+| `docs/` | 玩法总览、遥操作/动作系统方案、手柄键位、Agent/Voice 页设计、语音引擎全景(HTML,可离线浏览) |
 | `notebooks/` | 手动试车 notebook |
 | `.memory/` | 项目长期记忆(协议见 `.memory/SKILL.md`) |
 
@@ -45,11 +49,12 @@ flowchart LR
     U["👤 用户"]
     PAD[🎮 手柄]
     GUI["🖥️ Tauri GUI<br/>遥控/视觉/语音/ROS Tab"]
-    SPK[🔊 MCP01 音响]
+    SPK["🔊 ESP32-S3 USB Audio<br/>24 kHz UAC · 固件 AEC"]
 
     VOICE["voice-daemon :8092<br/>ASR + TTS + 打断"]
     HERMES["Hermes 网关 :8642<br/>☁️ DeepSeek · 龙虾人格"]
     VLM["vlm-daemon :8090<br/>前视+腕部 · 本地 Qwen-VL"]
+    MAMCP["motion-actions MCP<br/>动态列出/回放录制动作"]
 
     BH["base_host(串口唯一属主)<br/>优先级 mux + watchdog"]
     MOT["9× STS3215<br/>轮 7/8/9 + 臂 1-6"]
@@ -64,6 +69,7 @@ flowchart LR
     U <-->|语音| SPK <--> VOICE <--> HERMES
     HERMES -->|MCP 看| VLM
     HERMES -->|MCP drive 硬钳位| BH
+    HERMES -->|MCP 动作| MAMCP -->|Unix socket| BH
     PAD & GUI -->|ZMQ :5555| BH --> MOT
     SENS --> RB -->|只读订阅| GUI
     SENS -.-> NAV -.->|"/cmd_vel 桥(规划)"| BH
@@ -73,7 +79,8 @@ flowchart LR
 
 ### 子图 1:控制链路——谁能动车
 
-四个控制源汇到 base_host 一个仲裁器;安全门在仲裁**之后**,谁都绕不过(规划,见计划 P4)。
+五个控制源汇到 base_host 一个仲裁器。当前电机输出总开关位于仲裁之后;规划中的
+雷达净空安全门也放在同一位置,任何控制源都绕不过。
 
 ```mermaid
 flowchart TB
@@ -84,7 +91,8 @@ flowchart TB
     ACT["录制动作 motion_action · prio 4<br/>base_host 内播放,不走 ZMQ"]
 
     MUX{"base_host 优先级 mux<br/>ZMQ PULL :5555 · 0.5s hold<br/>0.5s watchdog dead-man"}
-    GATE["安全门:雷达净空限速/急停<br/>仲裁后 · 所有源生效"]:::plan
+    MASTER["电机输出总开关<br/>轮子+机械臂 9 舵机 · 板端闩锁"]
+    GATE["雷达净空限速/急停<br/>仲裁后 · 所有源生效"]:::plan
     SER["串口 1Mbps"]
     WHEELS["轮 7/8/9"]
     ARM["SO-101 臂 1-6"]
@@ -93,8 +101,10 @@ flowchart TB
     ODOM["轮反馈 PUB :5557 → /odom + TF"]:::plan
 
     PAD & GUIK & MCPD -->|ZMQ| MUX
+    ACT -->|进程内目标| MUX
     ROSB -.->|ZMQ + src tag| MUX
-    MUX --> GATE --> SER --> WHEELS & ARM
+    MUX --> MASTER --> SER --> WHEELS & ARM
+    MASTER -.-> GATE -.-> SER
     SAFE -.-> GATE
     SER -.-> ODOM
 
@@ -160,13 +170,13 @@ UVC 彩色流一开,深度从 30fps 塌到 1.5fps——所以 Astra 彩色永不
 flowchart TB
     U["👤 用户"]
 
-    subgraph mcp01["🔊 MCP01 会议音响(硬件 AEC)"]
+    subgraph uac["🔊 ESP32-S3 USB Audio(固件 AEC)"]
         MIC[麦克风]
         SPK[扬声器]
     end
 
     subgraph voice["voice-daemon :8092"]
-        VAD["FSMN-VAD 截句<br/>(可切 5 引擎)"] --> ASR["Fun-ASR-Nano GPU<br/>(可切 5 引擎)"]
+        VAD["Silero VAD 截句<br/>(可切 5 引擎)"] --> ASR["Fun-ASR-Nano GPU<br/>(可切 6 引擎)"]
         ACC[句子累积器<br/>标点优先切句] --> TTS["Matcha 离线实时 TTS<br/>(可切 edge 在线 / Melo 兜底)"]
         BARGE[打断判别<br/>时长+能量+回声比对]
     end
@@ -209,12 +219,18 @@ flowchart TB
 
 *语音 Tab(调试台,进入即接管麦克风,退出自动还原):左 ASR 转写台——识别模式
 (VAD+离线 / 流式免 VAD)→ 二级模型(图中 Fun-ASR-Nano 0.8B,GPU 带标点)→ VAD 引擎
-(图中 FSMN-VAD,自带端点)+ 阈值/最短语音/尾静音/前置增益,转写不进大脑不触发播报;
+(默认 Silero,可切 TEN/FSMN/WebRTC/Energy)+ 阈值/最短语音/尾静音/前置增益,
+转写不进大脑不触发播报;
 右 TTS 试听台——引擎切换(图中 Matcha zh-en 离线实时,145MB)+ 任意文本试播。
 所有改动默认**临时覆盖**(不落盘,退出调试自动还原),点「保存」才写入全部大脑搭配,
 Agent 对话即刻用上新引擎——调参 A/B 与生产配置由此隔离。顶栏是麦克风实时电平
 (dBFS+峰值)、音响状态与回环自检:一键「TTS 说一句→麦克风收→ASR 认」,把声学问题
 和模型问题一刀切开。*
+
+当前车载声卡是 Waveshare ESP32-S3-AUDIO-Board 改造的标准 UAC 设备:USB 录放固定
+24 kHz,板内 16 kHz ESP-SR AEC 做自播回声消除。voice-daemon 按 ALSA 卡名自动发现
+通用 USB Audio;本地 Matcha 的 16 kHz PCM 会先显式重采样到 24 kHz,避免实时 ALSA
+转换造成断续或重音。
 
 ## 语音智能体 Hermes(龙虾)
 
@@ -246,11 +262,13 @@ DeepSeek,眼睛(前视 + 爪腕双相机)和轮子通过 MCP 挂载。人格与�
 - **重启网关**:`systemctl --user restart hermes-gateway-robot`。
   ⚠️ 裸敲 `hermes gateway restart`(不带 `--profile robot`)起的是**默认 profile**
   的前台网关(会连 Lark、阻塞终端),与机器人无关。
-- 改了 `vlm/`、`drive/` 的 MCP 源码后必须重启网关——MCP 是网关拉起的子进程。
+- 改了 `vlm/`、`drive/`、`board/home/jetson/motion_actions/mcp_server.py` 后必须
+  重启网关——MCP 是网关拉起的子进程。
 - MCP 挂载与模型配置:`~/.hermes/profiles/robot/config.yaml`。
 - 底盘指令有优先级仲裁(base_host 内):**手柄 > GUI 键盘 > ROS 闭环 > 龙虾(MCP)
   > 录制动作**,高优先级源活动的 0.5 s 内低优先级底盘帧直接丢弃;按住手柄急停可
-  压制 LLM 开车。无人值守运行仍 gate 在 base_host v2 仲裁器(未完成),当前为有人监督档。
+  压制 LLM 开车。切断电机输出的总开关已在 base_host 生效;无人值守所需的雷达净空
+  限速/急停门仍未完成,当前为有人监督档。
 
 ## 动作录制与回放 Motion actions
 
@@ -263,7 +281,8 @@ DeepSeek,眼睛(前视 + 爪腕双相机)和轮子通过 MCP 挂载。人格与�
 - **录什么**:机械臂存相对校准中位的 `dq[6]`,底盘存车体 `vx/vy/omega`(不是三轮 raw
   speed),两轨共用同一时间原点。采的是**仲裁并限幅之后实际采用的目标**,所以键盘、
   板载手柄和主臂跟随都会进同一个动作;watchdog 停车后采到的底盘目标就是零。
-- **在哪操作**:GUI ZeroMQ 页「主臂遥操作」面板底部——动作 ID / 范围(机械臂·底盘·全身)/
+- **在哪操作**:GUI ZeroMQ 页「主臂遥操作」面板的「动作录制」页签——动作 ID /
+  范围(机械臂·底盘·全身)/
   开始停止 / 预览草稿 / 保存 / 丢弃 / 动作列表 / 试播 / 可恢复删除 / 撤销。
   草稿只在板端内存里,`base_host` 一重启就没了(GUI 会明说,不会干等)。
 - **存在哪**:`~/.local/share/lekiwi/motion-actions/<id>.json`,删除是原子改名进

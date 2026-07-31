@@ -482,6 +482,22 @@ async function maRefresh(quiet) {
   maRefreshButtons();
 }
 
+function showLeaderView(name) {
+  const teleop = name === 'teleop';
+  $('leaderTeleopView').hidden = !teleop;
+  $('leaderActionsView').hidden = teleop;
+  document.querySelectorAll('.leader-tab').forEach(tab => {
+    const selected = tab.dataset.leaderView === name;
+    tab.classList.toggle('on', selected);
+    tab.setAttribute('aria-selected', String(selected));
+  });
+  if (!teleop) maRefresh(true);
+}
+
+document.querySelectorAll('.leader-tab').forEach(tab => {
+  tab.onclick = () => showLeaderView(tab.dataset.leaderView);
+});
+
 $('marefresh').onclick = () => maRefresh(false);
 
 $('marec').onclick = async () => {
