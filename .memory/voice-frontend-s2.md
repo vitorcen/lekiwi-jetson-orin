@@ -24,10 +24,12 @@ token 鉴权,GUI 走 Rust 代理)。codex gpt-5.6-sol 调研后**推翻了 faste
 播放 90%/采集 85%(ALSA 状态不跨重启,alsactl store 要 root)。设备无公开 API,
 仅 USB 声卡+HID 按键接口(静音/音量/摘机上报,LED 输出位,报告 ID 3)。
 
-**句子累积器边界规则**(修过一次斩腰 bug):标点绝对优先——硬边界。!?;首段≥2字
-即切(抢首音),软边界逗号首段≥8/后续≥16;强切(首段24/后续42)前先回找最近标点,
-切点吸收尾随标点+引号,段首孤儿标点丢弃。Hermes SSE 的 tool.progress(_thinking)
-也带全文 delta,只有 assistant.delta 才能喂 TTS,否则重复播报。
+**句子累积器边界规则**(2026-07-31 再修流式斩词):标点绝对优先——硬边界
+`。.!?！？；;` 首段≥2字即切(抢首音)，软边界 `，,、：:` 首段≥8/后续≥16。
+旧实现漏了中文逗号 `，` 和问号 `？`，且首段24/后续42字过早强切，实测把
+“三轮小机器人”切成“三轮小”/“机器人”。现无标点安全上限放宽为首段32/后续48，
+切点吸收尾随标点+引号，段首孤儿标点丢弃；逐字流式回归覆盖该原句。Hermes SSE 的
+tool.progress(_thinking) 也带全文 delta，只有 assistant.delta 才能喂 TTS，否则重复播报。
 
 **无声故障(2026-07-19 二锅)**:MCP01 拔插后 `_capture_loop` 只翻 `audio_ok=True`
 不更新卡名 → `audio_ok=True` 但 `cap/play_card=None` 死角,watch loop 被短路,

@@ -43,8 +43,9 @@ def resample_pcm16(pcm: np.ndarray, source_rate: int,
 # --------------------------------------------------------------------------- #
 # 句子累积器:LLM token 流 → 适合 TTS 的短句
 # --------------------------------------------------------------------------- #
-_HARD_BOUND = set("。!?;\n！?；")
-_SOFT_BOUND = set(",、,")
+_HARD_BOUND = set("。.!?！？；;\n")
+_SOFT_BOUND = set("，,、：:")
+_LEADING_BOUND = "。.!?！？；;\n，,、：: \t"
 _MD_STRIP = re.compile(r"[*_`#>|~\[\]()]")     # markdown 记号
 _URL_RE = re.compile(r"https?://\S+")
 _EMOJI_RE = re.compile(
@@ -54,8 +55,10 @@ _CODEFENCE_RE = re.compile(r"```")
 
 
 class SentenceAccumulator:
-    """把 LLM delta 流累积成 8-40 字的短句。首段抢首音低延迟(≥8 字即可提交,
-    最长 18 字强制),后续段目标 20-40 字。剥掉 markdown/URL/emoji/代码围栏。"""
+    """Accumulate streamed LLM text into punctuation-aligned TTS phrases.
+
+    Length is only a safety limit for text that has no punctuation.
+    """
 
     def __init__(self) -> None:
         self.buf = ""
@@ -86,7 +89,7 @@ class SentenceAccumulator:
         first = not self.first_done
         hard_min = 2 if first else 12      # 首段"好的。"这种天然短句直接放行,抢首音
         soft_min = 8 if first else 16
-        force = 24 if first else 42        # 放宽强切,给正在路上的标点留时间
+        hard_limit = 32 if first else 48
         # 硬边界:立即切
         for i, ch in enumerate(b):
             if ch in _HARD_BOUND and i + 1 >= hard_min:
@@ -95,24 +98,25 @@ class SentenceAccumulator:
         for i, ch in enumerate(b):
             if ch in _SOFT_BOUND and i + 1 >= soft_min:
                 return self._absorb(i + 1)
-        # 超长强切:先从 force 往回找任意标点(≥4 字),实在没有才按词边界斩
-        if n >= force:
-            for j in range(min(n, force), 4, -1):
+        # Keep room for punctuation that has not arrived in the stream yet.
+        # Split by length only when unpunctuated text reaches the safety limit.
+        if n >= hard_limit:
+            for j in range(min(n, hard_limit), 4, -1):
                 if b[j - 1] in _HARD_BOUND or b[j - 1] in _SOFT_BOUND:
                     return self._absorb(j)
-            j = min(n, force)
+            j = min(n, hard_limit)
             while j > 4 and b[j - 1].isascii() and b[j - 1].isalpha():
                 j -= 1   # 别拆断英文单词
-            return j if j > 4 else min(n, force)
+            return j if j > 4 else min(n, hard_limit)
         return -1
 
     def push(self, delta: str):
         """吞入 delta,产出零或多个可提交短句(生成器)。"""
         self.buf += self._clean(delta)
-        # 上一段刚在强切点吐出后,迟到 delta 里领头的标点没了归属——直接丢弃,
-        # 否则会被当成下一段的开头念出停顿。
+        # Punctuation arriving after a forced split cannot be reattached to the
+        # queued phrase; discard it instead of speaking it as the next prefix.
         if self.first_done:
-            self.buf = self.buf.lstrip("。!?;！?；,、, \n")
+            self.buf = self.buf.lstrip(_LEADING_BOUND)
         while True:
             cut = self._cut_at()
             if cut <= 0:
