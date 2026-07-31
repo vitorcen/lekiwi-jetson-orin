@@ -43,6 +43,16 @@ mcp_servers:
     - /home/jetson/work/lekiwi-jetson-orin/drive/mcp_server.py
     timeout: 30
     max_tool_calls: 30
+  # Recorded motion actions. Mounted ONCE: the four tools are fixed forever and
+  # actions are data, so recording or deleting one never touches this file and
+  # never needs an MCP reload. timeout must clear the 15 s action ceiling plus
+  # the arm's approach glide — motion_action_play blocks until the action ends.
+  motion_actions:
+    command: /home/jetson/work/lekiwi-jetson-orin/vlm/.venv/bin/python
+    args:
+    - /home/jetson/motion_actions/mcp_server.py
+    timeout: 60
+    max_tool_calls: 30
 
 # ── Security ──────────────────────────────────────────────────────────
 # Secret redaction is ON by default — strings that look like API keys,

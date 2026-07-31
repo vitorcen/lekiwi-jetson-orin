@@ -169,6 +169,46 @@
         <tr><td>3 肘</td><td class="ljv" id="lj2">—</td><td>4 腕俯仰</td><td class="ljv" id="lj3">—</td></tr>
         <tr><td>5 腕旋转</td><td class="ljv" id="lj4">—</td><td>6 爪</td><td class="ljv" id="lj5">—</td></tr>
       </table>
+      <div class="jointtitle">从臂状态 <span>Follower arm · Present Position</span></div>
+      <table id="fjoints" class="jointtable">
+        <tr><td>1 肩转</td><td class="jv" id="fj0">—</td><td>2 肩抬</td><td class="jv" id="fj1">—</td></tr>
+        <tr><td>3 肘</td><td class="jv" id="fj2">—</td><td>4 腕俯仰</td><td class="jv" id="fj3">—</td></tr>
+        <tr><td>5 腕旋转</td><td class="jv" id="fj4">—</td><td>6 爪</td><td class="jv" id="fj5">—</td></tr>
+      </table>
+
+      <!-- 动作录制：板端 base_host 是唯一录制器与播放器，GUI 只发管理命令 -->
+      <div id="mabox">
+        <div class="caltitle"><b>动作录制 <span class="en">Motion actions</span></b>
+          <span id="mastate" class="pill">空闲</span></div>
+        <p class="tip">板端 base_host 按同一时间原点采集「实际采用」的机械臂 dq 与底盘速度：
+          键盘、板载手柄和主臂跟随都会被录进同一个动作。草稿只在板端内存里，base_host 重启即丢失。</p>
+        <div class="lrow">
+          <input id="maid" type="text" placeholder="动作 ID：yes / no / dance" title="[a-z][a-z0-9_-] 最长 32">
+          <select id="mascope" title="录制范围">
+            <option value="arm">范围：机械臂</option>
+            <option value="base">范围：底盘</option>
+            <option value="full">范围：全身</option>
+          </select>
+        </div>
+        <div class="lrow">
+          <input id="malabel" type="text" placeholder="显示名（可留空）">
+          <input id="madesc" type="text" placeholder="说明：给 LLM 判断何时使用（可留空）">
+        </div>
+        <div class="lrow">
+          <button id="marec" class="primary">开始录制</button>
+          <button id="maprev" aria-disabled="true">预览草稿</button>
+          <button id="masave" aria-disabled="true">保存动作</button>
+          <button id="madisc" aria-disabled="true">丢弃草稿</button>
+          <button id="mastop">停止播放</button>
+          <label class="machk"><input id="maover" type="checkbox">允许覆盖同名</label>
+        </div>
+        <div class="lrow">
+          <button id="marefresh">刷新动作列表</button>
+          <button id="maundo" aria-disabled="true" title="把上一次删除的动作从 .trash/ 还原">撤销删除</button>
+          <span id="mahint" class="pill">未刷新</span>
+        </div>
+        <table id="malist"><tbody id="malistbody"></tbody></table>
+      </div>
     </section>
 
     <!-- 右：方向可视化 + 实时速度 -->
@@ -207,6 +247,9 @@
         <tr><td>x.vel<span>前后</span></td><td id="vx">0.00</td><td class="u">m/s</td></tr>
         <tr><td>y.vel<span>横移</span></td><td id="vy">0.00</td><td class="u">m/s</td></tr>
         <tr><td>theta.vel<span>旋转</span></td><td id="vt">0.0</td><td class="u">°/s</td></tr>
+        <tr class="wheelrow wheelstart"><td>7 左轮</td><td id="wheel7">—</td><td class="u">count/s</td></tr>
+        <tr class="wheelrow"><td>8 后轮</td><td id="wheel8">—</td><td class="u">count/s</td></tr>
+        <tr class="wheelrow"><td>9 右轮</td><td id="wheel9">—</td><td class="u">count/s</td></tr>
       </table>
       <div id="pressed" class="pressed">按键：<span>—</span></div>
     </section>

@@ -135,11 +135,9 @@ fn spawn_worker() -> mpsc::UnboundedSender<Req> {
 }
 
 // ---------------------------------------------------------------------------
-// Generic log bus: a ZMQ SUB socket that subscribes to a board-side PUB (the
-// gamepad daemon, and any future board process) on tcp://<ip>:5556. Each frame
-// is one JSON line {"src","text"} which we forward verbatim to the frontend as
-// a "log" event; the WebView's bottom panel timestamps and renders it. Same
-// dedicated-runtime-thread rule as the PUSH socket. One-directional, disposable.
+// Generic SUB worker for board-side PUB streams. The log bus uses :5556 and
+// emits "log"; base telemetry uses :5557 and emits "base-state". Keeping the
+// transport identical avoids two subtly different reconnect implementations.
 
 enum LogReq {
     Connect(String),
@@ -149,7 +147,11 @@ struct LogBus {
     tx: mpsc::UnboundedSender<LogReq>,
 }
 
-fn spawn_log_worker(app: tauri::AppHandle) -> mpsc::UnboundedSender<LogReq> {
+struct FeedbackBus {
+    tx: mpsc::UnboundedSender<LogReq>,
+}
+
+fn spawn_sub_worker(app: tauri::AppHandle, event: &'static str) -> mpsc::UnboundedSender<LogReq> {
     let (tx, mut rx) = mpsc::unbounded_channel::<LogReq>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("log worker runtime");
@@ -167,7 +169,7 @@ fn spawn_log_worker(app: tauri::AppHandle) -> mpsc::UnboundedSender<LogReq> {
                             Ok(m) => {
                                 if let Some(bytes) = m.get(0) {
                                     if let Ok(text) = std::str::from_utf8(bytes) {
-                                        let _ = app.emit("log", text.to_string());
+                                        let _ = app.emit(event, text.to_string());
                                     }
                                 }
                             }
@@ -207,12 +209,24 @@ enum LReq {
     Align(oneshot::Sender<Result<(), String>>),
     /// Three-stage LeRobot-compatible calibration: start -> middle -> finish.
     Calibrate(String, oneshot::Sender<Result<String, String>>),
-    Follow(bool),
+    Follow(bool, oneshot::Sender<Result<bool, String>>),
     Disconnect,
 }
 
 struct Leader {
     tx: std::sync::mpsc::Sender<LReq>,
+}
+
+fn follow_transition(on: bool, connected: bool, aligned: bool) -> Result<bool, String> {
+    if !on {
+        Ok(false)
+    } else if !connected {
+        Err("主臂未连接".into())
+    } else if !aligned {
+        Err("未对齐零位".into())
+    } else {
+        Ok(true)
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -714,7 +728,13 @@ fn spawn_leader(app: tauri::AppHandle, zmq_tx: mpsc::UnboundedSender<Req>) -> Le
                     })();
                     let _ = reply.send(result);
                 }
-                Ok(LReq::Follow(on)) => following = on && zero.is_some(),
+                Ok(LReq::Follow(on, reply)) => {
+                    let result = follow_transition(on, port.is_some(), zero.is_some());
+                    if let Ok(value) = &result {
+                        following = *value;
+                    }
+                    let _ = reply.send(result);
+                }
                 Ok(LReq::Disconnect) => {
                     if let (Some(p), Some(c)) = (port.as_mut(), calibration.take()) {
                         for (i, old) in c.original.iter().enumerate() {
@@ -838,11 +858,15 @@ async fn leader_calibrate(action: String, state: State<'_, Leader>) -> Result<St
 }
 
 #[tauri::command]
-fn leader_follow(on: bool, state: State<'_, Leader>) -> Result<(), String> {
+async fn leader_follow(on: bool, state: State<'_, Leader>) -> Result<bool, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
     state
         .tx
-        .send(LReq::Follow(on))
-        .map_err(|_| "leader worker is gone".to_string())
+        .send(LReq::Follow(on, reply_tx))
+        .map_err(|_| "leader worker is gone".to_string())?;
+    reply_rx
+        .await
+        .map_err(|_| "leader worker dropped follow reply".to_string())?
 }
 
 #[tauri::command]
@@ -909,6 +933,16 @@ fn log_connect(ip: String, state: State<'_, LogBus>) -> Result<(), String> {
         .tx
         .send(LogReq::Connect(ep))
         .map_err(|_| "log worker is gone".to_string())
+}
+
+/// Subscribe to base_host's applied wheel and follower-arm status on :5557.
+#[tauri::command]
+fn feedback_connect(ip: String, state: State<'_, FeedbackBus>) -> Result<(), String> {
+    let ep = format!("tcp://{ip}:5557");
+    state
+        .tx
+        .send(LogReq::Connect(ep))
+        .map_err(|_| "feedback worker is gone".to_string())
 }
 
 /// Point the socket at lekiwi_host's command port. A wrong IP surfaces later as
@@ -1047,6 +1081,117 @@ async fn arm_cal_status(ip: String) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("arm calibration status task failed: {e}"))?
+}
+
+/// Single-quote one argument for the remote shell. ssh concatenates argv with
+/// spaces and hands the result to the board's shell, so a label containing a
+/// space (or a quote) must be quoted here or it becomes two arguments.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+const MOTION_CTL: &str = "python3 /home/jetson/motion_actions/cli.py";
+
+/// Motion-action admin over SSH -> board CLI -> base_host control socket.
+///
+/// `op` is a fixed whitelist, and argv is assembled HERE: the frontend cannot
+/// invent a subcommand or smuggle a flag through a text field. The CLI always
+/// answers with one JSON object, so `{"ok": false, "error": "busy"}` comes
+/// back as a normal result the UI can show — a refusal is data, not an error.
+#[tauri::command]
+async fn motion_action(
+    ip: String,
+    op: String,
+    id: Option<String>,
+    scope: Option<String>,
+    label: Option<String>,
+    desc: Option<String>,
+    overwrite: Option<bool>,
+    trash: Option<String>,
+) -> Result<String, String> {
+    let id = id.unwrap_or_default();
+    let mut cmd = String::from(MOTION_CTL);
+    match op.as_str() {
+        "list" => cmd.push_str(" list --json"),
+        "status" | "record-stop" | "record-discard" | "preview" | "stop" => {
+            cmd.push(' ');
+            cmd.push_str(&op);
+        }
+        "record-start" => {
+            let scope = scope.unwrap_or_else(|| "arm".into());
+            if !matches!(scope.as_str(), "arm" | "base" | "full") {
+                return Err(format!("bad scope: {scope}"));
+            }
+            cmd.push_str(&format!(" record-start --scope {scope}"));
+        }
+        "save" => {
+            cmd.push_str(&format!(
+                " save {} --label {} --description {}",
+                sh_quote(&id),
+                sh_quote(&label.unwrap_or_default()),
+                sh_quote(&desc.unwrap_or_default())
+            ));
+            if overwrite.unwrap_or(false) {
+                cmd.push_str(" --overwrite");
+            }
+        }
+        "play" => cmd.push_str(&format!(" play {}", sh_quote(&id))),
+        "delete" => cmd.push_str(&format!(" delete {}", sh_quote(&id))),
+        "restore" => cmd.push_str(&format!(
+            " restore {}",
+            sh_quote(&trash.unwrap_or_default())
+        )),
+        other => return Err(format!("unknown motion action op: {other}")),
+    }
+    // Transport guard, not a schema rule: the board owns the real label /
+    // description limits and reports them. This only stops a pasted novel from
+    // becoming a multi-megabyte remote command line.
+    if cmd.len() > 8192 {
+        return Err(format!(
+            "命令过长（{} 字节）：动作 ID / 显示名 / 说明请写短一点",
+            cmd.len()
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = std::process::Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=6",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPath=/tmp/lekiwi-ssh-%r@%h",
+                "-o",
+                "ControlPersist=60s",
+                &format!("jetson@{ip}"),
+                &cmd,
+            ])
+            .output()
+            .map_err(|e| format!("ssh spawn failed: {e}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            return Ok(stdout);
+        }
+        // No JSON line at all. stderr is often empty too (ssh exit 255, board
+        // killed mid-command), and an empty Err string reaches the UI as a
+        // blank "failed:" with nothing to act on — always say what happened.
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let status = match out.status.code() {
+            Some(c) => format!("exit {c}"),
+            None => "killed by signal".to_string(),
+        };
+        Err(if stderr.is_empty() {
+            format!("{op}: no output from the board ({status})")
+        } else {
+            format!("{op}: {stderr} ({status})")
+        })
+    })
+    .await
+    .map_err(|e| format!("motion action task failed: {e}"))?
 }
 
 /// Manual control of the vision services (vlm-daemon + llama-server), local or
@@ -1883,7 +2028,13 @@ fn main() {
     let tx = spawn_worker();
     let zmq_tx_for_leader = tx.clone();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(Zmq {
             tx,
             endpoint: Mutex::new(None),
@@ -1908,7 +2059,9 @@ fn main() {
             zmq_arm_calibrate,
             zmq_set_motion,
             arm_cal_status,
+            motion_action,
             log_connect,
+            feedback_connect,
             vlm_health,
             vlm_service,
             vlm_frame,
@@ -1933,7 +2086,10 @@ fn main() {
         .setup(move |app| {
             app.manage(spawn_leader(app.handle().clone(), zmq_tx_for_leader));
             app.manage(LogBus {
-                tx: spawn_log_worker(app.handle().clone()),
+                tx: spawn_sub_worker(app.handle().clone(), "log"),
+            });
+            app.manage(FeedbackBus {
+                tx: spawn_sub_worker(app.handle().clone(), "base-state"),
             });
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
@@ -1946,7 +2102,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_sign_magnitude, encode_sign_magnitude};
+    use super::{decode_sign_magnitude, encode_sign_magnitude, follow_transition};
 
     #[test]
     fn sts_sign_magnitude_round_trip() {
@@ -1955,5 +2111,13 @@ mod tests {
             assert_eq!(decode_sign_magnitude(encoded, 11), value);
         }
         assert!(encode_sign_magnitude(2048, 11).is_err());
+    }
+
+    #[test]
+    fn follow_transition_requires_connection_and_alignment() {
+        assert_eq!(follow_transition(false, false, false).unwrap(), false);
+        assert!(follow_transition(true, false, true).is_err());
+        assert!(follow_transition(true, true, false).is_err());
+        assert_eq!(follow_transition(true, true, true).unwrap(), true);
     }
 }

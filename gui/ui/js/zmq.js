@@ -54,6 +54,9 @@ async function connect() {
     saveConn();                      // 连接成功即记住,下次启动自动连这个 IP
     // Point the log bus at the same board so gamepad events start streaming in.
     invoke('log_connect', { ip }).catch(() => {});
+    // Applied motor status comes from base_host, not from this frontend's
+    // requested body command.
+    invoke('feedback_connect', { ip }).catch(() => {});
   } catch (e) {
     setState('连接失败: ' + e, 'bad');
   }
@@ -180,6 +183,19 @@ function render(x, y, theta) {
   }
 }
 
+function paintMotorStatus(frame) {
+  const wheels = frame && frame.wheels;
+  for (const id of [7, 8, 9]) {
+    const value = wheels && wheels[String(id)];
+    $('wheel' + id).textContent = Number.isFinite(value) ? String(value) : '—';
+  }
+  const joints = frame && frame.arm_joints;
+  for (let i = 0; i < 6; i++) {
+    const value = Array.isArray(joints) ? joints[i] : undefined;
+    $('fj' + i).textContent = Number.isFinite(value) ? String(value) : '—';
+  }
+}
+
 function refreshKeys() {
   // A pad key lights when held directly or via its arrow-key alias.
   const lit = new Set();
@@ -263,6 +279,17 @@ window.addEventListener('blur', dropFocus);           // window lost focus = rel
 document.addEventListener('visibilitychange', () => { if (document.hidden) dropFocus(); });
 
 render(0, 0, 0);
+paintMotorStatus(null);
+
+const feedbackEvents = window.__TAURI__ && window.__TAURI__.event;
+if (feedbackEvents) {
+  feedbackEvents.listen('base-state', ({ payload }) => {
+    try {
+      const frame = JSON.parse(payload);
+      if (frame && frame.type === 'state') paintMotorStatus(frame);
+    } catch { /* malformed telemetry: keep the last valid state */ }
+  });
+}
 
 // Auto-connect on launch with the prefilled endpoint; failure just lands in
 // the status pill and the button still works manually.

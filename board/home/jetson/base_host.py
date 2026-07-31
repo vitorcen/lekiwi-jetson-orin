@@ -49,6 +49,17 @@ velocity mode (reg 33 = 1); speed to reg 46/47 with bit 15 as the sign.
 
 Watchdog: if no command arrives for WATCHDOG_S, the base is stopped — same
 dead-man behaviour as the real host, so a dropped client never runs away.
+
+Motion actions (record + replay): this process is also the CANONICAL RECORDER
+and the ONLY player. It samples the arm target (counts relative to the
+calibrated middle) and the base target (body twist, AFTER arbitration and
+clamping) against one monotonic origin, so keyboard, on-board gamepad and
+leader-arm input all land in the same recording without any cross-machine
+event stitching. Playback runs in this same loop, ranks BELOW pad/gui/ros/mcp,
+and must hold every domain lease its tracks need before a single motor moves.
+Control comes in over a local Unix socket (systemd RuntimeDirectory=lekiwi) —
+never a new unauthenticated TCP port, and never fire-and-forget ZMQ frames.
+See motion_actions/ for the schema, the store and the MCP surface.
 """
 import json
 import math
@@ -58,6 +69,9 @@ import time
 
 import serial
 import zmq
+from motion_actions import control, store
+from motion_actions.runtime import MotionActions
+from motion_actions.server import ControlServer
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyACM0"
 BIND = sys.argv[2] if len(sys.argv) > 2 else "tcp://*:5555"
@@ -71,9 +85,21 @@ WATCHDOG_S = 0.5
 # BASE_HOLD_S after its last base frame — pad's release-zero therefore also
 # pins the bus, so holding the pad e-stop suppresses MCP motion. Untagged
 # messages rank as "gui" (legacy binaries).
-BASE_PRIO = {"pad": 0, "gui": 1, "ros": 2, "mcp": 3}
-BASE_PRIO_NAME = {0: "pad", 1: "gui", 2: "ros", 3: "mcp"}
+# A recorded motion action ranks LAST: it is a canned gesture, so every live
+# sender — human or the ROS closed loop executing an LLM goal — pre-empts it.
+BASE_PRIO = {"pad": 0, "gui": 1, "ros": 2, "mcp": 3, "motion_action": 4}
+BASE_PRIO_NAME = {v: k for k, v in BASE_PRIO.items()}
+MOTION_ACTION_PRIO = BASE_PRIO["motion_action"]
+# What a ZMQ sender is ALLOWED to claim. `motion_action` is produced inside this
+# process only: if the wire could claim it, a remote sender would refresh the
+# player's own mux slot — starving the player's frames without pre-empting it,
+# because base_holder() only looks at strictly higher levels. Off the wire that
+# tag falls back to "gui" like any other unknown src, which DOES pre-empt.
+WIRE_PRIO = {k: v for k, v in BASE_PRIO.items() if k != "motion_action"}
 BASE_HOLD_S = 0.5
+# The arm has no velocity mux, so its lease is the same idea in time only: a
+# human arm frame (leader dq, pad stick, relax/mid) owns the arm for this long.
+ARM_HOLD_S = BASE_HOLD_S
 
 # Final body-velocity ceiling, applied AFTER arbitration to every source.
 # Above the physical envelope (MAX_RAW over-speed scaling caps wheel linear
@@ -165,6 +191,8 @@ ARM_NAMES = {
 # right angles are far easier to reproduce by eye on the leader, which is
 # what alignment accuracy depends on (wrist especially).
 ARM_MID = {sid: 2047 for sid in ARM_NAMES}
+# Wire order of every 6-vector on the arm: leader dq, recorded dq, playback dq.
+ARM_ORDER = (ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP)
 EE_STEP_MAX = 60               # max raw counts one joint may move per command
 
 
@@ -239,6 +267,41 @@ def base_blocked(prio_last, p, now):
     return any(now - prio_last.get(q, -1.0) < BASE_HOLD_S for q in range(p))
 
 
+def base_command_active(speeds):
+    """True if the last serial write asked any wheel for non-zero speed."""
+    return any(v != 0 for v in speeds.values())
+
+
+def wheel_status(speeds):
+    """Signed counts/s exactly as adopted before STS wire encoding."""
+    return {str(sid): int(speeds.get(sid, 0)) for sid in WHEELS}
+
+
+def arm_input_present(data):
+    """True when a ZMQ frame is a human/ROS attempt to move the ARM.
+
+    This is the arm's whole lease test — there is no arm velocity mux, so
+    "somebody touched the arm" is the signal that takes it back from a playing
+    motion action. A resting gamepad streams `ee.*` zeros forever, so only a
+    NON-zero stick counts; a `arm.dq` array is the leader arm streaming and
+    always counts, zeros included.
+    """
+    if data.get("arm.calibrate") is not None:
+        return True
+    if data.get("arm.relax") or data.get("arm.mid"):
+        return True
+    dq = data.get("arm.dq")
+    if isinstance(dq, (list, tuple)) and len(dq) >= 6:
+        return True
+    for key in ("ee.vf", "ee.vpan", "ee.vz", "ee.vroll", "grip.v"):
+        try:
+            if float(data.get(key, 0.0)) != 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue            # malformed frame: the drain loop rejects it anyway
+    return False
+
+
 def frame_ttl_ok(data, now):
     """False only when the sender stamped the frame (ts + ttl_s) and it has
     expired. Unstamped legacy frames always pass — Never break userspace."""
@@ -283,6 +346,15 @@ def solve(vx, vy, omega_deg):
 def read_pos(ser, sid):
     r = read(ser, sid, ADDR_POS, 2)
     return None if r is None else (r[0] | (r[1] << 8)) & 0x0FFF
+
+
+def poll_arm_feedback(ser, feedback, index):
+    """Read one joint's Present Position and advance the round-robin cursor."""
+    sid = ARM_ORDER[index]
+    position = read_pos(ser, sid)
+    if position is not None:
+        feedback[sid] = position
+    return (index + 1) % len(ARM_ORDER)
 
 
 def read_volt(ser, sid):
@@ -653,8 +725,7 @@ class Arm:
             self._flog = now
             print(f"[base_host] follow dq={[int(v) for v in dq]} "
                   f"raw={ {s: self.raw[s] for s in sorted(self.raw)} }", flush=True)
-        order = (ID_PAN, ID_LIFT, ID_ELBOW, ID_WRIST, ID_ROLL, ID_GRIP)
-        for i, sid in enumerate(order):
+        for i, sid in enumerate(ARM_ORDER):
             t = clamp(ARM_MID[sid] + dq[i], *self.limits[sid])
             g = int(clamp(round(t), self.raw[sid] - EE_STEP_MAX,
                           self.raw[sid] + EE_STEP_MAX))
@@ -734,6 +805,25 @@ def main():
         write_arm_state("none")
         print(f"[base_host] arm disabled: {e}", flush=True)
 
+    # Canonical recorder + the only motion-action player. Drafts live in this
+    # object's memory ONLY: a restart loses them, and status() reports a new
+    # host_started_at so the GUI can say so instead of waiting on a ghost.
+    ma = MotionActions(store.actions_root(), mid=ARM_MID, order=ARM_ORDER,
+                       hold_s=ARM_HOLD_S, base_prio=MOTION_ACTION_PRIO,
+                       prio_names=BASE_PRIO_NAME,
+                       log=lambda msg: print(msg, flush=True))
+    ma.arm = arm
+    ma.motion_on = motion_on
+    try:
+        ctl = ControlServer(control.SOCKET_PATH).start()
+        print(f"[base_host] control socket {control.SOCKET_PATH}", flush=True)
+    except OSError as e:
+        # Teleop must not die because a runtime dir is missing; motion actions
+        # then fail loudly at the client instead of silently half-working.
+        ctl = None
+        print(f"[base_host] WARNING: no control socket ({e}) — "
+              f"motion actions unavailable", flush=True)
+
     ctx = zmq.Context()
     sock = ctx.socket(zmq.PULL)
     # No CONFLATE: with several PUSH peers (pad/GUI/MCP) conflation could drop
@@ -764,10 +854,17 @@ def main():
     # Untagged legacy senders rank as "gui" so an old GUI binary still
     # outranks the LLM; only the physical pad outranks everything.
     prio_last = {}                 # priority level -> last base frame time
+    ma.prio_last = prio_last       # the player reads AND claims the same mux
     base_owner = -1                # last announced owner (for log edges)
     last_base = time.time()        # last APPLIED base command (watchdog feed;
                                    # arm-only traffic must not refresh it)
     moving = False
+    base_commanded = False         # unlike UI `moving`, includes raw speed ±1
+    wheels_now = wheel_status({})
+    arm_feedback = ({sid: arm.raw[sid] for sid in ARM_ORDER}
+                    if arm is not None else None)
+    arm_feedback_index = 0
+    last_arm_feedback = 0.0
     relaxing = False
     mid_seek = False
     if not motion_on:
@@ -778,11 +875,11 @@ def main():
     try:
         while True:
             socks = dict(poller.poll(timeout=50))
-            # Latest-only: the drain loop below arbitrates every queued frame
-            # but APPLIES none — it keeps only the newest frame of the highest
-            # unblocked priority, applied once after the drain. Stale queued
-            # velocity never reaches the wheels and never feeds the watchdog.
+            # Latest-only: drain queued base and leader frames without doing
+            # serial writes, then apply each newest target once. Applying every
+            # queued arm.dq here starves Present Position polling during follow.
             pending = None            # (prio, vx, vy, om, seq)
+            pending_arm_dq = None     # (dq, received_at)
             while sock in socks:
                 try:
                     raw = sock.recv_string(zmq.NOBLOCK)
@@ -820,12 +917,18 @@ def main():
                 if motion_req is not None and bool(motion_req) != motion_on:
                     motion_on = bool(motion_req)
                     write_motion(motion_on)
+                    ma.motion_on = motion_on
                     if not motion_on:
+                        ma.on_safety_off()      # abort playback + recording
+                        ma.canon_base = (0.0, 0.0, 0.0)
+                        pending_arm_dq = None
                         stop(ser)
                         wheels_torque(ser, False)   # go limp, hand-pushable
                         if arm:
                             arm.safety_off()
                         moving = False
+                        base_commanded = False
+                        wheels_now = wheel_status({})
                     else:
                         wheels_torque(ser, True)    # re-energize before drive
                         if arm:
@@ -836,7 +939,15 @@ def main():
                     # Freeze latched glides too, or re-enabling would replay a
                     # relax/mid request queued while the switch was off.
                     relaxing = mid_seek = False
+                # Any human / ROS frame that touches the arm takes the arm lease
+                # back and pre-empts the WHOLE motion action — the base track
+                # never keeps playing on its own. Done BEFORE the frame is
+                # applied below, so the action is already dead when the human's
+                # own relax / mid / dq command executes.
+                if arm_input_present(data):
+                    ma.note_human_arm(data.get("src") or "gui", now)
                 if arm and cal_action is not None:
+                    pending_arm_dq = None
                     try:
                         relaxing = mid_seek = False
                         if cal_action == "start":
@@ -862,7 +973,7 @@ def main():
                         write_arm_cal_status(f"{cal_seq} error {e}")
                         print(f"[base_host] follower calibration error: {e}", flush=True)
                 if base and frame_ttl_ok(data, now):
-                    p = BASE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
+                    p = WIRE_PRIO.get(data.get("src"), BASE_PRIO["gui"])
                     if not base_blocked(prio_last, p, now):
                         prio_last[p] = now
                         if p != base_owner:
@@ -875,37 +986,92 @@ def main():
                         and dq is not None and len(dq) == 6):
                     relaxing = False
                     mid_seek = False
-                    arm.follow(dq)
-                    last_arm_cmd = now
+                    pending_arm_dq = (dq, now)
                 if arm and motion_on and not arm.cal_stage and any(ee):
+                    pending_arm_dq = None
                     relaxing = False          # any arm input cancels/wakes
                     mid_seek = False
                     arm.step(*ee, dt=min(0.1, now - last_cmd))
                     last_arm_cmd = now
                 if data.get("arm.mid") or data.get("arm.relax"):
+                    if dq is None and not any(ee):
+                        pending_arm_dq = None
                     last_arm_cmd = now
                 last_cmd = now
+            if pending_arm_dq is not None:
+                dq, received_at = pending_arm_dq
+                arm.follow(dq)
+                last_arm_cmd = received_at
+            # ---- motion actions ------------------------------------------
+            # Control requests, the canonical recorder sample and one playback
+            # step all run here, on this thread, between arbitration and the
+            # motor write — so a lease decision is a plain `if`, not a race.
+            if ctl is not None:
+                for job in ctl.take():
+                    ma.dispatch(job)
+            play_base = ma.tick(time.time())
+            if ma.playing:
+                # Playback owns the arm while it RUNS: no relax/mid glide
+                # fighting it, and no idle auto-relax mid-action. Deliberately
+                # not "was playing": the relax/mid frame that just pre-empted
+                # the action is the human taking the arm back, and swallowing
+                # it here would drop the very command that won the lease.
+                relaxing = mid_seek = False
+                last_arm_cmd = time.time()
+            if ma.needs_base_stop:              # every action ends at zero speed
+                ma.needs_base_stop = False
+                ma.canon_base = (0.0, 0.0, 0.0)
+                stop(ser)
+                moving = False
+                base_commanded = False
+                wheels_now = wheel_status({})
+            if play_base is not None and pending is None:
+                pending = (MOTION_ACTION_PRIO, *play_base, None)
             if pending is not None and motion_on:
                 p, vx, vy, om, seq = pending
                 vx, vy, om = clamp_body(vx, vy, om)
                 speeds = solve(vx, vy, om)
                 drive(ser, speeds)
                 moving = any(abs(v) > 1 for v in speeds.values())
+                base_commanded = base_command_active(speeds)
+                wheels_now = wheel_status(speeds)
                 last_base = time.time()
+                # The recorder samples THIS — the target actually adopted after
+                # arbitration and clamping, whoever won.
+                ma.canon_base = (vx, vy, om)
                 publish({"type": "ack", "owner": BASE_PRIO_NAME.get(p, "?"),
                          "seq": seq, "vx": vx, "vy": vy, "om": om,
                          "moving": moving, "ts": last_base})
-            if moving and time.time() - last_base > WATCHDOG_S:
-                stop(ser)
-                moving = False
-                print("[base_host] watchdog: stopped (no command)", flush=True)
+            if time.time() - last_base > WATCHDOG_S:
+                # No base command in flight => the canonical base target IS
+                # zero, whether or not the wheels were turning fast enough to
+                # count as `moving`. The recorder samples canon_base, so this
+                # is what keeps a recorded pause from replaying as creep.
+                ma.canon_base = (0.0, 0.0, 0.0)
+                if base_commanded:
+                    stop(ser)
+                    moving = False
+                    base_commanded = False
+                    wheels_now = wheel_status({})
+                    print("[base_host] watchdog: stopped (no command)", flush=True)
             now_s = time.time()
+            # Present Position is feedback, not the last target in arm.raw.
+            # Read one joint per 50 ms tick: all six refresh at ~3.3 Hz without
+            # blocking the control loop on six serial transactions at once.
+            if (arm is not None and not arm.cal_stage
+                    and now_s - last_arm_feedback >= 0.05):
+                last_arm_feedback = now_s
+                arm_feedback_index = poll_arm_feedback(
+                    ser, arm_feedback, arm_feedback_index)
             if now_s - last_state_pub >= STATE_PERIOD_S:
                 last_state_pub = now_s
                 own = current_owner(prio_last, now_s)
                 publish({"type": "state",
                          "owner": BASE_PRIO_NAME.get(own, "none"),
                          "motion_on": motion_on, "moving": moving,
+                         "wheels": wheels_now,
+                         "arm_joints": ([arm_feedback[sid] for sid in ARM_ORDER]
+                                        if arm_feedback is not None else None),
                          "ts": now_s})
             # Idle auto-relax: torque holding costs power/heat for nothing, so
             # after ARM_IDLE_RELAX_S without arm input, glide to REST and limp.
@@ -922,6 +1088,7 @@ def main():
                 mid_seek = False
             if arm and arm.cal_stage:
                 positions = arm.calibrate_tick()
+                arm_feedback.update(positions)
                 joints = ",".join(str(positions[sid]) for sid in sorted(positions))
                 write_arm_cal_status(
                     f"{arm.cal_seq} {arm.cal_status} joints={joints}"
@@ -944,6 +1111,13 @@ def main():
         print(f"[base_host] serial died: {e} — exiting for restart", flush=True)
         sys.exit(1)
     finally:
+        # Answer a blocked `play` client before the sockets go away: "the host
+        # stopped" is a result, not a timeout. Runs on the serial-death path
+        # too (sys.exit(1) unwinds through here), so the MCP/GUI caller never
+        # has to guess whether the robot is still moving.
+        ma.on_shutdown()
+        if ctl is not None:
+            ctl.close(drain_s=0.3)
         try:
             stop(ser)
             for sid in WHEELS:

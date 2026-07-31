@@ -9,6 +9,11 @@ Description=LeKiwi base ZMQ host (wheels 7/8/9)
 
 [Service]
 User=jetson
+# /run/lekiwi/ for the motion-action control socket: systemd creates it owned by
+# User= and removes it on stop, so the socket needs no root and no LAN port.
+# File permissions ARE the authentication — do not replace this with TCP.
+RuntimeDirectory=lekiwi
+RuntimeDirectoryMode=0750
 # by-id path survives USB re-enumeration (ttyACM0 -> ttyACM1 after a bus drop)
 ExecStart=/home/jetson/miniconda3/envs/lerobot/bin/python /home/jetson/base_host.py /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B61036495-if00
 Restart=always

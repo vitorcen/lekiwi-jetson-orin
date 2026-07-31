@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机器人动作录制与 MCP 动态调用 · 设计方案</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --fg: #20242a;
+    --muted: #68707c;
+    --line: #dfe3e8;
+    --accent: #315efb;
+    --accent-soft: #edf2ff;
+    --green: #16794f;
+    --green-soft: #eaf7f0;
+    --amber: #9a6700;
+    --amber-soft: #fff7dc;
+    --red: #b42318;
+    --red-soft: #fff0ee;
+    --purple: #7445c6;
+    --purple-soft: #f4efff;
+    --code: #f1f3f5;
+    --shadow: 0 8px 24px rgba(31, 35, 40, .06);
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318;
+      --card: #191c22;
+      --fg: #e5e9ef;
+      --muted: #a2aab6;
+      --line: #343a44;
+      --accent: #7c9cff;
+      --accent-soft: #202b4a;
+      --green: #65d6a1;
+      --green-soft: #163126;
+      --amber: #f0c75e;
+      --amber-soft: #332b15;
+      --red: #ff8b82;
+      --red-soft: #3a1d1b;
+      --purple: #c2a2ff;
+      --purple-soft: #2c2340;
+      --code: #22262e;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15.5px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI",
+      "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 44px 24px 96px; }
+  header {
+    padding: 30px 34px;
+    background: linear-gradient(135deg, var(--card), var(--accent-soft));
+    border: 1px solid var(--line);
+    border-top: 5px solid var(--accent);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+  }
+  h1 { margin: 0 0 8px; font-size: 31px; line-height: 1.28; letter-spacing: -.02em; }
+  .sub { color: var(--muted); margin: 0; }
+  h2 {
+    margin: 48px 0 16px;
+    padding-left: 12px;
+    border-left: 4px solid var(--accent);
+    font-size: 22px;
+    line-height: 1.35;
+  }
+  h3 { margin: 26px 0 10px; font-size: 17px; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 24px; }
+  li { margin: 5px 0; }
+  a { color: var(--accent); }
+  code, pre { font-family: var(--mono); }
+  code {
+    padding: 2px 5px;
+    background: var(--code);
+    border-radius: 4px;
+    font-size: .88em;
+  }
+  pre {
+    margin: 14px 0;
+    padding: 15px 17px;
+    overflow-x: auto;
+    background: var(--code);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  pre code { padding: 0; background: none; }
+  table {
+    width: 100%;
+    margin: 14px 0 20px;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  th, td {
+    padding: 9px 11px;
+    border: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--code); font-weight: 650; }
+  tr:nth-child(even) td { background: color-mix(in srgb, var(--card) 70%, var(--bg)); }
+  .tldr, .callout, .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .tldr { margin: 24px 0; padding: 20px 24px; border-left: 5px solid var(--green); }
+  .tldr h2 { margin: 0 0 9px; padding: 0; border: 0; font-size: 18px; }
+  .callout { margin: 16px 0; padding: 14px 17px; border-left-width: 4px; }
+  .callout strong { display: block; margin-bottom: 3px; }
+  .ok { background: var(--green-soft); border-left-color: var(--green); }
+  .warn { background: var(--amber-soft); border-left-color: var(--amber); }
+  .bad { background: var(--red-soft); border-left-color: var(--red); }
+  .info { background: var(--accent-soft); border-left-color: var(--accent); }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: .02em;
+    vertical-align: 1px;
+  }
+  .tag-do { color: var(--green); background: var(--green-soft); }
+  .tag-safe { color: var(--red); background: var(--red-soft); }
+  .tag-api { color: var(--purple); background: var(--purple-soft); }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .card { padding: 16px 18px; }
+  .card h3 { margin: 0 0 7px; }
+  .small { color: var(--muted); font-size: 13.5px; }
+  .svgbox {
+    margin: 16px 0;
+    padding: 10px;
+    overflow-x: auto;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .wireframe {
+    margin: 16px 0;
+    padding: 18px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .wf-title { margin-bottom: 10px; font-weight: 700; }
+  .wf-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 9px 0; }
+  .wf-input {
+    min-width: 210px;
+    padding: 8px 11px;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg);
+  }
+  .wf-btn {
+    padding: 8px 13px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--code);
+    font-weight: 650;
+  }
+  .wf-btn.primary { color: white; background: var(--accent); border-color: var(--accent); }
+  .wf-btn.live { color: var(--red); background: var(--red-soft); border-color: var(--red); }
+  .wf-status {
+    padding: 4px 9px;
+    color: var(--green);
+    background: var(--green-soft);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .wf-list {
+    width: 100%;
+    margin-top: 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .wf-list-row {
+    display: grid;
+    grid-template-columns: minmax(80px, 1fr) 80px minmax(120px, 1.5fr) 80px 190px;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 10px;
+    border-top: 1px solid var(--line);
+  }
+  .wf-list-row:first-child { border-top: 0; background: var(--code); font-weight: 700; }
+  .wf-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .wf-actions .wf-btn { padding: 5px 9px; font-size: 12px; }
+  .stateflow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 14px 0;
+  }
+  .state {
+    padding: 8px 11px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--card);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  .arrow { color: var(--muted); font-weight: 700; }
+  details {
+    margin: 12px 0;
+    padding: 11px 14px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  summary { cursor: pointer; color: var(--accent); font-weight: 650; }
+  .check td:first-child { width: 56px; text-align: center; font-weight: 800; }
+  footer { margin-top: 52px; padding-top: 18px; color: var(--muted); border-top: 1px solid var(--line); }
+  @media (max-width: 720px) {
+    .wrap { padding: 22px 14px 60px; }
+    header { padding: 22px 20px; }
+    h1 { font-size: 25px; }
+    .grid { grid-template-columns: 1fr; }
+    .wf-list-row { grid-template-columns: 1fr; }
+    .wf-actions { justify-content: flex-start; }
+    table { display: block; overflow-x: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>机器人动作录制与 MCP 动态调用</h1>
+  <p class="sub">机械臂 + 三轮底盘共 9 电机 · 一动作一文件 · 新动作自动发现 · 人工控制永远优先 · 2026-07-31</p>
+  <p class="sub">已按独立评审的 P0/P1/P2 修正实施：播放器移入 <code>base_host</code>，MCP/GUI 降级为本机 control socket 薄客户端，
+    <code>motion_action</code> 定级 4（最低），补齐崩溃矩阵，并删掉 <code>catalog_revision</code> / <code>undo_token</code> /
+    <code>sample_hz</code> / CAS / 锁目录 / 逐帧 TTL。<strong>板上真机联调尚未进行。</strong></p>
+</header>
+
+<section class="tldr">
+  <h2>结论先说</h2>
+  <ul>
+    <li>在 GUI「主臂遥操作」面板增加<strong>动作名、录制范围、开始/停止、预览、保存，以及板端动作列表和删除</strong>。MVP 录机械臂，数据结构和板端录制器从第一天就支持后续同步录制机械臂与三轮底盘。</li>
+    <li>录制器放在 <code>base_host</code> 执行层，不放 Mac GUI：它以同一个单调时钟采集经过仲裁和限幅的机械臂 <code>dq[6]</code> 与底盘 <code>vx/vy/omega</code>，所以键盘、Jetson 手柄和主臂都能进入同一动作。</li>
+    <li><strong>播放器也在 <code>base_host</code>，不在 MCP 进程</strong>（评审 P0 修正）。MCP 与 GUI 都只是本机 Unix control socket 的薄客户端；<strong>绝不用 MCP 经 ZMQ 流动作帧</strong>。这样双域 lease 是进程内一次判断，锁文件、逐帧 TTL、双域 ack 计数、CAS 删除整套分布式补丁全部消失。</li>
+    <li>板端用<strong>一动作一 JSON 文件</strong>作为唯一真相源；没有额外 manifest。GUI 经现有 SSH 信任链调用板端管理 CLI，板端校验后临时文件 + <code>fsync</code> + 原子改名。</li>
+    <li>MCP 永久只暴露四个稳定工具：<code>motion_action_list</code>、<code>motion_action_play</code>、<code>motion_action_stop</code>、<code>motion_action_status</code>。现在就使用通用命名，避免加入轮子后破坏接口。</li>
+    <li>不要为 <code>yes</code>/<code>no</code> 动态创建两个 tool。工具表缓存、重名、删除同步都会制造垃圾状态；动作是数据，不是 API。</li>
+    <li>GUI 的删除是可恢复的管理操作：正式文件原子移动到 <code>.trash/</code>，不向 LLM 暴露删除工具；播放中的动作拒绝删除。</li>
+    <li>全身动作必须原子取得底盘和机械臂两个 lease：<strong>校准/总安全门 &gt; pad &gt; gui &gt; ros &gt; mcp &gt; motion_action</strong>（<code>motion_action</code> 优先级 4，最低）。任一域出现人工<strong>或 ROS</strong>输入，整个动作立即抢断、底盘归零，绝不偷偷续播；结果里 <code>by</code> 指名是谁抢的。</li>
+  </ul>
+</section>
+
+<h2>1 · 现有链路与最小改动点</h2>
+
+<table>
+  <tr><th>现有事实</th><th>直接复用</th><th>不能继续凑合的地方</th></tr>
+  <tr>
+    <td>Mac GUI 的 Rust leader worker 读取 1–6 号主臂舵机，约 30Hz 计算 <code>dq = joint - zero</code></td>
+    <td>把 <code>dq[6]</code> 送到板端，由统一录制器采集实际采用后的目标</td>
+    <td>不能保存主臂绝对 raw position；一旦重新校准就失效</td>
+  </tr>
+  <tr>
+    <td><code>base_host.Arm.follow()</code> 执行 <code>ARM_MID + dq</code>，并按六关节校准范围和每帧步长限幅</td>
+    <td>录制和播放都走同一条 follower 解释逻辑</td>
+    <td>不能在 MCP 里复制限位算法，安全约束必须留在串口唯一所有者</td>
+  </tr>
+  <tr>
+    <td>GUI 已通过 SSH 调板端状态，主臂命令走 ZMQ</td>
+    <td>GUI 通过 SSH 调板端 <code>motion_actionctl</code>；CLI 再连本机 Unix control socket</td>
+    <td>ZMQ PUSH 没有应答，既不适合传文件，更不适合当播放通道——所以动作帧永远不走 ZMQ</td>
+  </tr>
+  <tr>
+    <td>Hermes 已挂载 <code>vlm</code> 和 <code>drive</code> 两个 stdio MCP server</td>
+    <td>增加一次 <code>motion_actions</code> server 配置，之后动作变化不改配置</td>
+    <td>机械臂原本没有像底盘那样的 owner mux；现在补一条「最后一帧人工 arm 输入起 0.5s 内人工持有」的时间 lease，够用且不改现有行为</td>
+  </tr>
+</table>
+
+<div class="callout info">
+  <strong>核心数据选择</strong>
+  机械臂保存相对“校准中位”的 <code>dq[6]</code>；底盘保存机体坐标系 <code>vx/vy/omega</code>，不保存三个轮子的 raw speed。播放时仍由当前机械臂校准和当前三轮运动学做最终解算与限幅，因此校准、轮径或底盘参数变化不会让动作文件直接绑定旧硬件数值。
+</div>
+
+<h2>2 · 推荐架构</h2>
+
+<div class="svgbox">
+<svg width="1040" height="430" viewBox="0 0 1040 430" xmlns="http://www.w3.org/2000/svg"
+     style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif;font-size:12px">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7a828e"/>
+    </marker>
+  </defs>
+
+  <text x="130" y="26" text-anchor="middle" font-weight="700" fill="#315efb">Mac GUI · 管理面</text>
+  <rect x="20" y="42" width="220" height="68" rx="8" fill="#edf2ff" stroke="#315efb" stroke-width="2"/>
+  <text x="130" y="68" text-anchor="middle" font-weight="700">Leader arm 控制面</text>
+  <text x="130" y="89" text-anchor="middle">ID · 范围 · 录制 · 列表 · 删除</text>
+
+  <rect x="20" y="150" width="220" height="76" rx="8" fill="#fff7dc" stroke="#9a6700"/>
+  <text x="130" y="176" text-anchor="middle" font-weight="700">Tauri motion_action 命令</text>
+  <text x="130" y="197" text-anchor="middle">op 白名单 → argv，前端造不出子命令</text>
+  <text x="130" y="214" text-anchor="middle">不持有轨迹、不缓存目录</text>
+  <line x1="130" y1="110" x2="130" y2="150" stroke="#7a828e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="20" y="270" width="220" height="76" rx="8" fill="#eaf7f0" stroke="#16794f" stroke-width="2"/>
+  <text x="130" y="294" text-anchor="middle" font-weight="700">SSH 信任链</text>
+  <text x="130" y="315" text-anchor="middle">ssh jetson motion_actionctl …</text>
+  <text x="130" y="333" text-anchor="middle">复用现有 ControlMaster</text>
+  <line x1="130" y1="226" x2="130" y2="270" stroke="#7a828e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <text x="510" y="26" text-anchor="middle" font-weight="700" fill="#7445c6">Jetson · 薄客户端（无串口 · 无调度器）</text>
+  <rect x="370" y="54" width="280" height="80" rx="8" fill="#eaf7f0" stroke="#16794f" stroke-width="2"/>
+  <text x="510" y="79" text-anchor="middle" font-weight="700">motion_actionctl CLI</text>
+  <text x="510" y="101" text-anchor="middle">list 直读动作目录（base_host 挂了也能看）</text>
+  <text x="510" y="122" text-anchor="middle">录制/播放/保存/删除一律走 control socket</text>
+  <line x1="240" y1="308" x2="370" y2="104" stroke="#16794f" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="370" y="178" width="280" height="100" rx="8" fill="#f4efff" stroke="#7445c6" stroke-width="2"/>
+  <text x="510" y="203" text-anchor="middle" font-weight="700">motion_actions MCP server</text>
+  <text x="510" y="225" text-anchor="middle">list · play · stop · status（四个固定工具）</text>
+  <text x="510" y="247" text-anchor="middle">play = 一条阻塞请求，进程死＝连接断＝中止</text>
+  <text x="510" y="268" text-anchor="middle">没有删除工具，提示注入删不掉动作</text>
+
+  <rect x="370" y="330" width="280" height="62" rx="8" fill="#edf2ff" stroke="#315efb"/>
+  <text x="510" y="354" text-anchor="middle" font-weight="700">Hermes / LLM</text>
+  <text x="510" y="374" text-anchor="middle">先 list，按 action_id 调 play</text>
+  <line x1="510" y1="330" x2="510" y2="278" stroke="#7a828e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <text x="875" y="26" text-anchor="middle" font-weight="700" fill="#b42318">Jetson · base_host 单进程主循环</text>
+  <rect x="750" y="42" width="250" height="206" rx="8" fill="#fff0ee" stroke="#b42318" stroke-width="2"/>
+  <text x="875" y="66" text-anchor="middle" font-weight="700">Unix control socket</text>
+  <text x="875" y="84" text-anchor="middle">/run/lekiwi（RuntimeDirectory，0600）</text>
+  <line x1="762" y1="96" x2="988" y2="96" stroke="#e6b8b3"/>
+  <text x="875" y="116" text-anchor="middle" font-weight="700">Canonical recorder</text>
+  <text x="875" y="134" text-anchor="middle">同一时间原点采 arm dq + base twist</text>
+  <text x="875" y="152" text-anchor="middle">只录仲裁、限幅后实际采用的目标</text>
+  <line x1="762" y1="164" x2="988" y2="164" stroke="#e6b8b3"/>
+  <text x="875" y="184" text-anchor="middle" font-weight="700">Player + base/arm 双 lease</text>
+  <text x="875" y="202" text-anchor="middle">同线程一次判断＝真原子，无锁文件</text>
+  <text x="875" y="220" text-anchor="middle">motion_action 优先级最低（4）</text>
+  <text x="875" y="238" text-anchor="middle">总安全门 · 校准 · 限幅 · watchdog</text>
+  <line x1="650" y1="94" x2="750" y2="86" stroke="#16794f" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="650" y1="228" x2="750" y2="120" stroke="#7445c6" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <rect x="750" y="284" width="250" height="52" rx="8" fill="#f5f6f8" stroke="#7a828e"/>
+  <text x="875" y="306" text-anchor="middle" font-weight="700">动作目录 *.json + .trash/</text>
+  <text x="875" y="325" text-anchor="middle">唯一注册表 · 临时文件+fsync+改名</text>
+  <line x1="875" y1="248" x2="875" y2="284" stroke="#7a828e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="750" y="360" width="250" height="62" rx="8" fill="#fff7dc" stroke="#9a6700"/>
+  <text x="875" y="384" text-anchor="middle" font-weight="700">三轮底盘 + SO-101 从臂</text>
+  <text x="875" y="403" text-anchor="middle">共 9 电机 · 串口只有 base_host 可写</text>
+  <line x1="740" y1="180" x2="740" y2="391" stroke="#b42318" stroke-width="2"/>
+  <line x1="740" y1="391" x2="750" y2="391" stroke="#b42318" stroke-width="2" marker-end="url(#arrow)"/>
+</svg>
+</div>
+
+<p>GUI 和 MCP 都只发管理/播放命令，不持有动作数据，也不流运动帧；<code>base_host</code> 同时是唯一 canonical recorder、唯一播放器和九电机唯一执行者。这样以后接入 Jetson 手柄、Mac 键盘或其他人工源，不需要把输入事件跨机器拼接。</p>
+
+<div class="callout warn">
+  <strong>为什么播放器必须在 base_host 里（评审 P0，已采纳）</strong>
+  早先的方案把调度器放在 MCP 进程、用 <code>src=motion_action</code> 的 ZMQ PUSH 帧流给 base_host，仲裁留在 base_host。那样「原子取得双 lease」是空头支票：中间是一条无应答通道，MCP 只能先 <code>status</code> 再开播，典型的 check-then-act。更糟的是串口掉线时 <code>base_host</code> 会 <code>exit(1)</code> 让 systemd 重启（这是设计好的行为），重启期间 MCP 还在流帧，新起的 base_host 刚把臂唤醒到当前位姿就会执行半截动作的旧帧——逐帧 TTL 挡不住，因为帧是新鲜的，死掉的是上下文。
+  把播放器搬进 base_host 主循环后，lease 判断变成进程内一个 <code>if</code>，而 <strong>ZMQ 流帧、逐帧 <code>ttl_s</code>、双域 ack 计数、<code>.locks/</code> 锁目录全部消失</strong>，MCP 崩溃语义（socket 断＝中止）自动正确。</div>
+
+<h2>3 · GUI 交互与动作列表</h2>
+
+<div class="wireframe">
+  <div class="wf-title">主臂遥操作 · 动作录制 <span class="small">Leader arm · Motion actions</span></div>
+  <div class="wf-row">
+    <span class="wf-input">动作 ID：yes / no / dance</span>
+    <span class="wf-input">范围：机械臂 ▾</span>
+    <span class="wf-status">草稿 3.2s · arm 96</span>
+  </div>
+  <div class="wf-row">
+    <span class="wf-input">显示名（可留空）</span>
+    <span class="wf-input">说明：给 LLM 判断何时使用（可留空）</span>
+  </div>
+  <div class="wf-row">
+    <span class="wf-btn primary">开始录制</span>
+    <span class="wf-btn">预览草稿</span>
+    <span class="wf-btn">保存动作</span>
+    <span class="wf-btn">丢弃草稿</span>
+    <span class="wf-btn live">停止播放</span>
+    <span class="small">☐ 允许覆盖同名</span>
+  </div>
+  <div class="wf-row">
+    <span class="small">机械臂模式可由主臂或手柄示教；全身模式同时采集键盘/手柄底盘与主臂/手柄机械臂。录制期间六关节读数和底盘速度继续实时显示。所有按钮常开，条件不满足时只变暗并写一行日志说明原因。</span>
+  </div>
+  <div class="wf-list">
+    <div class="wf-list-row">
+      <span>动作 ID</span><span>范围</span><span>说明</span><span>时长</span><span>操作</span>
+    </div>
+    <div class="wf-list-row">
+      <span><code>yes</code></span><span>机械臂</span><span>点头 / Yes</span><span>3.2s</span>
+      <span class="wf-actions"><span class="wf-btn">预览</span><span class="wf-btn live">删除</span></span>
+    </div>
+    <div class="wf-list-row">
+      <span><code>no</code></span><span>机械臂</span><span>摇头 / No</span><span>2.9s</span>
+      <span class="wf-actions"><span class="wf-btn">预览</span><span class="wf-btn live">删除</span></span>
+    </div>
+    <div class="wf-list-row">
+      <span><code>dance</code></span><span>全身</span><span>移动并摆臂</span><span>5.1s</span>
+      <span class="wf-actions"><span class="wf-btn">试播</span><span class="wf-btn live">删除</span></span>
+    </div>
+  </div>
+  <div class="wf-row">
+    <span class="wf-btn">刷新动作列表</span>
+    <span class="wf-btn">撤销删除</span>
+    <span class="wf-status">列表已同步</span>
+  </div>
+  <div class="wf-row">
+    <span class="small">进入遥控页、保存成功、删除成功、试播结束后自动刷新；手动刷新用于诊断板端连接。刷新失败时保留画面但徽标改成「列表可能过期」。</span>
+  </div>
+</div>
+
+<h3>状态机</h3>
+<div class="stateflow">
+  <span class="state">idle</span><span class="arrow">→ 开始</span>
+  <span class="state">board_recording</span><span class="arrow">→ 停止/到达上限</span>
+  <span class="state">board_draft</span><span class="arrow">→ 预览</span>
+  <span class="state">previewing</span><span class="arrow">→ 完成</span>
+  <span class="state">board_draft</span><span class="arrow">→ 保存确认</span>
+  <span class="state">saving</span><span class="arrow">→</span>
+  <span class="state">idle</span>
+</div>
+
+<table>
+  <tr><th>操作</th><th>允许条件</th><th>拒绝时必须说清楚</th></tr>
+  <tr><td>开始录制</td><td>总输出开启、<strong>非校准进行中</strong>、非播放中、无现有草稿；所选范围对应硬件在线</td><td>板端返回 <code>safety_off</code> / <code>calibrating</code> / <code>playing</code> / <code>draft_exists</code> / <code>arm_unavailable</code>，前端逐条译成中文写进日志。按钮用 <code>aria-disabled</code> 只做视觉变暗，<strong>永不用原生 <code>disabled</code></strong>，点击一定进 handler、一定有一行日志</td></tr>
+  <tr><td>停止录制</td><td>当前为 <code>recording</code></td><td>少于 3 个有效采样或时长 &lt;200ms，草稿判无效（校验器就是 <code>store.validate_tracks</code>，不另写一套）</td></tr>
+  <tr><td>预览</td><td>有已校验草稿、板端连接、总电机输出开启</td><td>预览使用与 MCP 相同的板端播放器（<code>op:play, preview:true</code>），不允许 GUI 自己另写一套播放循环</td></tr>
+  <tr><td>保存</td><td>动作 ID 合法、草稿有效、远端原子写成功</td><td>SSH/校验/原子写任一步失败都保留草稿，绝不谎报成功。ID 已存在时返回 <code>action_exists</code>，必须先勾选「允许覆盖同名」才会替换</td></tr>
+  <tr><td>刷新列表</td><td>板端 SSH 可达</td><td>调用 <code>motion_actionctl list --json</code>；失败保留当前画面但把状态徽标打成「列表可能过期」，禁止把旧列表冒充实时状态</td></tr>
+  <tr><td>删除</td><td>动作未播放、<strong>动作 ID 输入框里填的就是这一行的 ID</strong></td><td>播放中返回 <code>action_in_use</code>；删除成功后从列表移除并把「撤销删除」点亮</td></tr>
+  <tr><td>断开/切 Tab</td><td>任何状态</td><td>录制立即停止并保留草稿；播放立即 <code>stop</code>；不自动保存</td></tr>
+</table>
+
+<div class="callout info">
+  <strong>列表只有一个来源</strong>
+  GUI 不把动作列表写入 config、localStorage 或 Rust 缓存文件。每次刷新都以板端 <code>motion_actionctl list --json</code> 为准；前端内存只保存本次展示结果。<strong>不做 <code>catalog_revision</code></strong>：全文没有任何消费者的字段就是负债（评审 P2，已采纳）。
+</div>
+
+<div class="callout warn">
+  <strong>确认必须是页面上看得见的状态，不是弹窗</strong>
+  覆盖保存要先勾「允许覆盖同名」，删除要先把该动作 ID 填进输入框。两者都是可见的 UI 状态，不依赖 <code>window.confirm</code>——理由和不用原生 <code>disabled</code> 一样：<strong>会被吞掉的确认等于没有确认</strong>，而且故障不可证伪。
+</div>
+
+<div class="callout bad">
+  <strong>草稿只活在 base_host 内存里，重启即蒸发（评审 P0，已采纳）</strong>
+  串口抖一下（USB 重枚举，这机器上真实发生过）→ <code>exit(1)</code> → systemd 重启 → 录了十几秒的动作无声消失。所以 <code>status</code> 返回 <code>host_started_at</code>；GUI 每次刷新对比这个 epoch，一旦变了而本地还握着草稿，就写一行「base_host 已重启，板端内存里的录制草稿已丢失」，<strong>而不是停在 <code>board_draft</code> 等一个不存在的 draft</strong>。
+</div>
+
+<div class="callout warn">
+  <strong>动作 ID 规则</strong>
+  MVP 使用 <code>[a-z][a-z0-9_-]{0,31}</code>，因此 <code>yes</code>、<code>no</code> 直接合法。显示名和描述以后可单独增加；不要把用户输入静默改写成另一个 ID。
+</div>
+
+<h2>4 · 动作文件：一动作一份多轨 JSON</h2>
+
+<pre><code>{
+  "schema_version": 1,
+  "action_id": "dance",
+  "label": "移动并摆臂",
+  "description": "A short whole-body greeting motion.",
+  "recorded_at": "2026-07-31T10:30:00+08:00",
+  "duration_ms": 5100,
+  "tracks": {
+    "arm": {
+      "space": "middle_delta_counts",
+      "frames": [
+        {"t_ms": 0,  "dq": [0, 0, 0, 0, 0, 0]},
+        {"t_ms": 33, "dq": [0, 0, 4, -18, 0, 0]},
+        {"t_ms": 66, "dq": [0, 0, 9, -37, 0, 0]}
+      ]
+    },
+    "base": {
+      "space": "body_twist",
+      "frames": [
+        {"t_ms": 0,  "vx_mps": 0.0, "vy_mps": 0.0, "omega_dps": 0.0},
+        {"t_ms": 33, "vx_mps": 0.1, "vy_mps": 0.0, "omega_dps": 0.0},
+        {"t_ms": 66, "vx_mps": 0.1, "vy_mps": 0.0, "omega_dps": 4.0}
+      ]
+    }
+  }
+}</code></pre>
+
+<table>
+  <tr><th>字段</th><th>规则</th><th>理由</th></tr>
+  <tr><td><code>schema_version</code></td><td>初始固定为 1；未知版本拒绝</td><td>禁止猜测兼容导致九电机执行错数据</td></tr>
+  <tr><td><code>action_id</code></td><td>等于文件名；全目录唯一</td><td>消灭文件名和 manifest 两份映射</td></tr>
+  <tr><td><code>label / description</code></td><td>给人和 LLM 的语义，不参与执行。<code>label</code> ≤60 字、<code>description</code> ≤200 字；<strong>只拒绝控制字符</strong>（<code>&lt;0x20</code> 和 <code>0x7F</code>），不做字符白名单</td><td>LLM 可据此选择 yes/no，而不是猜 ID。<code>description</code> 原文会进 LLM 上下文，所以要限长；但机器人说明本来就是任意语言的人话，白名单是荒唐的（评审 P2，已采纳）——真正有害的是把换行和终端转义序列偷进日志与提示的控制字符</td></tr>
+  <tr><td><code>tracks</code></td><td>允许 <code>arm</code>、<code>base</code> 或两者同时存在；至少一条</td><td>同一个 schema 覆盖机械臂、底盘和全身动作，不造三种文件</td></tr>
+  <tr><td><code>t_ms</code></td><td>从 0 开始，严格递增，来自单调时钟</td><td>系统时间跳变不能改变动作节奏</td></tr>
+  <tr><td><code>arm.frames[].dq</code></td><td>正好 6 个有限整数；相对校准中位，导入和播放都限幅</td><td>重新校准后仍可安全解释旧动作</td></tr>
+  <tr><td><code>base.frames[]</code></td><td><code>vx_mps/vy_mps/omega_dps</code> 为有限数，保存前已过 base_host 最终钳位</td><td>动作表达车体运动，不绑定 7/8/9 三个电机 raw speed</td></tr>
+  <tr><td>总体上限</td><td>15s、每轨 600 帧、每轨至少 3 帧、总时长至少 200ms、文件 ≤256KiB</td><td>全身短动作足够；限制 LLM 阻塞时间和恶意文件</td></tr>
+</table>
+
+<p>机械臂动作只有 <code>tracks.arm</code>，底盘动作只有 <code>tracks.base</code>，全身动作同时有两者。列表中的“范围”由轨迹键推导，不额外保存 <code>scope</code> 第二真相。几百帧只有几十 KB，没有必要在 MVP 做压缩或曲线拟合。</p>
+
+<div class="callout warn">
+  <strong>schema 里没有 <code>sample_hz</code>（评审 P2，已采纳）</strong>
+  <code>t_ms</code> 已经是关于节奏的唯一真相。base_host 主循环 50ms poll、每帧 dq 还有串口事务开销，所谓「30Hz」只是名义值；把它写进 schema 等于给自己造第二份真相，两份必打架。采样只有一条下限规则（相邻样本至少 30ms，否则不携带新信息），写在 <code>player.MIN_SAMPLE_PERIOD_S</code>，不进文件。</div>
+
+<div class="callout warn">
+  <strong>为什么绝不录三轮 raw speed</strong>
+  7/8/9 号电机速度是底盘运动学的派生值。把派生值存盘会绑定当前轮径、安装角和符号；保存 <code>vx/vy/omega</code> 才能让同一动作经过未来修正后的运动学继续正确播放。
+</div>
+
+<h3>板端统一录制器</h3>
+<table>
+  <tr><th>输入源</th><th>录制点</th><th>写入轨迹</th></tr>
+  <tr><td>Mac 键盘 ZeroMQ</td><td>base mux 接受并完成最终速度钳位后</td><td><code>tracks.base</code></td></tr>
+  <tr><td>Jetson 遥控器底盘摇杆</td><td>同一个 base mux，不依赖 GUI 收到手柄事件</td><td><code>tracks.base</code></td></tr>
+  <tr><td>Mac 主臂跟随</td><td><code>Arm.follow()</code> 完成中位映射、范围与步长限幅后</td><td><code>tracks.arm</code></td></tr>
+  <tr><td>Jetson 遥控器机械臂按键/摇杆</td><td><code>Arm.step()</code> 完成积分和限幅后，换算为 <code>raw-ARM_MID</code></td><td><code>tracks.arm</code></td></tr>
+</table>
+
+<p>录制是被动观察者，不取得运动 owner，也不改变现有优先级。sampler 每个主循环 tick 读取两个域当前“实际采用的 canonical target”，以同一个 <code>t0</code> 生成时间戳；输入源中途切换也不会破坏同步。<strong>watchdog 停车后 canonical base target 立刻写成 <code>(0,0,0)</code></strong>（评审 P1，已采纳）——键盘停发 0.5s 轮子已经停了，此刻若还采到最后一次速度，回放就会凭空多开一段车。总安全门关闭时同理归零。</p>
+
+<div class="callout info">
+  <strong>控制通道</strong>
+  <code>base_host</code> 增加仅本机可访问的 Unix control socket <code>/run/lekiwi/base_host.sock</code>，处理 record / play / stop / status / save / delete / restore。落地方式是 systemd 的 <code>RuntimeDirectory=lekiwi</code> + <code>RuntimeDirectoryMode=0750</code>（评审 P1，已采纳：<code>/run/lekiwi</code> 不会凭空存在，User=jetson 也创建不了 <code>/run</code> 下的目录），socket 本身 <code>chmod 0600</code>——<strong>文件权限就是鉴权</strong>。SSH 只负责在板端启动 <code>motion_actionctl</code>，CLI 再访问本机 socket。不要给局域网新开无鉴权录制端口，也不要把管理命令塞进 fire-and-forget 的 ZMQ PUSH。
+  <br>创建失败时 base_host <strong>照常启动遥控</strong>并打一行 WARNING：让底盘因为一个 runtime 目录而瘫痪是更坏的交易；动作功能则在客户端明确报 <code>host_unreachable</code>，不半死不活。
+</div>
+
+<h3>原子保存</h3>
+<pre><code>GUI -> ssh jetson motion_actionctl record-start --scope arm|base|full
+  -> base_host canonical recorder creates an in-memory draft (lost on restart)
+  -> GUI -> motion_actionctl record-stop        (store.validate_tracks decides valid/invalid)
+  -> GUI preview / discard / motion_actionctl save &lt;action_id&gt; [--overwrite]
+  -> store.validate_action  (the ONE validator: base_host, CLI and MCP share it)
+  -> write yes.json.tmp.&lt;pid&gt;
+  -> flush + fsync
+  -> rename to yes.json
+  -> fsync directory
+  -> return {ok, action_id, scope, duration_ms, frames, replaced}</code></pre>
+
+<h3>可恢复删除</h3>
+<pre><code>GUI: the action id typed in the box must match the row     (visible confirmation)
+  -> ssh jetson motion_actionctl delete yes
+  -> base_host: refuse with action_in_use if THIS action is playing
+  -> rename yes.json to .trash/yes.20260731T103500.json
+  -> fsync active directory and trash directory
+  -> return {ok, action_id, trash_name}
+  -> undo = motion_actionctl restore yes.20260731T103500.json</code></pre>
+
+<ul>
+  <li>删除是原子改名，动作会立刻从 GUI 和下一次 MCP <code>list</code> 消失；当前目录永远没有半删除状态。</li>
+  <li><code>.trash/</code> 列表按删除时间倒序（不是按文件名，否则 <code>zebra</code> 会排在刚删的 <code>apple</code> 前面，撤销就会还原错动作）。撤销就是 <code>restore &lt;trash_name&gt;</code>，<strong>不做 <code>undo_token</code></strong>（评审 P2，已采纳：token 只是给 <code>restore</code> 加了一层间接）。若 ID 已被新动作占用，<code>restore</code> 返回 <code>action_exists</code> 而不是覆盖。</li>
+  <li>回收目录默认保留 30 天，清理只由显式的 <code>purge-trash</code> 完成——没有任何自动清理会在背后吃掉用户录的东西。</li>
+</ul>
+
+<div class="callout warn">
+  <strong>删掉的并发机制：<code>expected-sha256</code> CAS 与 <code>.locks/</code>（评审 P0/P2，已采纳）</strong>
+  「两个 GUI 并发覆盖同一个动作」是假想敌：单操作者、十几个动作。真正需要的互斥只有一条——<strong>不能动正在播放的东西</strong>——而播放器现在就在 base_host 里，于是它退化成单进程里一个 <code>play_action_id</code> 变量比较。<code>_refuse_if_in_use()</code> 同时被覆盖保存和删除调用，所以<strong>两者语义统一</strong>（评审 P2，已采纳：原方案播放中删除被拒、播放中覆盖却隐式放行）。锁文件目录、共享/独占锁、digest 比对整段删除。
+</div>
+
+<div class="callout ok">
+  <strong>动作目录</strong>
+  <code>~/.local/share/lekiwi/motion-actions/*.json</code> 是活动动作，<code>.trash/*.json</code> 是可恢复删除项；都属于运行数据，不提交 Git。仓库只提交 schema、导入器、MCP server、单测和示例动作。
+</div>
+
+<h2>5 · MCP 契约：稳定工具，动态数据</h2>
+
+<div class="grid">
+  <div class="card">
+    <h3><span class="tag tag-api">READ</span> motion_action_list</h3>
+    <p>无参数。每次调用<strong>直接读并校验动作目录</strong>（不经 control socket，所以 base_host 挂了也看得见目录），返回 ID、范围、标签、描述、时长、每轨帧数。坏文件单独列在 <code>invalid</code>，不让整个目录失效。</p>
+  </div>
+  <div class="card">
+    <h3><span class="tag tag-do">RUN</span> motion_action_play</h3>
+    <p>参数只有 <code>action_id</code>。不开放速度倍率、关节覆盖或 repeat；一条阻塞的 control-socket 请求，base_host 按录制节奏播放并在完成或抢断时回复。<strong>MCP 进程死 → socket 断 → base_host 立即中止</strong>，这就是全部的崩溃语义，不需要逐帧 TTL。</p>
+  </div>
+  <div class="card">
+    <h3><span class="tag tag-safe">STOP</span> motion_action_stop</h3>
+    <p>幂等。抢断当前动作（不论是 MCP 还是 GUI 预览发起的），底盘立即发零速；机械臂保持当前安全目标，随后走既有 idle relax 策略。没有动作在播时返回 <code>result: idle</code>。</p>
+  </div>
+  <div class="card">
+    <h3><span class="tag tag-api">READ</span> motion_action_status</h3>
+    <p>返回 active action、范围、进度、base/arm owner、总安全门、arm state、录制/草稿状态、<code>host_started_at</code>、最后结果。LLM 不得把“调用返回了”称为“执行成功”——<code>result</code> 不是 <code>succeeded</code> 就是没做完。</p>
+  </div>
+</div>
+
+<h3>工具结果示例</h3>
+<pre><code>// motion_action_list()
+{
+  "ok": true,
+  "actions": [
+    {
+      "action_id": "yes",
+      "scope": "arm",
+      "label": "点头 / Yes",
+      "description": "Use when the robot agrees or answers yes.",
+      "duration_ms": 3240,
+      "frames": {"arm": 66}
+    },
+    {
+      "action_id": "no",
+      "scope": "arm",
+      "label": "摇头 / No",
+      "description": "Use when the robot disagrees or answers no.",
+      "duration_ms": 2860
+    },
+    {
+      "action_id": "dance",
+      "scope": "full",
+      "label": "移动并摆臂",
+      "description": "A short whole-body greeting motion.",
+      "duration_ms": 5100
+    }
+  ],
+  "invalid": []
+}</code></pre>
+
+<pre><code>// motion_action_play({"action_id": "yes"})
+{
+  "ok": true,
+  "result": "succeeded",          // succeeded | preempted | stopped | safety_cut | aborted | host_stopped
+  "action_id": "yes",
+  "source": "action",             // "draft" when the GUI previewed an unsaved take
+  "scope": "arm",
+  "frames_applied": {"arm": 66},
+  "duration_ms": 3278,
+  "clamped_joints": []
+}
+
+// pre-empted mid-action — `by` names WHO took over, human or not
+{
+  "ok": false,
+  "result": "preempted",
+  "by": "ros",                    // pad | gui | ros | mcp | safety | calibrating | client | base_host
+  "action_id": "dance",
+  "scope": "full",
+  "frames_applied": {"arm": 41, "base": 41},
+  "duration_ms": 1380,
+  "clamped_joints": [5]
+}</code></pre>
+
+<p>Hermes 的机器人 profile 只需首次增加一个固定 server：</p>
+<pre><code>mcp_servers:
+  motion_actions:
+    command: /home/jetson/work/lekiwi-jetson-orin/vlm/.venv/bin/python
+    args:
+      - /home/jetson/motion_actions/mcp_server.py
+    timeout: 60
+    max_tool_calls: 30</code></pre>
+
+<p><code>timeout</code> 必须盖过 15s 动作上限加机械臂靠近首帧的时间，因为 <code>motion_action_play</code> 是阻塞的。板端源码随 <code>board/</code> 一起 rsync 到 <code>/home/jetson/motion_actions/</code>，与 <code>base_host.py</code> 同级——两者 import 同一个 <code>store</code>，schema 校验只有一份。</p>
+
+<div class="callout info">
+  <strong>“自动暴露”到底是什么意思</strong>
+  保存后，下一次 <code>motion_action_list()</code> 立刻能看到新动作及其 <code>scope</code>；删除后，下一次 list 立刻不再返回它。整个过程不改 YAML、不 reload MCP、不重启语音 daemon。机器人提示词只需规定：“涉及姿态或移动动作时先 list，再按 ID play。”
+</div>
+
+<div class="callout bad">
+  <strong>LLM 没有删除权限</strong>
+  <code>delete/restore/purge</code> 只存在于板端管理 CLI，并只能由 GUI 经 SSH 调用。MCP 不增加 <code>motion_action_delete</code>；提示注入或模型误判不能删除用户录制的数据。
+</div>
+
+<h2>6 · 播放与安全语义</h2>
+
+<table>
+  <tr><th>层</th><th>规则</th><th>失败行为</th></tr>
+  <tr><td>动作文件</td><td>纯 JSON、严格 schema、每轨长度/帧数/数值上限</td><td>拒绝加载；绝不执行任意脚本或表达式</td></tr>
+  <tr><td>MCP / CLI 客户端</td><td>只发一条阻塞请求，<strong>不持有调度器、不流帧、不碰串口</strong></td><td><code>host_unreachable</code> / <code>busy</code> / <code>unknown_action</code> / <code>recording</code> 等明确返回；连接断开＝中止</td></tr>
+  <tr><td>双域 lease（base_host 进程内）</td><td>base 与 arm 分域；全身动作必须<strong>在同一个 tick 里一次性</strong>拿到所需全部 lease，否则一个电机都不动</td><td>任何一侧出现人工或 ROS 输入，整个动作 <code>preempted</code> 并带 <code>by</code>，底盘立停，另一轨也不续播</td></tr>
+  <tr><td>底盘优先级 mux</td><td><code>pad 0 &gt; gui 1 &gt; ros 2 &gt; mcp 3 &gt; motion_action 4</code>，沿用既有 <code>BASE_HOLD_S=0.5s</code> 持有窗口</td><td>更高优先级源持有底盘时，<code>play</code> 直接 <code>busy</code>；播放中被抢则整段抢断</td></tr>
+  <tr><td><code>base_host</code></td><td>总电机开关、校准互锁、底盘速度/加速度、机械臂步长/校准范围最终裁决、0.5s watchdog</td><td>条件不满足不写串口，并在阻塞请求的回复里返回真实原因</td></tr>
+  <tr><td>舵机</td><td>串口唯一写入者仍是 <code>base_host</code></td><td>MCP 崩溃不会留下第二个串口进程</td></tr>
+</table>
+
+<h3>开始、结束与抢断</h3>
+<ol>
+  <li><strong>开始：</strong>从 <code>tracks</code> 推导所需 lease。全身动作只有在 base 和 arm 同时可用时才启动，禁止先动一半再发现另一半 busy；机械臂先平滑靠近首帧，底盘首帧仍过加速度限制。</li>
+  <li><strong>执行：</strong>两轨共享同一 monotonic start。机器变慢时各轨只取“此刻最新目标”（<code>player.index_at()</code> 一次二分跳到当前帧），绝不补播陈旧队列。机械臂靠既有 <code>EE_STEP_MAX</code> 每帧限幅自然平滑靠近首帧，不需要第二套 approach 逻辑。</li>
+  <li><strong>正常结束：</strong>底盘强制补零速（<code>needs_base_stop</code> → 下一 tick <code>stop(ser)</code>），机械臂保持最后一帧并随后使用现有 idle auto-relax。动作最好主动回到安全姿态，但不是硬性依赖。</li>
+  <li><strong>抢断（人工 <em>或</em> ROS）：</strong>手柄、键盘、主臂跟随、GUI 或 <code>motion_controller</code> 的帧出现在被 lease 的域里，立即取消整个动作；底盘先停车，调用方收到 <code>result: preempted</code> + <code>by: pad|gui|ros|mcp</code>。<strong>不再叫 <code>preempted_by_human</code></strong>（评审 P0，已采纳）——同一个 LLM 会先 <code>turn_by</code>（ros 级闭环）再 <code>play</code>，被 ros 抢断必须有名字，否则这条真实路径没有语义。</li>
+  <li><strong>总安全门关闭：</strong>沿用现有九电机断输出；当前动作状态变为 <code>safety_cut</code>，重新开输出也不续播；同时正在进行的录制也中止并记进 <code>last_result</code>。</li>
+  <li><strong>校准开始：</strong>校准帧同样算作人工 arm 输入，动作以 <code>preempted by=calibrating</code> 结束。</li>
+</ol>
+
+<h3>崩溃矩阵（评审 P0，已采纳）</h3>
+<table>
+  <tr><th>发生什么</th><th>行为</th><th>可观测性</th></tr>
+  <tr><td><code>base_host</code> 退出（串口掉线 → <code>exit(1)</code> → systemd 重启）</td><td>退出路径先把阻塞中的 <code>play</code> 以 <code>result: host_stopped, by: base_host</code> 答复掉再关 socket；播放随进程消失，不续播；录制草稿丢失；control socket 由 <code>RuntimeDirectory</code> 重建</td><td>客户端拿到的是结果而不是 EOF；<code>status.host_started_at</code> 变化，GUI 打印「草稿已丢失」</td></tr>
+  <tr><td>MCP server 进程被杀 / Hermes 重启</td><td>socket 关闭 → <code>Job.cancelled</code> → 下一 tick <code>result: aborted, by: client</code>，底盘归零</td><td><code>status.last_result</code> 记录 <code>aborted</code></td></tr>
+  <tr><td>SSH 在 <code>save</code> 中途断开</td><td>旧动作文件完整（原子改名尚未发生），草稿留在板端内存</td><td>GUI 报「保存失败（草稿保留）」，绝不谎报成功</td></tr>
+  <tr><td>GUI 切 Tab / 关窗</td><td>切 Tab 主动发 <code>stop</code> + <code>record-stop</code>（含「已发出但板端尚未回报」的播放）；关窗则由 lease 超时和 watchdog 兜底</td><td>日志一行；<code>status</code> 反映真实状态</td></tr>
+  <tr><td>主循环卡住</td><td>超时阶梯只有一个真相源（<code>control.py</code>）：最长合法动作 15s &lt; 服务端 <code>JOB_MAX_WAIT_S=30s</code> &lt; 客户端 <code>PLAY_TIMEOUT_S=40s</code>。<strong>服务端先放弃</strong>，客户端拿到结构化的 <code>control_timeout</code>，动作按 <code>aborted</code> 处理</td><td>不会有客户端永久挂死，也不会把「卡住」误报成 <code>host_unreachable</code></td></tr>
+</table>
+
+<div class="callout bad">
+  <strong>禁止的 fallback</strong>
+  从臂未上线、校准进行中、动作文件损坏、control socket 连不上、lease 被抢、总输出关闭——任何一种都必须失败并说明原因。禁止偷偷换成绝对舵机值、旧缓存、近似动作或继续发完剩余帧。<strong>唯一的例外写在明处</strong>：control socket 建不起来时 base_host 照常提供遥控（并打 WARNING），因为让底盘为一个 runtime 目录陪葬是更坏的交易。
+</div>
+
+<h2>7 · 为什么不做“每个动作一个 MCP tool”</h2>
+
+<table>
+  <tr><th>方案</th><th>新动作发现</th><th>问题</th><th>判断</th></tr>
+  <tr>
+    <td><code>motion_action__yes()</code>、<code>motion_action__no()</code> 动态增删</td>
+    <td>依赖 MCP client 重新拉工具表或支持 <code>list_changed</code></td>
+    <td>Hermes 是否刷新不应成为动作系统正确性的前提；动作名还可能撞保留名、非法字符或删除后残留缓存</td>
+    <td><span class="tag tag-safe">不做</span></td>
+  </tr>
+  <tr>
+    <td>每次保存改 Hermes YAML 并 reload</td>
+    <td>能看到</td>
+    <td>把用户数据变化升级成配置变更；失败会污染大脑配置与现有 MCP 安全链</td>
+    <td><span class="tag tag-safe">不做</span></td>
+  </tr>
+  <tr>
+    <td>固定 <code>list/play/stop/status</code></td>
+    <td><code>list</code> 实时读目录</td>
+    <td>LLM 多一次 list 调用，但行为确定、无需重启、动作可增删改</td>
+    <td><span class="tag tag-do">采用</span></td>
+  </tr>
+</table>
+
+<h2>8 · 代码落点</h2>
+
+<table>
+  <tr><th>文件</th><th>改动</th></tr>
+  <tr><td><code>gui/ui/index.html</code></td><td>Leader arm 面板新增 <code>#mabox</code>：动作 ID、显示名、说明、范围、录制/停止、预览、保存、丢弃、停止播放、覆盖复选框、刷新、撤销删除、动作列表表格</td></tr>
+  <tr><td><code>gui/ui/js/leader.js</code></td><td><code>ma</code> 状态 + <code>maCall()</code>；列表渲染、刷新、删除/覆盖的可见二次确认、撤销入口、错误码中文化、host epoch 比对报草稿丢失；导出 <code>onEnterLeader/onLeaveLeader</code>。不缓存轨迹或目录，所有按钮只用 <code>aria-disabled</code>。<strong>互斥按用途分开</strong>：<code>play/preview</code> 各占一个长时槽，其余变更操作共用一个 admin 槽，而 <code>stop/status/list</code> 不占任何槽——否则播放期间恰恰发不出停止。播放/录制期间以 700ms 轮询 <code>status</code>，进度与抢断来自板端而不是猜测</td></tr>
+  <tr><td><code>gui/ui/js/main.js</code></td><td>切进/切出 ZMQ 页时调 <code>onEnterLeader/onLeaveLeader</code></td></tr>
+  <tr><td><code>gui/ui/style.css</code></td><td>复用现有按钮/pill 视觉，增加 <code>#mabox</code> 录制行与 <code>#malist</code> 动作表</td></tr>
+  <tr><td><code>gui/src-tauri/src/main.rs</code></td><td>一个 <code>motion_action</code> command：<code>op</code> 白名单 → argv（<code>sh_quote</code> 处理带空格的 label/description），走既有 SSH ControlMaster；不保存轨迹、不缓存目录</td></tr>
+  <tr><td><code>board/home/jetson/motion_actions/store.py</code></td><td><strong>唯一的 schema 校验器</strong>：多轨校验、目录扫描、原子保存、<code>.trash/</code> 删除与恢复、<code>purge-trash</code>。base_host / CLI / MCP 共用，谁都不重写一份</td></tr>
+  <tr><td><code>board/home/jetson/motion_actions/player.py</code></td><td>纯逻辑：<code>index_at</code>（latest-only 查帧）、<code>Recorder</code>（同一时间原点多轨采样 + 上限）、<code>Playback</code>（时间→目标、进度、applied 计数）</td></tr>
+  <tr><td><code>board/home/jetson/motion_actions/runtime.py</code></td><td><code>MotionActions</code>：录制/播放状态机、base+arm 双 lease、抢断归因、in-use 统一规则、<code>status()</code>、control-socket <code>dispatch</code>。跑在 base_host 主循环线程上</td></tr>
+  <tr><td><code>board/home/jetson/motion_actions/server.py</code> / <code>control.py</code></td><td>Unix socket 的服务端（accept 线程只搬字节，决策全部丢回主循环 <code>take()</code>；客户端断开置 <code>Job.cancelled</code>）与客户端（<code>call()</code>）</td></tr>
+  <tr><td><code>board/home/jetson/motion_actions/cli.py</code></td><td><code>motion_actionctl</code>：<code>list</code> 直读目录，其余全走 socket；永远输出一个 JSON 对象</td></tr>
+  <tr><td><code>board/home/jetson/motion_actions/mcp_server.py</code></td><td>四个固定工具的薄客户端。<strong>没有 scheduler、没有 ZMQ、没有删除工具</strong></td></tr>
+  <tr><td><code>board/home/jetson/base_host.py</code></td><td>接线：<code>BASE_PRIO</code> 加 <code>motion_action:4</code>、<code>ARM_ORDER</code> 提到模块级、创建 <code>MotionActions</code>+<code>ControlServer</code>、每 tick <code>dispatch</code>+<code>tick</code>、人工 arm 帧调 <code>note_human_arm</code>、应用后写 <code>canon_base</code>、watchdog/安全门归零。无 <code>src</code> 的旧 GUI 帧仍按 gui 级处理</td></tr>
+  <tr><td><code>board/etc/systemd/system/base_host.service</code></td><td><code>RuntimeDirectory=lekiwi</code> + <code>RuntimeDirectoryMode=0750</code></td></tr>
+  <tr><td><code>board/home/jetson/.hermes/profiles/robot/config.yaml</code></td><td>首次挂载 <code>motion_actions</code> MCP server（<code>timeout: 60</code>）</td></tr>
+  <tr><td><code>tests/test_motion_actions.py</code></td><td>49 条纯逻辑用例：schema 破坏面、description 控制字符、原子保存与恢复、latest-only、录制上限与来源缺失、双 lease 原子性、四种抢断归因、in-use 统一、host epoch 可观测</td></tr>
+</table>
+
+<h2>9 · 实施顺序</h2>
+
+<table>
+  <tr><th>阶段</th><th>内容</th><th>通过条件</th></tr>
+  <tr><td>P0</td><td>纯数据层：schema、store、player 纯逻辑、测试</td><td><code>yes.json</code> 可原子保存；list 只有一个真相源；删除可恢复；播放中的动作既删不掉也覆盖不了</td></tr>
+  <tr><td>P1</td><td><code>base_host</code> canonical recorder + player + base/arm 双 lease + control socket</td><td>主臂、手柄、键盘经同一时钟录入；任一人工/ROS 源一帧抢断；旧 GUI 跟随不受影响；总安全门仍切九电机</td></tr>
+  <tr><td>P2</td><td>CLI 与 MCP 薄客户端（list/play/stop/status）</td><td>arm/base/full 三类动作都能执行；杀 MCP、stop、超时、任一域抢断都返回真实结果</td></tr>
+  <tr><td>P3</td><td>GUI 录制范围/预览/保存/动作列表/删除</td><td><code>yes/no</code> 为 arm 动作；键盘或手柄可录 base/full 动作；列表来自板端；删除后可撤销</td></tr>
+  <tr><td>P4</td><td>Hermes 挂载与语音端到端</td><td>保存第三个新动作后不重启任何服务，LLM 下一次 list 能看到并调用</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>不要颠倒顺序</strong>
+  先做 GUI 会得到一个看起来能录、实际会和手柄/MCP 争写的危险玩具。先把 lease 和真实结果回报做对，再给 LLM 权限。
+</div>
+
+<h2>10 · 验收清单</h2>
+
+<table class="check">
+  <tr><th>状态</th><th>场景</th><th>期望</th></tr>
+  <tr><td>□</td><td>主臂未对齐时点录制</td><td>明确拒绝并写 GUI 日志，按钮点击不被吞</td></tr>
+  <tr><td>□</td><td>录制点头为 <code>yes</code>、摇头为 <code>no</code></td><td>六关节数据、时长、帧数正确；重放无突跳</td></tr>
+  <tr><td>□</td><td>主臂摆动同时用键盘开车，录制 <code>full</code> 动作</td><td>一个文件同时产生 <code>tracks.arm</code> 和 <code>tracks.base</code>，两轨共享同一时间原点，回放相对相位一致</td></tr>
+  <tr><td>□</td><td>Jetson 遥控器同时操作底盘和机械臂</td><td>不依赖 Mac 收到手柄事件；base_host 记录经过仲裁、限幅后的两轨 canonical target</td></tr>
+  <tr><td>□</td><td>录制时键盘底盘命令被更高优先级手柄压制</td><td>动作只记录实际被 base mux 采用的手柄目标，不记录被拒绝的键盘请求</td></tr>
+  <tr><td>□</td><td>播放全身动作时只拿到 arm lease，base 正被人工控制</td><td>动作启动前整体返回 <code>busy</code>，机械臂也不动；禁止半个动作启动</td></tr>
+  <tr><td>□</td><td>全身动作播放中人工碰任一底盘或机械臂输入</td><td>整个动作抢断，底盘立即零速，机械臂交给人工，另一轨不继续播放</td></tr>
+  <tr><td>□</td><td>重新收窄第 5 关节校准范围后播放旧动作</td><td>第 5 关节按新范围钳位，其余轨迹继续；结果报告 <code>clamped_joints:[5]</code></td></tr>
+  <tr><td>□</td><td>保存时 SSH 中断</td><td>旧动作保持完整，草稿保留，无残缺正式文件</td></tr>
+  <tr><td>□</td><td>播放中的动作被 GUI 覆盖保存</td><td>与删除同一规则：返回 <code>action_in_use</code>（<code>_refuse_if_in_use()</code> 一个函数管两条路径）</td></tr>
+  <tr><td>□</td><td>录制时键盘停发 0.5s，watchdog 停车</td><td>该段录到的 base 目标是 <code>(0,0,0)</code>，回放不会凭空多开一段车</td></tr>
+  <tr><td>□</td><td>录制中途 base_host 被重启</td><td>GUI 下次刷新看到 <code>host_started_at</code> 变化，打印「草稿已丢失」并回到 idle，不停在 <code>board_draft</code></td></tr>
+  <tr><td>□</td><td>从臂未上线（<code>arm = None</code>）时播放 arm/full 动作</td><td>返回 <code>arm_unavailable</code>；base-only 动作仍可播</td></tr>
+  <tr><td>□</td><td>LLM 先 <code>turn_by</code>（ros 级闭环）再 <code>play</code>，或播放中 <code>motion_controller</code> 还有残留 goal</td><td><code>result: preempted, by: ros</code>；底盘归零，不续播</td></tr>
+  <tr><td>□</td><td>录制中调用 <code>motion_action_play</code></td><td>返回 <code>recording</code>；不会把回放本身录成新动作</td></tr>
+  <tr><td>□</td><td>动作 <code>description</code> 含换行或终端转义序列 / 超过 200 字</td><td>保存阶段拒绝并说明原因；中日英文与标点正常通过</td></tr>
+  <tr><td>□</td><td>GUI 试播进行中点「停止播放」</td><td>停止请求不排在阻塞的播放请求后面（ssh 复用同一条 ControlMaster 连接的另一个 channel），板端同 tick 结束动作、底盘归零，阻塞的 <code>play</code> 立刻拿到 <code>result: stopped</code></td></tr>
+  <tr><td>□</td><td>LLM 正在播放 <code>yes</code> 时 GUI 删除它</td><td>返回 <code>action_in_use</code>；动作文件不动；停止播放后才允许删除</td></tr>
+  <tr><td>□</td><td>GUI 删除 <code>no</code> 后点击撤销</td><td>动作先立即从 GUI/MCP list 消失，撤销后以同一内容恢复；若 ID 已被新动作占用则拒绝覆盖</td></tr>
+  <tr><td>□</td><td>提示注入要求 LLM 删除所有动作</td><td>MCP 根本没有删除工具，模型无法改变动作目录</td></tr>
+  <tr><td>□</td><td>LLM 播放中碰手柄或开启主臂跟随</td><td>当前动作立即 <code>result: preempted</code> + <code>by: pad|gui</code>，人工接管，不再续播</td></tr>
+  <tr><td>□</td><td>播放中点“切断电机输出”</td><td>九电机断输出，动作标记 <code>safety_cut</code>；恢复输出不自动重播</td></tr>
+  <tr><td>□</td><td>播放过程中 MCP 进程被杀</td><td>control socket 断开 → 下一 tick <code>aborted, by: client</code>，底盘归零；<code>status.last_result</code> 可查</td></tr>
+  <tr><td>□</td><td>GUI 新保存 <code>wave</code></td><td>不 reload MCP，下一次 <code>motion_action_list</code> 出现 <code>wave</code> 并可播放</td></tr>
+  <tr><td>□</td><td>动作文件含第 7 个关节、NaN、逆序时间、超速底盘值或超长轨迹</td><td>导入阶段拒绝，九电机零动作</td></tr>
+  <tr><td>□</td><td>现有键盘、手柄、主臂跟随、主从臂校准</td><td>全部保持兼容，不因动作模块安装而改变行为</td></tr>
+</table>
+
+<details>
+  <summary>后续扩展边界</summary>
+  <ul>
+    <li>可增加 <code>aliases</code> 或中文 <code>label</code> 帮助 LLM 选动作，但执行仍只认稳定 <code>action_id</code>。</li>
+    <li>可增加“回到中位”自动尾段、动作组合和循环次数，但必须由服务端硬限制；MVP 不开放。</li>
+    <li>若以后动作数量达到数百个，再考虑索引缓存和目录 watcher。现在扫描几十个小 JSON 比维护缓存一致性更可靠。</li>
+    <li>若需要跨机器人共享动作，另做显式 export/import；不要让运行目录自动 Git 同步，因为不同机械校准仍需现场预览。</li>
+  </ul>
+</details>
+
+<footer>
+  <p><strong>最终原则：</strong>GUI 负责管理，<code>base_host</code> 负责统一采集与最终裁决，文件负责描述，MCP 负责选择。LLM 永远拿不到串口，也永远绕不过人工抢断、底盘限速和机械臂校准范围。</p>
+</footer>
+
+</div>
+</body>
+</html>

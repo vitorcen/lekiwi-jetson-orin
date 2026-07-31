@@ -161,6 +161,25 @@ button.primary.live { background: #3a1e1e; border-color: #6b3030; color: #f38ba8
 #ljoints { width: 100%; border-collapse: collapse; margin-top: 6px; }
 #ljoints td { padding: 6px 8px; border-top: 1px solid #1c2030; font-size: 12.5px; color: #a3abcc; }
 #ljoints td.ljv { text-align: right; font: 600 14px ui-monospace, monospace; color: #cbe0ff; }
+.jointtitle { margin-top: 12px; color: #cbe0ff; font-size: 12.5px; font-weight: 700; }
+.jointtitle span { margin-left: 7px; color: #6b7394; font-size: 11px; font-weight: 400; }
+.jointtable { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.jointtable td { padding: 6px 8px; border-top: 1px solid #1c2030; font-size: 12.5px; color: #a3abcc; }
+.jointtable td.jv { text-align: right; font: 600 14px ui-monospace, monospace; color: #7ee2a8; }
+/* ---- motion actions (inside the leader panel) ---- */
+#mabox { margin-top: 14px; padding-top: 12px; border-top: 1px solid #1c2030; }
+#mabox .tip { margin: 6px 0 8px; }
+#mabox input[type=text] { flex: 1 1 150px; min-width: 0; font-size: 11.5px; }
+#mabox select { font-size: 12px; }
+.machk { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #8b93b5; }
+#malist { width: 100%; border-collapse: collapse; margin-top: 4px; }
+#malist td { padding: 5px 6px; border-top: 1px solid #1c2030; font-size: 12px; color: #a3abcc;
+  vertical-align: middle; }
+#malist td.maid { font: 600 12.5px ui-monospace, monospace; color: #cbe0ff; }
+#malist td.mad { text-align: right; font: 12px ui-monospace, monospace; white-space: nowrap; }
+#malist td.maact { text-align: right; white-space: nowrap; }
+#malist button { padding: 3px 9px; font-size: 12px; margin-left: 6px; }
+#malist tr.bad td { color: #f38ba8; }
 .panel {
   background: #10131f; border: 1px solid #1c2030; border-radius: 12px; padding: 18px 20px;
   transition: border-color .15s;
@@ -239,6 +258,8 @@ kbd[data-k=" "].hit { background: #7f2a2a; border-color: #f38ba8; box-shadow: 0 
 #velTable td:first-child span { color: #6b7394; font-size: 11px; margin-left: 6px; font-family: system-ui, sans-serif; }
 #velTable td:nth-child(2) { text-align: right; color: #cbe0ff; font-weight: 600; }
 #velTable td.u { color: #6b7394; font-size: 12px; width: 40px; }
+#velTable tr.wheelstart td { border-top-color: #3a63a8; }
+#velTable tr.wheelrow td:nth-child(2) { color: #7ee2a8; }
 .pressed { margin-top: 12px; font-size: 12px; color: #6b7394; }
 .pressed span { color: #a6c8ff; font-family: ui-monospace, monospace; }
 

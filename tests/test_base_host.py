@@ -88,6 +88,40 @@ def test_solve_overspeed_scales_uniformly():
                             rel_tol=1e-6)
 
 
+def test_wheel_status_uses_signed_wire_order_and_integer_counts():
+    assert bh.wheel_status({7: 10.9, 8: -20.9, 9: 0.0}) == {
+        "7": 10,
+        "8": -20,
+        "9": 0,
+    }
+    assert bh.wheel_status({}) == {"7": 0, "8": 0, "9": 0}
+
+
+def test_arm_feedback_reads_one_joint_per_poll(monkeypatch):
+    reads = []
+
+    def fake_read(_ser, sid):
+        reads.append(sid)
+        return 1000 + sid
+
+    monkeypatch.setattr(bh, "read_pos", fake_read)
+    feedback = {sid: 0 for sid in bh.ARM_ORDER}
+    index = 0
+    for _ in range(len(bh.ARM_ORDER)):
+        index = bh.poll_arm_feedback(object(), feedback, index)
+
+    assert reads == list(bh.ARM_ORDER)
+    assert index == 0
+    assert feedback == {sid: 1000 + sid for sid in bh.ARM_ORDER}
+
+
+def test_arm_feedback_keeps_last_good_value_on_missed_reply(monkeypatch):
+    monkeypatch.setattr(bh, "read_pos", lambda _ser, _sid: None)
+    feedback = {sid: 2000 for sid in bh.ARM_ORDER}
+    assert bh.poll_arm_feedback(object(), feedback, 0) == 1
+    assert feedback == {sid: 2000 for sid in bh.ARM_ORDER}
+
+
 # ---- base_blocked: priority mux hold window (safety: pad mutes LLM) ------
 
 def test_base_blocked_hold_window():

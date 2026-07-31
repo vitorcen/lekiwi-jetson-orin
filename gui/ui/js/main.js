@@ -6,7 +6,7 @@ import { onEnterVision, onLeaveVision } from './vision.js';
 import { onEnterVoice, onLeaveVoice } from './voicelab.js';
 import { onEnterAgent, onLeaveAgent } from './agent.js';
 import { onEnterRos, onLeaveRos } from './ros.js';
-import './leader.js';
+import { onEnterLeader, onLeaveLeader } from './leader.js';
 import './log.js';
 import './health.js';
 
@@ -21,6 +21,10 @@ document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
   // Leaving the ZMQ tab must halt the base — a held key would otherwise keep
   // streaming velocity from an unfocused tab.
   if (prev === 'zmq' && S.page !== 'zmq') onLeaveZmq();
+  // Leader arm + motion actions live on the ZMQ page: refresh the board's
+  // action catalogue on enter, stop recording/playback on leave.
+  if (prev === 'zmq' && S.page !== 'zmq') onLeaveLeader();
+  if (S.page === 'zmq' && prev !== 'zmq') onEnterLeader();
   // Vision polling (and the daemon's watch state) is bound to tab visibility:
   // enter promotes to watch + starts polling, leave stands it back down.
   if (prev === 'vision' && S.page !== 'vision') onLeaveVision();

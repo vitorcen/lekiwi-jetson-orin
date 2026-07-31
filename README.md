@@ -10,7 +10,7 @@ LeKiwi 移动操作机器人(3 轮全向底盘 + SO-101 从臂,Feetech STS3215 �
 | 目录 | 内容 |
 |---|---|
 | `gui/` | Tauri 桌面控制台(键盘/主臂遥操作 + 视觉 + 语音 + ROS 2 感知预览 Tab) |
-| `board/` | 板端程序(1:1 镜像板子文件系统):base_host、手柄 daemon、总线诊断、systemd 单元 |
+| `board/` | 板端程序(1:1 镜像板子文件系统):base_host、动作录制/播放 `motion_actions/`、手柄 daemon、总线诊断、systemd 单元 |
 | `vlm/` | 视觉 daemon(:8090,前视+腕部双相机 + 本地 Qwen-VL 解读)+ 只读视觉 MCP |
 | `voice/` | 语音前端 daemon(:8092,5 档 VAD + 5 引擎 ASR(默认 Fun-ASR GPU)+ 3 引擎 TTS(默认 Matcha 离线)+ 打断) |
 | `drive/` | 受限控车 MCP(schema 硬钳位,语音/LLM 开车的唯一入口) |
@@ -81,6 +81,7 @@ flowchart TB
     GUIK["GUI 键盘/主臂 · prio 1"]
     ROSB["lekiwi_base_bridge /cmd_vel · prio 2"]:::plan
     MCPD["drive MCP(龙虾)· prio 3<br/>schema 硬钳位 0.15m/s·2s"]
+    ACT["录制动作 motion_action · prio 4<br/>base_host 内播放,不走 ZMQ"]
 
     MUX{"base_host 优先级 mux<br/>ZMQ PULL :5555 · 0.5s hold<br/>0.5s watchdog dead-man"}
     GATE["安全门:雷达净空限速/急停<br/>仲裁后 · 所有源生效"]:::plan
@@ -234,7 +235,7 @@ DeepSeek,眼睛(前视 + 爪腕双相机)和轮子通过 MCP 挂载。人格与�
 
 | 服务 | 作用 |
 |---|---|
-| `hermes-gateway-robot`(user) | Hermes 网关,API :8642,拉起 vlm/drive 两个 MCP 子进程 |
+| `hermes-gateway-robot`(user) | Hermes 网关,API :8642,拉起 vlm/drive/motion_actions 三个 MCP 子进程 |
 | `voice-daemon`(user) | 语音前端 :8092(GUI 语音 Tab 经 Tauri 代理访问) |
 | `vlm-daemon`(user) | 相机采集 + 本地 VLM 解读 :8090 |
 | `llama-server`(user) | 本地 Qwen-VL 推理后端 |
@@ -247,9 +248,43 @@ DeepSeek,眼睛(前视 + 爪腕双相机)和轮子通过 MCP 挂载。人格与�
   的前台网关(会连 Lark、阻塞终端),与机器人无关。
 - 改了 `vlm/`、`drive/` 的 MCP 源码后必须重启网关——MCP 是网关拉起的子进程。
 - MCP 挂载与模型配置:`~/.hermes/profiles/robot/config.yaml`。
-- 底盘指令有优先级仲裁(base_host 内):**手柄 > GUI 键盘 > 龙虾(MCP)**,
-  高优先级源活动的 0.5 s 内低优先级底盘帧直接丢弃;按住手柄急停可压制 LLM 开车。
-  无人值守运行仍 gate 在 base_host v2 仲裁器(未完成),当前为有人监督档。
+- 底盘指令有优先级仲裁(base_host 内):**手柄 > GUI 键盘 > ROS 闭环 > 龙虾(MCP)
+  > 录制动作**,高优先级源活动的 0.5 s 内低优先级底盘帧直接丢弃;按住手柄急停可
+  压制 LLM 开车。无人值守运行仍 gate 在 base_host v2 仲裁器(未完成),当前为有人监督档。
+
+## 动作录制与回放 Motion actions
+
+录一段机械臂/底盘动作存成一个 JSON 文件,之后龙虾用 MCP 按名字回放。**录制器和播放器
+都在 `base_host` 单进程主循环里**——它本来就是九电机的唯一执行者,所以「原子拿到底盘和
+机械臂两个 lease」是进程内一个 `if`,而不是跨进程的 check-then-act。GUI 与 MCP 都只是
+本机 Unix control socket(`/run/lekiwi/base_host.sock`,systemd `RuntimeDirectory=lekiwi`,
+0600)的**薄客户端**;动作帧永远不走 ZMQ。
+
+- **录什么**:机械臂存相对校准中位的 `dq[6]`,底盘存车体 `vx/vy/omega`(不是三轮 raw
+  speed),两轨共用同一时间原点。采的是**仲裁并限幅之后实际采用的目标**,所以键盘、
+  板载手柄和主臂跟随都会进同一个动作;watchdog 停车后采到的底盘目标就是零。
+- **在哪操作**:GUI ZeroMQ 页「主臂遥操作」面板底部——动作 ID / 范围(机械臂·底盘·全身)/
+  开始停止 / 预览草稿 / 保存 / 丢弃 / 动作列表 / 试播 / 可恢复删除 / 撤销。
+  草稿只在板端内存里,`base_host` 一重启就没了(GUI 会明说,不会干等)。
+- **存在哪**:`~/.local/share/lekiwi/motion-actions/<id>.json`,删除是原子改名进
+  `.trash/`(默认留 30 天,只有显式 `purge-trash` 会清)。文件名就是 `action_id`,没有
+  第二份注册表。运行数据不入 Git。
+- **LLM 侧**:四个固定工具 `motion_action_list / play / stop / status`,永不增减。
+  新录的动作**下一次 list 就能看到**——不改 YAML、不 reload MCP、不重启服务。
+  **没有删除工具**,提示注入删不掉用户录的动作。
+- **抢断**:`motion_action` 优先级最低(4)。手柄、键盘、主臂、GUI 或 ROS 闭环碰到被
+  lease 的域,整个动作立刻中止、底盘归零、另一轨也不续播,结果里 `by` 指名是谁抢的。
+  杀掉 MCP 进程 = socket 断 = 立即中止。
+
+板端 CLI(GUI 走 SSH 调的就是它,也可手工诊断):
+
+```bash
+ssh jetson@<board-ip> python3 /home/jetson/motion_actions/cli.py list
+ssh jetson@<board-ip> python3 /home/jetson/motion_actions/cli.py status
+ssh jetson@<board-ip> python3 /home/jetson/motion_actions/cli.py play yes   # 阻塞到播完
+```
+
+设计与评审结论见 `docs/arm-motion-actions-design.html`。
 
 ## 机械臂标定 Arm calibration(lerobot-calibrate)
 
